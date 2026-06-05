@@ -1,0 +1,12 @@
+[package]
+name = "exa-proto"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protoc-bin-vendored = "3.2.0"

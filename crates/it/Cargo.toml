@@ -1,0 +1,17 @@
+[package]
+name = "it"
+version = "0.1.1"
+edition = "2021"
+rust-version = "1.85"
+
+[features]
+integration = ["dep:testcontainers", "dep:rustls"]
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+exarrow-rs = { workspace = true }
+arrow = { workspace = true }
+testcontainers = { workspace = true, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"], optional = true }

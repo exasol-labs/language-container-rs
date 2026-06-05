@@ -1,0 +1,17 @@
+[package]
+name = "exa-udf-runtime"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+exa-proto = { path = "../exa-proto" }
+exa-zmq-protocol = { path = "../exa-zmq-protocol" }
+exasol-udf-sdk = { path = "../exasol-udf-sdk" }
+libloading = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+zmq = { workspace = true }
+prost = { workspace = true }

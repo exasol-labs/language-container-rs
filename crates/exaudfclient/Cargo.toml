@@ -1,0 +1,10 @@
+[package]
+name = "exaudfclient"
+version = "0.1.1"
+edition = "2021"
+
+[dependencies]
+exa-udf-runtime = { path = "../exa-udf-runtime" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
