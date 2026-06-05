@@ -78,9 +78,11 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_unimplemented ok");
 
-    // Connect-back scenarios last: a server-side bug in 2026.1.0 kills the main
-    // session when the UDF opens a WebSocket connect-back connection. These are
-    // expected to fail until the upstream bug is fixed.
+    // Connect-back scenarios last: a server-side SIGABRT bug in Exasol 2026.1.0
+    // kills the outer session whenever a UDF opens any connect-back connection
+    // (signal 6, confirmed transport- and address-independent; see decision [15]).
+    // These scenarios are expected to fail on 2026.1.0 until the upstream bug
+    // is patched.
     let cb_query_result =
         connect_back_udf_queries_and_emits(&mut conn, &cb_query_path, &harness).await;
     on_scenario_fail(&cb_query_result, "connect_back_query", &harness).await;
@@ -238,11 +240,12 @@ async fn connect_back_udf_queries_and_emits(
     udf_object: &str,
     harness: &Harness,
 ) -> Result<()> {
-    // Use the container's eth0 IP — 127.0.0.1 triggers a server-side SIGABRT
-    // in Exasol 2026.x when used as the connect-back address.
-    let inner_ip = harness.container_inner_ip().await?;
+    // Connect via the Docker host gateway + mapped port so the UDF opens an
+    // external-client session rather than connecting to the container's own IP,
+    // which triggers a server-side SIGABRT in Exasol 2026.
+    let cb_addr = harness.container_connect_back_address().await?;
     conn.execute(&format!(
-        "CREATE OR REPLACE CONNECTION CB_SELF TO '{inner_ip}:8563' \
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
          USER 'sys' IDENTIFIED BY 'exasol'"
     ))
     .await?;

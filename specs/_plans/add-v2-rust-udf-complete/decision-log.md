@@ -137,6 +137,23 @@ Date: 2026-06-05
 
 ### [14] ABI/fingerprint unchanged at 0.2.0
 
+- **Confirmed (2026-06-05):** `EXA_UDF_ABI_VERSION = 2` and `EXA_SDK_FINGERPRINT = "0.2.0:<rustc_hash>"` — neither constant was modified by the Group F connect-back fixes. The vtable layout did not change.
+
+### [15] Confirmed: connect-back SIGABRT is a server-side bug in Exasol 2026.1.0 (any transport, any address)
+
+- **Status:** Confirmed empirically on 2026-06-05. Supersedes the incorrect root cause in decision [8] regarding "wrong address."
+- **Evidence:**
+  - With native binary protocol + container inner IP (`172.17.x.x:8563`): outer session SIGABRTs when connect-back session starts.
+  - With native binary protocol + Docker host gateway + mapped port (external path): outer session SIGABRTs when connect-back session starts.
+  - With WebSocket protocol + Docker host gateway + mapped port: outer session SIGABRTs when connect-back session starts.
+  - docker logs confirm: `child 1913 (Part:40 Node:0 exasql) terminated with signal 6 (core dumped)` immediately after the connect-back session process (Part:44) is started by the DB.
+  - Pattern: the connect-back session creation (spawning a new exasql process) always triggers the SIGABRT on the outer session handler, regardless of transport or address.
+  - `2026.latest` tag does not exist in Docker Hub; `2026.1.0` is the only available 2026 image.
+- **Conclusion:** This is a server-side bug in Exasol `2026.1.0` where creating a new inbound SQL session while a UDF is executing causes the outer session handler to assert-abort. It is not caused by the address or protocol choice. V.6 cannot pass on `2026.1.0` until this is fixed server-side.
+- **Action:** V.6 remains open. All other Group I verification (V.1–V.5, 9.1, 9.3 via unit-level proxy) has passed. Decision [12] (native binary protocol) remains the correct choice; the SIGABRT is not transport-specific.
+
+### [14] ABI/fingerprint unchanged at 0.2.0
+
 - **Confirmed (2026-06-05):** `EXA_UDF_ABI_VERSION = 2` and `EXA_SDK_FINGERPRINT` (format `"SDK_VERSION:RUSTC_HASH\0"`) were NOT changed by the Group F work. Group F only modified `connect_back.rs` (fix DSN, remove debug instrumentation) and the `it/` integration harness (routable CB_SELF endpoint). Neither `abi.rs` nor the vtable layout was touched. The version bump to `0.2.0` is a Cargo package version change only and does not alter the ABI version or fingerprint baked into compiled `.so` artifacts.
 
 ## Review Findings

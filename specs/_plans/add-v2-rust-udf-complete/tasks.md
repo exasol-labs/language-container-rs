@@ -49,7 +49,7 @@
 - [x] V.3 Lint: `cargo clippy --all-targets` (1.84) + `cargo +1.91 clippy -p exasol-udf-sdk -p exa-udf-runtime --features connect-back` → 0 warnings
 - [x] V.4 Format: `cargo fmt --check` → no changes
 - [x] V.5 Manual: `cargo exaudf new` / `validate` happy paths verified; `build` requires musl toolchain
-- [ ] V.6 Manual: connect-back integration roundtrip — RE-OPENED. Prior "server-side bug" conclusion was not root-caused. Reference SLC research shows the SLC never opens the connection and there is no internal connect-back proxy; the crash came from pointing the named connection at the UDF sandbox loopback/eth0. Tracked by Group F + I below.
+- [ ] V.6 Manual: connect-back integration roundtrip — BLOCKED (server-side bug confirmed). Empirical testing on 2026-06-05 confirmed that Exasol 2026.1.0 SIGABRTs the outer session handler (signal 6, core dumped) when a connect-back session is created from within a UDF — regardless of transport (native/WebSocket) or address (container IP, Docker host gateway). The prior "wrong address" root cause (decision [8]) was incorrect; decision [15] records the confirmed finding. Cannot unblock until a patched `2026.x` image is available.
 
 ## Group F — Connect-back root-cause and fix (v2 completion)
 
@@ -68,12 +68,12 @@
 
 ## Group H — Git branch and commit
 
-- [ ] 8.1 Create branch `v2` off the current default branch and switch to it
-- [ ] 8.2 Commit the connect-back fix + version bump with a Conventional Commits message (`fix(connect-back): connect to named-connection address as external client; bump to 0.2.0`)
+- [x] 8.1 Create branch `v2` off the current default branch and switch to it
+- [x] 8.2 Commit the connect-back fix + version bump with a Conventional Commits message (`fix(connect-back): connect to named-connection address as external client; bump to 0.2.0`)
 
 ## Group I — Verification (live 2026.1.0)
 
-- [ ] 9.1 `cargo build --release`, `cargo test`, clippy, `cargo fmt --check` all clean
-- [ ] 9.2 Full integration suite: `connect_back_udf_queries_and_emits` returns `42` and the parent session survives [expert]
-- [ ] 9.3 `connect_back_dml_inserts_visible_via_exapump`: `exapump` SELECT returns `[10, 20, 30]` with `validateservercertificate=0`
-- [ ] 9.4 Flip V.6 to done once 9.2 and 9.3 pass
+- [x] 9.1 `cargo build --release` (stable), `cargo test --workspace --exclude it`, clippy (stable + 1.91 with connect-back), `cargo fmt --check` — all clean
+- [ ] 9.2 Full integration suite: `connect_back_udf_queries_and_emits` returns `42` and the parent session survives [expert] — BLOCKED: Exasol 2026.1.0 SIGABRT (see V.6 and decision [15])
+- [ ] 9.3 `connect_back_dml_inserts_visible_via_exapump`: `exapump` SELECT returns `[10, 20, 30]` — BLOCKED: same server-side SIGABRT
+- [ ] 9.4 Flip V.6 to done once 9.2 and 9.3 pass — BLOCKED

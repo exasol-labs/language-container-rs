@@ -167,8 +167,6 @@ impl Harness {
     }
 
     /// Return the container's primary eth0 IP address (e.g. `172.17.0.3`).
-    /// Use this for connect-back connections from UDFs — `127.0.0.1` triggers
-    /// a server-side SIGABRT in Exasol 2026 when used as the connect-back address.
     pub async fn container_inner_ip(&self) -> Result<String> {
         let script = "ip addr show eth0 | awk '/inet /{print $2}' | cut -d/ -f1 | head -1";
         let mut result = self
@@ -182,6 +180,28 @@ impl Harness {
             anyhow::bail!("could not determine container eth0 IP");
         }
         Ok(ip)
+    }
+
+    /// Return the connect-back address for UDFs: the Docker bridge gateway IP combined
+    /// with the host-mapped DB port (e.g. `172.17.0.1:32768`).
+    ///
+    /// UDFs run inside the container. Pointing `CB_SELF` at the container's own eth0
+    /// or loopback triggers a server-side SIGABRT in Exasol 2026. The correct address
+    /// is the Docker host gateway reachable from within the container; connecting through
+    /// the host port-mapping treats the connect-back as an external client session.
+    pub async fn container_connect_back_address(&self) -> Result<String> {
+        let script = "ip route show default | awk '/default/ {print $3}' | head -1";
+        let mut result = self
+            ._container
+            .exec(ExecCommand::new(["bash", "-c", script]))
+            .await
+            .context("exec container_connect_back_address")?;
+        let bytes = result.stdout_to_vec().await?;
+        let gateway = String::from_utf8_lossy(&bytes).trim().to_string();
+        if gateway.is_empty() {
+            anyhow::bail!("could not determine container default gateway");
+        }
+        Ok(format!("{}:{}", gateway, self.db_port))
     }
 
     /// Read UDF client diagnostic logs from inside the container and return them as a string.

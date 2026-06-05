@@ -58,14 +58,29 @@ impl ExaConnection for RuntimeExaConnection {
 /// transport (the DB hands the UDF a trusted internal address).
 pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, UdfError> {
     let dsn = build_dsn(conn_info);
-    let driver = Driver::new();
-    let db = driver
-        .open(&dsn)
-        .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-    let inner = connect_back_rt()
-        .block_on(db.connect())
-        .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-    Ok(RuntimeExaConnection { inner })
+    // Wrap in catch_unwind: panics in exarrow-rs/tokio/aws-lc-rs must not
+    // cross the FFI boundary into exaudfclient (undefined behaviour).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let driver = Driver::new();
+        let db = driver
+            .open(&dsn)
+            .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+        connect_back_rt()
+            .block_on(db.connect())
+            .map_err(|e| UdfError::ConnectBack(e.to_string()))
+    }));
+    match result {
+        Ok(Ok(inner)) => Ok(RuntimeExaConnection { inner }),
+        Ok(Err(e)) => Err(e),
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown panic payload");
+            Err(UdfError::ConnectBack(format!("panic: {msg}")))
+        }
+    }
 }
 
 /// Build the native-protocol exarrow-rs DSN from the named-connection credentials.

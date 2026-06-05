@@ -19,6 +19,7 @@ pub fn parse_udf_object_path(source: &str) -> Option<std::path::PathBuf> {
 ///
 /// Returns the first such name found, or `None` when no `%connection` is
 /// present. Used as `script_name` in the MT_IMPORT credential request.
+#[cfg(feature = "connect-back")]
 pub fn parse_connection_name(source: &str) -> Option<String> {
     for line in source.lines() {
         let trimmed = line.trim();
