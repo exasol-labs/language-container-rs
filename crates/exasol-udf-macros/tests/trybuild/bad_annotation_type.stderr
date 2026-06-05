@@ -1,0 +1,5 @@
+error: unknown ExaType for Vec
+ --> tests/trybuild/bad_annotation_type.rs:7:26
+  |
+7 | #[exasol_udf(input(blob: Vec<u8>), emits(result: i64))]
+  |                          ^^^^^^^

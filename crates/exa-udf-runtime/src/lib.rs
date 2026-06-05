@@ -1,9 +1,13 @@
 mod artifact;
 mod compiler;
+#[cfg(feature = "connect-back")]
+mod connect_back;
 mod dispatch;
 mod error;
 mod loader;
 mod rowset;
+mod schema_check;
+mod single_call;
 
 pub use artifact::parse_udf_object_path;
 pub use compiler::compile_jit;
@@ -16,6 +20,10 @@ use exa_zmq_protocol::{HostAction, HostEvent, Protocol, ProtocolError, UdfMeta, 
 /// UDF runtime error close code surfaced to the DB in the `F-UDF-CL-RUST-####`
 /// close message.
 const UDF_ERROR_CLOSE_CODE: u32 = 9001;
+
+/// Close code surfaced when the UDF's annotated schema does not match the
+/// column metadata the database sent during the handshake.
+const SCHEMA_MISMATCH_CLOSE_CODE: u32 = 1001;
 
 /// The host runtime: connects to the DB's ZMQ endpoint, performs the handshake,
 /// resolves and loads the precompiled UDF `.so`, and drives dispatch.
@@ -60,7 +68,22 @@ impl Runtime {
         let udf = LoadedUdf::open(&so_path)?;
         tracing::debug!("udf loaded; entering run loop");
 
-        let result = dispatch::run_udf(&transport, &mut proto, &udf, &meta);
+        // Validate the UDF's annotated schema (if any) against the metadata the
+        // DB sent before doing any work. A mismatch closes the session with a
+        // dedicated F-UDF-CL-RUST-#### code so the user sees the exact column
+        // discrepancy rather than a runtime decode failure mid-stream.
+        if let Err(e) = schema_check::validate_schema(&udf, &meta) {
+            let req = proto.error_close_request(SCHEMA_MISMATCH_CLOSE_CODE, &e.to_string());
+            let _ = transport.send(&req);
+            unsafe { udf.destroy() };
+            return Err(e);
+        }
+
+        let result = if meta.single_call_mode {
+            single_call::run_single_call(&transport, &mut proto, &udf, &meta)
+        } else {
+            dispatch::run_udf(&transport, &mut proto, &udf, &meta)
+        };
         tracing::debug!(ok = result.is_ok(), "run loop finished");
 
         match result {
@@ -84,6 +107,9 @@ impl Runtime {
         transport: &ZmqTransport,
         proto: &mut Protocol,
     ) -> Result<UdfMeta, RuntimeError> {
+        // Connect-back credentials may arrive (via MT_IMPORT) before the
+        // MT_META that ends the handshake; buffer them and attach to the meta.
+        let mut conn_info = None;
         loop {
             let resp = transport.recv()?;
             let (event, action) = proto.step(resp)?;
@@ -93,7 +119,11 @@ impl Runtime {
                 _ => {}
             }
             match event {
-                HostEvent::Meta(m) => return Ok(m),
+                HostEvent::Meta(mut m) => {
+                    m.conn_info = conn_info.take();
+                    return Ok(m);
+                }
+                HostEvent::ConnInfo(ci) => conn_info = Some(ci),
                 HostEvent::Pending | HostEvent::Ping(_) => continue,
                 HostEvent::Close(msg) => {
                     return Err(RuntimeError::Protocol(ProtocolError::Protocol(

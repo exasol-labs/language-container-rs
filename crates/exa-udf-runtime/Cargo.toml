@@ -1,6 +1,6 @@
 [package]
 name = "exa-udf-runtime"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,14 @@ libloading = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+libc = { workspace = true }
+serde_json = { workspace = true }
+arrow = { workspace = true, optional = true }
+exarrow-rs = { workspace = true, optional = true, features = ["websocket"] }
+tokio = { workspace = true, optional = true }
+
+[features]
+connect-back = ["exasol-udf-sdk/connect-back", "dep:arrow", "dep:exarrow-rs", "dep:tokio"]
 
 [dev-dependencies]
 zmq = { workspace = true }

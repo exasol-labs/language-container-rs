@@ -15,6 +15,7 @@ pub struct Protocol {
     connection_id: u64,
     phase: Phase,
     pending_info: Option<exa_proto::ExascriptInfo>,
+    single_call_mode: bool,
 }
 
 impl Default for Protocol {
@@ -29,6 +30,7 @@ impl Protocol {
             connection_id: 0,
             phase: Phase::Handshake,
             pending_info: None,
+            single_call_mode: false,
         }
     }
 
@@ -58,6 +60,7 @@ impl Protocol {
                     .take()
                     .ok_or_else(|| ProtocolError::Protocol("MT_META before MT_INFO".into()))?;
                 let meta = UdfMeta::from_pb(&meta_pb, &info)?;
+                self.single_call_mode = meta.single_call_mode;
                 self.phase = Phase::Run;
                 Ok((HostEvent::Meta(meta), None))
             }
@@ -77,6 +80,44 @@ impl Protocol {
             // MT_CLEANUP.
             (MessageType::MtDone, Phase::Run) => Ok((HostEvent::Done, None)),
             (MessageType::MtReset, Phase::Run) => Ok((HostEvent::Reset, None)),
+
+            // MT_CALL is only valid in single-call mode.
+            (MessageType::MtCall, Phase::Run) if self.single_call_mode => {
+                let call = resp
+                    .call
+                    .ok_or_else(|| ProtocolError::Protocol("MT_CALL missing call field".into()))?;
+                let fn_id = exa_proto::SingleCallFunctionId::try_from(call.r#fn)
+                    .unwrap_or(exa_proto::SingleCallFunctionId::ScFnNil);
+                Ok((
+                    HostEvent::SingleCall {
+                        fn_id,
+                        json_arg: call.json_arg,
+                        import_spec: call.import_specification,
+                        export_spec: call.export_specification,
+                    },
+                    None,
+                ))
+            }
+            (MessageType::MtCall, _) => Err(ProtocolError::UnexpectedMessage(
+                resp.r#type,
+                self.phase_name(),
+            )),
+
+            // MT_IMPORT carries connection credentials.
+            (MessageType::MtImport, _) => {
+                let import = resp.import.ok_or_else(|| {
+                    ProtocolError::Protocol("MT_IMPORT missing import field".into())
+                })?;
+                let conn_pb = import.connection_information.ok_or_else(|| {
+                    ProtocolError::Protocol(
+                        "MT_IMPORT response missing connection_information".into(),
+                    )
+                })?;
+                Ok((
+                    HostEvent::ConnInfo(crate::meta::ConnInfo::from_pb(conn_pb)),
+                    None,
+                ))
+            }
 
             (MessageType::MtCleanup, _) => {
                 self.phase = Phase::Cleanup;
@@ -210,6 +251,40 @@ impl Protocol {
     pub fn error_close_request(&self, code: u32, message: &str) -> ExascriptRequest {
         let full_msg = format!("F-UDF-CL-RUST-{:04}: {}", code, message);
         self.close_request(Some(full_msg))
+    }
+
+    /// Build an MT_RETURN request carrying the result of a single-call invocation.
+    pub fn return_request(&self, result: String) -> ExascriptRequest {
+        ExascriptRequest {
+            call_result: Some(exa_proto::ExascriptReturnReq { result }),
+            ..self.base_request(MessageType::MtReturn)
+        }
+    }
+
+    /// Build an MT_UNDEFINED_CALL request telling the DB the function is not available.
+    pub fn undefined_call_request(&self, remote_fn: &str) -> ExascriptRequest {
+        ExascriptRequest {
+            undefined_call: Some(exa_proto::ExascriptUndefinedCallReq {
+                remote_fn: remote_fn.to_string(),
+            }),
+            ..self.base_request(MessageType::MtUndefinedCall)
+        }
+    }
+
+    /// Build an MT_IMPORT request asking for connection credentials.
+    ///
+    /// The DB replies with an MT_IMPORT response carrying
+    /// `connection_information`. Pass an empty `script_name` when requesting
+    /// the default connect-back credentials (the DB ignores the field for
+    /// `PB_IMPORT_CONNECTION_INFORMATION` requests).
+    pub fn import_connection_request(&self, script_name: &str) -> ExascriptRequest {
+        ExascriptRequest {
+            import: Some(exa_proto::ExascriptImportReq {
+                script_name: script_name.to_string(),
+                kind: Some(exa_proto::ImportType::PbImportConnectionInformation as i32),
+            }),
+            ..self.base_request(MessageType::MtImport)
+        }
     }
 }
 

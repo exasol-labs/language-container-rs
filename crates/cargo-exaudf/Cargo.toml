@@ -1,8 +1,15 @@
 [package]
 name = "cargo-exaudf"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
 name = "cargo-exaudf"
 path = "src/main.rs"
+
+[dependencies]
+libloading = { workspace = true }
+exasol-udf-sdk = { path = "../exasol-udf-sdk" }
+
+[dev-dependencies]
+tempfile = "=3.14.0"

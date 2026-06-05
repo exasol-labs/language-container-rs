@@ -40,5 +40,5 @@
   "stack-probes": {"kind": "inline"},
   "static-position-independent-executables": true,
   "target-family": ["unix"],
-  "target-pointer-width": "64"
+  "target-pointer-width": 64
 }

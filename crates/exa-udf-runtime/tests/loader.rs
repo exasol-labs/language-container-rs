@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use exa_udf_runtime::{LoadedUdf, RuntimeError};
+use exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION;
 
 /// Compile `source` as a cdylib into `out_dir/<name>.so` and return the path.
 fn compile_fixture(out_dir: &Path, name: &str, source: &str) -> PathBuf {
@@ -73,7 +74,7 @@ fn loader_rejects_abi_mismatch() {
 
     match LoadedUdf::open(&so) {
         Err(RuntimeError::AbiMismatch { expected, found }) => {
-            assert_eq!(expected, 1);
+            assert_eq!(expected, EXA_UDF_ABI_VERSION);
             assert_eq!(found, 99);
         }
         Err(other) => panic!("expected AbiMismatch, got {other:?}"),
@@ -84,9 +85,9 @@ fn loader_rejects_abi_mismatch() {
 #[test]
 fn loader_rejects_fingerprint_mismatch() {
     let dir = tempdir();
-    // Correct abi_version (1) so the loader proceeds to the fingerprint check,
-    // but a deliberately wrong fingerprint body.
-    let src = fixture_source(1, "0.0.0:definitely-not-the-host\\0");
+    // Correct abi_version so the loader proceeds to the fingerprint check, but
+    // a deliberately wrong fingerprint body.
+    let src = fixture_source(EXA_UDF_ABI_VERSION, "0.0.0:definitely-not-the-host\\0");
     let so = compile_fixture(dir.path(), "fp_mismatch", &src);
 
     match LoadedUdf::open(&so) {

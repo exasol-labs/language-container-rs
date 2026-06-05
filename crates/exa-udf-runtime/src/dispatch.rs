@@ -23,6 +23,11 @@ pub fn run_udf(
     udf: &LoadedUdf,
     meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
+    // Seed conn_info from the handshake; the run phase may update it when the
+    // DB sends MT_IMPORT (ConnInfo) in reply to MT_NEXT.
+    #[cfg(feature = "connect-back")]
+    let mut conn_info: Option<exa_zmq_protocol::ConnInfo> = meta.conn_info.clone();
+
     loop {
         match request(transport, proto, proto.run_request())? {
             HostEvent::Run => {}
@@ -32,7 +37,14 @@ pub fn run_udf(
             _ => {}
         }
 
-        if let Some(early) = consume_input(transport, proto, udf, meta)? {
+        if let Some(early) = consume_input(
+            transport,
+            proto,
+            udf,
+            meta,
+            #[cfg(feature = "connect-back")]
+            &mut conn_info,
+        )? {
             return early;
         }
 
@@ -57,11 +69,22 @@ fn consume_input(
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
+    #[cfg(feature = "connect-back")] conn_info: &mut Option<exa_zmq_protocol::ConnInfo>,
 ) -> Result<Option<Result<(), RuntimeError>>, RuntimeError> {
     loop {
         match request(transport, proto, proto.next_request())? {
             HostEvent::NextData(table) => {
-                let emitted = run_batch(udf, &table, meta)?;
+                let emitted = run_batch(
+                    #[cfg(feature = "connect-back")]
+                    transport,
+                    #[cfg(feature = "connect-back")]
+                    proto,
+                    udf,
+                    &table,
+                    meta,
+                    #[cfg(feature = "connect-back")]
+                    conn_info.clone(),
+                )?;
                 if !emitted.is_empty() {
                     let out = emitted.to_proto(&meta.output_columns);
                     request(transport, proto, proto.emit_request(out))?;
@@ -77,7 +100,12 @@ fn consume_input(
             | HostEvent::Finished
             | HostEvent::Meta(_)
             | HostEvent::Pending
-            | HostEvent::Ping(_) => {}
+            | HostEvent::Ping(_)
+            | HostEvent::SingleCall { .. } => {}
+            #[cfg(feature = "connect-back")]
+            HostEvent::ConnInfo(ci) => *conn_info = Some(ci),
+            #[cfg(not(feature = "connect-back"))]
+            HostEvent::ConnInfo(_) => {}
         }
     }
 }
@@ -109,15 +137,64 @@ fn request(
 ///
 /// The bridge and its borrows are confined to this function so the raw
 /// double-indirection context pointer cannot outlive the live references.
+///
+/// When the `connect-back` feature is enabled, `transport` and `proto` are
+/// used to build an on-demand MT_IMPORT closure passed to the bridge. The
+/// closure is only invoked if the UDF calls `exa()` and no proactive
+/// `conn_info` was available. The outer dispatch loop is blocked waiting for
+/// this function to return, so the ZMQ socket is idle during UDF execution and
+/// the MT_IMPORT exchange is safe to perform here.
 fn run_batch(
+    #[cfg(feature = "connect-back")] transport: &ZmqTransport,
+    #[cfg(feature = "connect-back")] proto: &mut Protocol,
     udf: &LoadedUdf,
     table: &exa_proto::ExascriptTableData,
     meta: &UdfMeta,
+    #[cfg(feature = "connect-back")] conn_info: Option<exa_zmq_protocol::ConnInfo>,
 ) -> Result<EmitBuffer, RuntimeError> {
     let mut input = InputRowSet::from_proto(table, &meta.input_columns);
     let mut emit_buf = EmitBuffer::new();
     {
-        let mut bridge = HostContextBridge::new(&mut input, &mut emit_buf, &meta.input_columns);
+        // Connection name from `%connection <name>` directive in the script source.
+        // Used as the `script_name` in the on-demand MT_IMPORT credential request.
+        #[cfg(feature = "connect-back")]
+        let conn_name: String = crate::artifact::parse_connection_name(&meta.source_code)
+            .unwrap_or_default();
+
+        #[cfg(feature = "connect-back")]
+        let conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + '_>> =
+            if conn_info.is_none() {
+                Some(Box::new(move || {
+                    let req = proto.import_connection_request(&conn_name);
+                    transport
+                        .send(&req)
+                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                    let resp = transport
+                        .recv()
+                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                    let (event, _) = proto
+                        .step(resp)
+                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                    match event {
+                        exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
+                        _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                            "MT_IMPORT reply was not ConnInfo".into(),
+                        )),
+                    }
+                }))
+            } else {
+                None
+            };
+
+        let mut bridge = HostContextBridge::new(
+            &mut input,
+            &mut emit_buf,
+            &meta.input_columns,
+            #[cfg(feature = "connect-back")]
+            conn_info,
+            #[cfg(feature = "connect-back")]
+            conn_requester,
+        );
         // ABI contract: pass a pointer to a `&mut dyn UdfContext` (double
         // indirection). The run shim restores it via
         // `&mut *(ctx as *mut &mut dyn UdfContext)`.
@@ -125,9 +202,12 @@ fn run_batch(
         let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
         let rc = unsafe { udf.run(ctx_ptr) };
         if rc != 0 {
-            return Err(RuntimeError::Udf(format!(
-                "UDF run returned error code {rc}"
-            )));
+            let extra = bridge.take_last_error();
+            let msg = match extra {
+                Some(e) => format!("UDF run returned error code {rc}: {e}"),
+                None => format!("UDF run returned error code {rc}"),
+            };
+            return Err(RuntimeError::Udf(msg));
         }
     }
     Ok(emit_buf)

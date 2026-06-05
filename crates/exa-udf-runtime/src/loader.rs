@@ -85,4 +85,122 @@ impl LoadedUdf {
         let vtable = unsafe { &*self.vtable };
         unsafe { (vtable.destroy)() };
     }
+
+    /// The annotated input schema JSON embedded in the vtable, or `None` when
+    /// the UDF was not annotated with `input(...)`.
+    pub fn annotated_input_schema(&self) -> Option<&str> {
+        let vtable = unsafe { &*self.vtable };
+        c_str_opt(vtable.annotated_input_schema)
+    }
+
+    /// The annotated output schema JSON embedded in the vtable, or `None` when
+    /// the UDF was not annotated with `emits(...)`.
+    pub fn annotated_output_schema(&self) -> Option<&str> {
+        let vtable = unsafe { &*self.vtable };
+        c_str_opt(vtable.annotated_output_schema)
+    }
+
+    /// Call the `default_output_columns` single-call hook.
+    ///
+    /// Returns `None` when the UDF did not register the hook, otherwise the
+    /// hook's JSON result (or a [`RuntimeError`] on a non-zero return code).
+    ///
+    /// # Safety
+    ///
+    /// Only valid in single-call mode and only while the loaded `.so` is alive.
+    pub unsafe fn call_default_output_columns(&self) -> Option<Result<String, RuntimeError>> {
+        let vtable = unsafe { &*self.vtable };
+        let hook = vtable.default_output_columns?;
+        Some(unsafe { call_noarg_hook("default_output_columns", hook) })
+    }
+
+    /// Call the `virtual_schema_adapter_call` single-call hook with `json_arg`.
+    ///
+    /// # Safety
+    ///
+    /// See [`LoadedUdf::call_default_output_columns`].
+    pub unsafe fn call_virtual_schema_adapter_call(
+        &self,
+        json_arg: &str,
+    ) -> Option<Result<String, RuntimeError>> {
+        let vtable = unsafe { &*self.vtable };
+        let hook = vtable.virtual_schema_adapter_call?;
+        Some(unsafe { call_arg_hook("virtual_schema_adapter_call", json_arg, hook) })
+    }
+
+    /// Call the `generate_sql_for_import_spec` single-call hook.
+    ///
+    /// # Safety
+    ///
+    /// See [`LoadedUdf::call_default_output_columns`].
+    pub unsafe fn call_generate_sql_for_import_spec(
+        &self,
+        json_spec: &str,
+    ) -> Option<Result<String, RuntimeError>> {
+        let vtable = unsafe { &*self.vtable };
+        let hook = vtable.generate_sql_for_import_spec?;
+        Some(unsafe { call_arg_hook("generate_sql_for_import_spec", json_spec, hook) })
+    }
+
+    /// Call the `generate_sql_for_export_spec` single-call hook.
+    ///
+    /// # Safety
+    ///
+    /// See [`LoadedUdf::call_default_output_columns`].
+    pub unsafe fn call_generate_sql_for_export_spec(
+        &self,
+        json_spec: &str,
+    ) -> Option<Result<String, RuntimeError>> {
+        let vtable = unsafe { &*self.vtable };
+        let hook = vtable.generate_sql_for_export_spec?;
+        Some(unsafe { call_arg_hook("generate_sql_for_export_spec", json_spec, hook) })
+    }
+}
+
+/// Convert a possibly-null `*const c_char` vtable field into a borrowed `&str`.
+fn c_str_opt<'a>(ptr: *const std::ffi::c_char) -> Option<&'a str> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().ok()
+}
+
+/// Drive a no-argument single-call hook: invoke it, check the return code, and
+/// take ownership of the heap-allocated result string it wrote.
+unsafe fn call_noarg_hook(
+    name: &str,
+    hook: unsafe extern "C" fn(*mut *mut std::ffi::c_char) -> i32,
+) -> Result<String, RuntimeError> {
+    let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rc = unsafe { hook(&mut out) };
+    if rc != 0 {
+        if !out.is_null() {
+            unsafe { libc::free(out as *mut libc::c_void) };
+        }
+        return Err(RuntimeError::Udf(format!(
+            "single-call hook {name} returned error code {rc}"
+        )));
+    }
+    Ok(unsafe { crate::single_call::take_c_string(out) })
+}
+
+/// Drive a single-argument single-call hook over a NUL-terminated JSON string.
+unsafe fn call_arg_hook(
+    name: &str,
+    arg: &str,
+    hook: unsafe extern "C" fn(*const std::ffi::c_char, *mut *mut std::ffi::c_char) -> i32,
+) -> Result<String, RuntimeError> {
+    let c_arg = std::ffi::CString::new(arg)
+        .map_err(|_| RuntimeError::Udf(format!("{name}: argument contains interior NUL")))?;
+    let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rc = unsafe { hook(c_arg.as_ptr(), &mut out) };
+    if rc != 0 {
+        if !out.is_null() {
+            unsafe { libc::free(out as *mut libc::c_void) };
+        }
+        return Err(RuntimeError::Udf(format!(
+            "single-call hook {name} returned error code {rc}"
+        )));
+    }
+    Ok(unsafe { crate::single_call::take_c_string(out) })
 }

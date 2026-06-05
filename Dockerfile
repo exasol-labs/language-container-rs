@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM rust:1.84-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libzmq3-dev \
@@ -21,6 +21,10 @@ COPY --from=exarrow-rs . /exarrow-rs/
 
 # Rewrite the [patch.crates-io] path to the container-local location
 RUN sed -i 's|path = "/home/talos/code/exarrow-rs"|path = "/exarrow-rs"|g' Cargo.toml
+
+# arrow v58 (edition2024) requires Cargo >= 1.85; drop the workspace toolchain
+# pin so the image's own toolchain (1.91) is used rather than the pinned 1.84.
+RUN rm rust-toolchain.toml
 
 # Build the exaudfclient binary
 RUN cargo build --release -p exaudfclient

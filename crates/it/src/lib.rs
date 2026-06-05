@@ -160,6 +160,64 @@ impl Harness {
         self.upload_to_bucketfs(&path, so_bytes).await?;
         Ok(format!("/buckets/{BFS_SERVICE}/{BUCKET}/{path}"))
     }
+
+    /// Return the Docker container ID for out-of-process inspection.
+    pub fn container_id(&self) -> &str {
+        self._container.id()
+    }
+
+    /// Return the container's primary eth0 IP address (e.g. `172.17.0.3`).
+    /// Use this for connect-back connections from UDFs — `127.0.0.1` triggers
+    /// a server-side SIGABRT in Exasol 2026 when used as the connect-back address.
+    pub async fn container_inner_ip(&self) -> Result<String> {
+        let script = "ip addr show eth0 | awk '/inet /{print $2}' | cut -d/ -f1 | head -1";
+        let mut result = self
+            ._container
+            .exec(ExecCommand::new(["bash", "-c", script]))
+            .await
+            .context("exec container_inner_ip")?;
+        let bytes = result.stdout_to_vec().await?;
+        let ip = String::from_utf8_lossy(&bytes).trim().to_string();
+        if ip.is_empty() {
+            anyhow::bail!("could not determine container eth0 IP");
+        }
+        Ok(ip)
+    }
+
+    /// Read UDF client diagnostic logs from inside the container and return them as a string.
+    ///
+    /// exaudfclient writes `udf_diag.log` next to its own binary (inside the BucketFS-extracted
+    /// SLC). On failure it falls back to stderr, which is captured in the Docker container log.
+    pub async fn dump_udf_logs(&self) -> String {
+        // Search broadly: next to the binary (BucketFS path) and any fallback location.
+        let script = concat!(
+            "echo '=== /tmp/cb_debug.txt ==='; cat /tmp/cb_debug.txt 2>/dev/null || echo '(not found)';",
+            " echo '=== udf_diag.log search ===';",
+            " find /buckets /exa/logs /tmp -name 'udf_diag.log' -o -name 'UDFClientDiag*'",
+            " 2>/dev/null | sort | tail -10 | xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}' 2>/dev/null"
+        );
+        match self
+            ._container
+            .exec(ExecCommand::new(["bash", "-c", script]))
+            .await
+        {
+            Ok(mut result) => {
+                let stdout = result.stdout_to_vec().await.unwrap_or_default();
+                let stderr = result.stderr_to_vec().await.unwrap_or_default();
+                let mut out = String::from_utf8_lossy(&stdout).into_owned();
+                if !stderr.is_empty() {
+                    out.push_str("\n[exec stderr]: ");
+                    out.push_str(&String::from_utf8_lossy(&stderr));
+                }
+                if out.trim().is_empty() {
+                    "(no UDF diagnostic log found in /buckets, /exa/logs, or /tmp)".to_string()
+                } else {
+                    out
+                }
+            }
+            Err(e) => format!("(exec failed: {e})"),
+        }
+    }
 }
 
 /// A registered language-container reference, used to build the SCRIPT_LANGUAGES

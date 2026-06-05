@@ -143,3 +143,72 @@ fn scalar_dispatch_full_protocol() {
     let result = client.join().expect("client thread panicked");
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
+
+fn annotated_so_path() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.pop();
+    p.push("target/debug/libannotated_fixture.so");
+    p
+}
+
+#[test]
+fn annotated_schema_mismatch_closes_session() {
+    let so = annotated_so_path();
+    assert!(so.exists(), "build libannotated_fixture.so first: {:?}", so);
+
+    let endpoint = format!("ipc:///tmp/exa-mockdb-schema-{}.ipc", std::process::id());
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let conn_id = 9u64;
+    let source = format!("%udf_object {}", so.display());
+
+    let ep = endpoint.clone();
+    let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run());
+
+    // Handshake.
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtClient as i32);
+    let mut info = response(MessageType::MtInfo, conn_id);
+    info.info = Some(ExascriptInfo {
+        source_code: source,
+        script_name: "annotated".into(),
+        ..Default::default()
+    });
+    send_resp(&server, &info);
+
+    // The fixture annotates input column `x`, but the DB advertises `wrong`.
+    // The runtime must reject the session at load time, before any MT_RUN.
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtMeta as i32);
+    let mut meta = response(MessageType::MtMeta, conn_id);
+    meta.meta = Some(ExascriptMetadata {
+        input_iter_type: IterType::PbExactlyOnce as i32,
+        output_iter_type: IterType::PbExactlyOnce as i32,
+        input_columns: vec![int64_col("wrong")],
+        output_columns: vec![int64_col("y")],
+        single_call_mode: false,
+    });
+    send_resp(&server, &meta);
+
+    // The next message must be MT_CLOSE carrying the schema-mismatch code.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "schema mismatch must close the session, not start the run loop"
+    );
+    let msg = req
+        .close
+        .and_then(|c| c.exception_message)
+        .expect("close carries an exception message");
+    assert!(
+        msg.starts_with("F-UDF-CL-RUST-1001"),
+        "close message must carry the schema-mismatch code, got: {msg}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_err(), "runtime must surface the schema mismatch");
+}

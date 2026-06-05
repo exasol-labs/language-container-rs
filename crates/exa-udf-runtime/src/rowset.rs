@@ -276,6 +276,24 @@ pub struct HostContextBridge<'a> {
     emit_buf: &'a mut EmitBuffer,
     input_cols: &'a [ColumnMeta],
     started: bool,
+    /// Last error captured from a UDF context method (e.g. `exa()`). Surfaced
+    /// through `RuntimeError::Udf` so the full error appears in the SQL error.
+    last_error: Option<String>,
+    /// The lazily-opened default connect-back connection, cached for the life of
+    /// the batch so repeated `exa()` calls reuse the same session.
+    #[cfg(feature = "connect-back")]
+    conn: Option<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>>,
+    /// Credentials surfaced during the handshake or a prior run-phase
+    /// MT_IMPORT. Used to open `conn` on first `exa()` without sending a new
+    /// request. `None` when no proactive credentials were received.
+    #[cfg(feature = "connect-back")]
+    conn_info: Option<exa_zmq_protocol::ConnInfo>,
+    /// On-demand credential fetcher: called when `conn_info` is `None` and the
+    /// UDF invokes `exa()`. Sends MT_IMPORT to the DB and returns the resulting
+    /// `ConnInfo`. `FnOnce` because a single exchange is enough — the returned
+    /// `ConnInfo` is used to open `conn`, which is cached for the batch.
+    #[cfg(feature = "connect-back")]
+    conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>>,
 }
 
 impl<'a> HostContextBridge<'a> {
@@ -283,12 +301,66 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
+        #[cfg(feature = "connect-back")] conn_info: Option<exa_zmq_protocol::ConnInfo>,
+        #[cfg(feature = "connect-back")] conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>>,
     ) -> Self {
         HostContextBridge {
             input,
             emit_buf,
             input_cols,
             started: false,
+            last_error: None,
+            #[cfg(feature = "connect-back")]
+            conn: None,
+            #[cfg(feature = "connect-back")]
+            conn_info,
+            #[cfg(feature = "connect-back")]
+            conn_requester,
+        }
+    }
+
+    /// Take the last error message captured from a UDF context method.
+    pub fn take_last_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
+
+    /// Open the default connect-back connection. Tries proactively-received
+    /// credentials first; falls back to an on-demand MT_IMPORT exchange.
+    #[cfg(feature = "connect-back")]
+    fn open_default_connection(&mut self) -> Result<(), exasol_udf_sdk::error::UdfError> {
+        let info = if let Some(ci) = self.conn_info.take() {
+            ci
+        } else {
+            let fetcher = self.conn_requester.take().ok_or_else(|| {
+                exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no connection credentials available".into(),
+                )
+            })?;
+            fetcher()?
+        };
+        self.conn = Some(Box::new(crate::connect_back::open_connection(&info)?));
+        Ok(())
+    }
+
+    /// Inject a ready-made connection so the bridge can be exercised without a
+    /// live database. Intended for tests.
+    #[cfg(feature = "connect-back")]
+    #[doc(hidden)]
+    pub fn with_connection(
+        input: &'a mut InputRowSet,
+        emit_buf: &'a mut EmitBuffer,
+        input_cols: &'a [ColumnMeta],
+        conn: Box<dyn exasol_udf_sdk::connect_back::ExaConnection>,
+    ) -> Self {
+        HostContextBridge {
+            input,
+            emit_buf,
+            input_cols,
+            started: false,
+            last_error: None,
+            conn: Some(conn),
+            conn_info: None,
+            conn_requester: None,
         }
     }
 }
@@ -320,6 +392,18 @@ impl UdfContext for HostContextBridge<'_> {
         }
         Ok(self.input.advance())
     }
+
+    #[cfg(feature = "connect-back")]
+    fn exa(&mut self) -> Result<&mut dyn exasol_udf_sdk::connect_back::ExaConnection, UdfError> {
+        if self.conn.is_none() {
+            let result = self.open_default_connection();
+            if let Err(ref e) = result {
+                self.last_error = Some(e.to_string());
+            }
+            result?;
+        }
+        Ok(self.conn.as_deref_mut().expect("connection just opened"))
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +419,24 @@ mod tests {
             precision: None,
             scale: None,
         }
+    }
+
+    /// Construct a bridge for the tests, supplying the connect-back arg only
+    /// when the feature is enabled so the same call sites compile either way.
+    fn make_bridge<'a>(
+        input: &'a mut InputRowSet,
+        emit: &'a mut EmitBuffer,
+        cols: &'a [ColumnMeta],
+    ) -> HostContextBridge<'a> {
+        HostContextBridge::new(
+            input,
+            emit,
+            cols,
+            #[cfg(feature = "connect-back")]
+            None,
+            #[cfg(feature = "connect-back")]
+            None,
+        )
     }
 
     /// One batch, 2 rows, mixed types with a NULL cell. Verifies dense per-type
@@ -398,7 +500,7 @@ mod tests {
         let (table, meta) = mixed_batch();
         let mut rs = InputRowSet::from_proto(&table, &meta);
         let mut emit = EmitBuffer::new();
-        let mut bridge = HostContextBridge::new(&mut rs, &mut emit, &meta);
+        let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
 
         assert!(bridge.next().unwrap());
         assert_eq!(bridge.num_columns(), 4);
@@ -469,7 +571,7 @@ mod tests {
         };
         let mut rs = InputRowSet::from_proto(&table, &meta);
         let mut emit = EmitBuffer::new();
-        let mut bridge = HostContextBridge::new(&mut rs, &mut emit, &meta);
+        let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
         assert!(!bridge.next().unwrap());
     }
 }

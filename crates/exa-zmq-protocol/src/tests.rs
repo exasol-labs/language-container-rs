@@ -281,3 +281,32 @@ fn udf_meta_to_pb_round_trips_columns() {
     assert_eq!(pb.input_columns[0].r#type(), ColumnType::PbInt64);
     assert_eq!(pb.input_iter_type(), PbIterType::PbExactlyOnce);
 }
+
+#[test]
+fn import_connection_request_sets_type_and_kind() {
+    use exa_proto::{ImportType, MessageType};
+    let mut proto = Protocol::new();
+    // Advance past handshake so connection_id is set.
+    run_handshake(&mut proto);
+
+    let req = proto.import_connection_request("");
+    assert_eq!(req.r#type, MessageType::MtImport as i32);
+    let import = req.import.expect("import field must be set");
+    assert_eq!(import.script_name, "");
+    assert_eq!(
+        import.kind,
+        Some(ImportType::PbImportConnectionInformation as i32)
+    );
+}
+
+#[test]
+fn import_connection_request_passes_script_name() {
+    use exa_proto::MessageType;
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto);
+
+    let req = proto.import_connection_request("MY_SCRIPT");
+    assert_eq!(req.r#type, MessageType::MtImport as i32);
+    let import = req.import.expect("import field must be set");
+    assert_eq!(import.script_name, "MY_SCRIPT");
+}

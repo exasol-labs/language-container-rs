@@ -8,4 +8,6 @@ pub enum UdfError {
     Unimplemented(String),
     #[error("Type error: {0}")]
     Type(String),
+    #[error("Connect-back error: {0}")]
+    ConnectBack(String),
 }

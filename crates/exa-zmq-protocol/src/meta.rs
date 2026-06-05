@@ -42,6 +42,30 @@ pub struct UdfMeta {
     pub session_id: u64,
     pub node_id: u32,
     pub node_count: u32,
+    /// Connect-back credentials surfaced during the handshake, when the DB
+    /// provided them (via an `MT_IMPORT` connection-information exchange).
+    pub conn_info: Option<ConnInfo>,
+}
+
+/// Connection credentials returned by the DB in response to an MT_IMPORT
+/// request with `PB_IMPORT_CONNECTION_INFORMATION`.
+#[derive(Debug, Clone)]
+pub struct ConnInfo {
+    pub kind: String,
+    pub address: String,
+    pub user: String,
+    pub password: String,
+}
+
+impl ConnInfo {
+    pub(crate) fn from_pb(pb: exa_proto::ConnectionInformationRep) -> Self {
+        ConnInfo {
+            kind: pb.kind,
+            address: pb.address,
+            user: pb.user,
+            password: pb.password,
+        }
+    }
 }
 
 impl ColumnMeta {
@@ -121,6 +145,7 @@ impl UdfMeta {
             session_id: info.session_id,
             node_id: info.node_id,
             node_count: info.node_count,
+            conn_info: None,
         })
     }
 

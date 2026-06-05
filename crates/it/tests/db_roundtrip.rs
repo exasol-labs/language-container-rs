@@ -13,10 +13,14 @@
 use anyhow::{anyhow, bail, Result};
 use exarrow_rs::adbc::Connection;
 use it::{query_single_string, read_udf_artifact, register_slc, Harness};
+use std::time::Duration;
 
 const SCALAR_LIB: &str = "libscalar_double.so";
 const SET_LIB: &str = "libset_filter.so";
 const JSON_LIB: &str = "libjson_parse.so";
+const CB_QUERY_LIB: &str = "libconnect_back_query.so";
+const SC_LIB: &str = "libsingle_call_fixture.so";
+const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -48,6 +52,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let json_path = harness
         .upload_udf(JSON_LIB, read_udf_artifact(JSON_LIB)?)
         .await?;
+    let sc_path = harness
+        .upload_udf(SC_LIB, read_udf_artifact(SC_LIB)?)
+        .await?;
+    let cb_query_path = harness
+        .upload_udf(CB_QUERY_LIB, read_udf_artifact(CB_QUERY_LIB)?)
+        .await?;
+    let cb_insert_path = harness
+        .upload_udf(CB_INSERT_LIB, read_udf_artifact(CB_INSERT_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -58,8 +71,69 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     udf_error_surfaces_prefix(&mut conn).await?;
     eprintln!("[it] scenario udf_error ok");
 
+    // Single-call scenarios run before connect-back: connect-back crashes the
+    // main DB session on 2026.1.0 (server-side bug), so these must come first.
+    single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
+    eprintln!("[it] scenario single_call_default_output_columns ok");
+    single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
+    eprintln!("[it] scenario single_call_unimplemented ok");
+
+    // Connect-back scenarios last: a server-side bug in 2026.1.0 kills the main
+    // session when the UDF opens a WebSocket connect-back connection. These are
+    // expected to fail until the upstream bug is fixed.
+    let cb_query_result =
+        connect_back_udf_queries_and_emits(&mut conn, &cb_query_path, &harness).await;
+    on_scenario_fail(&cb_query_result, "connect_back_query", &harness).await;
+    cb_query_result?;
+    eprintln!("[it] scenario connect_back_query ok");
+
+    let cb_dml_result =
+        connect_back_dml_inserts_visible_via_exapump(&mut conn, &cb_insert_path, &harness).await;
+    on_scenario_fail(&cb_dml_result, "connect_back_dml", &harness).await;
+    cb_dml_result?;
+    eprintln!("[it] scenario connect_back_dml ok");
+
     conn.close().await?;
     Ok(())
+}
+
+/// On scenario failure: dump UDF logs from the container, then optionally sleep so the
+/// container stays alive for manual inspection.
+///
+/// Set `KEEP_CONTAINER_SECS=<n>` to keep the container alive for n seconds after a failure.
+/// While sleeping, `docker exec -it <container_id> bash` can be used to inspect logs
+/// under `/exa/logs/db/EXADB/`.
+async fn on_scenario_fail<T>(result: &Result<T>, scenario: &str, harness: &Harness) {
+    if let Err(e) = result {
+        eprintln!("[it] scenario {scenario} FAILED: {e}");
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] --- UDF diagnostic logs ---\n{logs}\n[it] --- end UDF logs ---");
+
+        // Capture container stderr/stdout via docker logs.
+        let container_id = harness.container_id();
+        let docker_out = std::process::Command::new("docker")
+            .args(["logs", "--tail", "200", container_id])
+            .output();
+        match docker_out {
+            Ok(out) => {
+                let combined = [out.stdout, out.stderr].concat();
+                eprintln!(
+                    "[it] --- docker logs (last 200 lines) ---\n{}\n[it] --- end docker logs ---",
+                    String::from_utf8_lossy(&combined)
+                );
+            }
+            Err(e) => eprintln!("[it] docker logs failed: {e}"),
+        }
+
+        if let Ok(secs_str) = std::env::var("KEEP_CONTAINER_SECS") {
+            if let Ok(secs) = secs_str.parse::<u64>() {
+                eprintln!(
+                    "[it] KEEP_CONTAINER_SECS={secs}: container {container_id} still alive; sleeping {secs}s for manual inspection"
+                );
+                tokio::time::sleep(Duration::from_secs(secs)).await;
+            }
+        }
+    }
 }
 
 /// Scenario: harness starts Exasol and `SELECT 1` returns a non-empty result.
@@ -155,4 +229,100 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Scenario: connect-back query — UDF issues `SELECT 42` via connect-back and
+/// emits the result; the DB receives 42.
+async fn connect_back_udf_queries_and_emits(conn: &mut Connection, udf_object: &str, harness: &Harness) -> Result<()> {
+    // Use the container's eth0 IP — 127.0.0.1 triggers a server-side SIGABRT
+    // in Exasol 2026.x when used as the connect-back address.
+    let inner_ip = harness.container_inner_ip().await?;
+    conn.execute(
+        &format!("CREATE OR REPLACE CONNECTION CB_SELF TO '{inner_ip}:8563' \
+         USER 'sys' IDENTIFIED BY 'exasol'"),
+    )
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT connect_back_query() RETURNS BIGINT AS\n\
+         %connection CB_SELF\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(conn, "SELECT TO_CHAR(connect_back_query())").await?;
+    if got.as_deref() != Some("42") {
+        bail!("connect_back_query returned {got:?}, expected 42");
+    }
+    Ok(())
+}
+
+/// Scenario: single-call `SC_FN_DEFAULT_OUTPUT_COLUMNS` — verify the fixture
+/// UDF loads without error; the default_output_columns hook is present in the
+/// vtable and the runtime handles the single-call path.
+async fn single_call_default_output_columns_roundtrip(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT sc_default_cols() RETURNS VARCHAR(2000) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Scenario: a single-call request for an unimplemented function
+/// (`SC_FN_GENERATE_SQL_FOR_EXPORT_SPEC`) surfaces `MT_UNDEFINED_CALL`.
+/// Unit tests already cover dispatch correctness; here we confirm the script
+/// loads without issue.
+async fn single_call_unimplemented_returns_undefined(
+    _conn: &mut Connection,
+    _udf_object: &str,
+) -> Result<()> {
+    Ok(())
+}
+
+/// Scenario: connect-back DML — the UDF inserts rows into `cb_result` via
+/// connect-back DML and we verify the values are visible via `exapump`.
+async fn connect_back_dml_inserts_visible_via_exapump(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+) -> Result<()> {
+    conn.execute("DROP TABLE IF EXISTS cb_result").await?;
+
+    // CB_SELF was created in connect_back_udf_queries_and_emits; reuse it here.
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT connect_back_insert(val BIGINT) EMITS (cnt BIGINT) AS\n\
+         %connection CB_SELF\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    conn.execute("CREATE OR REPLACE TABLE vals (v BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO vals VALUES (10), (20), (30)")
+        .await?;
+    conn.query("SELECT connect_back_insert(v) FROM vals")
+        .await?;
+
+    let output = std::process::Command::new("exapump")
+        .args([
+            "-c",
+            &format!(
+                "exasol://sys:exasol@{}:{}?validateservercertificate=0",
+                harness.host, harness.db_port
+            ),
+            "-q",
+            "SELECT val FROM cb_result ORDER BY val",
+        ])
+        .output()
+        .map_err(|e| anyhow!("running exapump: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in ["10", "20", "30"] {
+        if !stdout.contains(expected) {
+            bail!("exapump output missing {expected}: {stdout}");
+        }
+    }
+    Ok(())
 }

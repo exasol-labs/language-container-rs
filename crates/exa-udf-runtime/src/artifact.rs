@@ -15,6 +15,23 @@ pub fn parse_udf_object_path(source: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Extract the connection name from a `%connection <name>` script directive.
+///
+/// Returns the first such name found, or `None` when no `%connection` is
+/// present. Used as `script_name` in the MT_IMPORT credential request.
+pub fn parse_connection_name(source: &str) -> Option<String> {
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("%connection") {
+            let name = rest.trim().trim_end_matches(';').trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

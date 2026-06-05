@@ -44,6 +44,7 @@ fn main() {
     match run(&args) {
         Ok(()) => {}
         Err(Exit { code, message }) => {
+            eprintln!("{}", message);
             error!("{}", message);
             std::process::exit(code);
         }

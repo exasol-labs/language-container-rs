@@ -11,6 +11,31 @@ pub trait UdfContext {
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError>;
     /// Advance to the next input row (set UDFs only). Returns false when exhausted.
     fn next(&mut self) -> Result<bool, UdfError>;
+
+    /// Open (or reuse) the default connect-back connection, built from the
+    /// credentials surfaced during the handshake.
+    #[cfg(feature = "connect-back")]
+    fn exa(&mut self) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+        Err(UdfError::Unimplemented("connect-back not available".into()))
+    }
+
+    /// Open a connect-back connection using a named connection object.
+    #[cfg(feature = "connect-back")]
+    fn exa_named(
+        &mut self,
+        _conn: &str,
+    ) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+        Err(UdfError::Unimplemented("connect-back not available".into()))
+    }
+
+    /// Open a connect-back connection using the given options.
+    #[cfg(feature = "connect-back")]
+    fn exa_connect(
+        &mut self,
+        _options: crate::connect_back::ConnectBackOptions,
+    ) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+        Err(UdfError::Unimplemented("connect-back not available".into()))
+    }
 }
 
 /// Per-call lifecycle hooks — default implementations return Unimplemented for v1 single-call hooks

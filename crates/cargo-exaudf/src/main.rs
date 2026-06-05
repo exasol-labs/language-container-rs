@@ -1,4 +1,46 @@
+mod build;
+mod new;
+mod validate;
+
+use std::env;
+use std::process;
+
+fn usage() -> ! {
+    eprintln!("Usage: cargo exaudf <subcommand> [args]");
+    eprintln!("Subcommands:");
+    eprintln!("  new <path>       Scaffold a new UDF crate at <path>");
+    eprintln!("  build [<path>]   Build the UDF crate (defaults to .)");
+    eprintln!("  validate <path>  Validate a compiled UDF .so");
+    process::exit(1);
+}
+
 fn main() {
-    eprintln!("cargo-exaudf: not yet implemented");
-    std::process::exit(1);
+    // When invoked as `cargo exaudf <cmd>`, argv is:
+    //   ["cargo-exaudf", "exaudf", <cmd>, ...]
+    // Skip argv[0] (binary name) and argv[1] ("exaudf" cargo-subcommand token).
+    let args: Vec<String> = env::args().collect();
+    let subcommand = args.get(2).map(|s| s.as_str());
+    let rest = args.get(3..).unwrap_or_default();
+
+    match subcommand {
+        Some("new") => {
+            if let Err(e) = new::run(rest) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("build") => {
+            if let Err(e) = build::run(rest) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("validate") => {
+            if let Err(e) = validate::run(rest) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        _ => usage(),
+    }
 }
