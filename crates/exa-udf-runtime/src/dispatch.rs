@@ -158,33 +158,37 @@ fn run_batch(
         // Connection name from `%connection <name>` directive in the script source.
         // Used as the `script_name` in the on-demand MT_IMPORT credential request.
         #[cfg(feature = "connect-back")]
-        let conn_name: String = crate::artifact::parse_connection_name(&meta.source_code)
-            .unwrap_or_default();
+        let conn_name: String =
+            crate::artifact::parse_connection_name(&meta.source_code).unwrap_or_default();
 
         #[cfg(feature = "connect-back")]
-        let conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + '_>> =
-            if conn_info.is_none() {
-                Some(Box::new(move || {
-                    let req = proto.import_connection_request(&conn_name);
-                    transport
-                        .send(&req)
-                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                    let resp = transport
-                        .recv()
-                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                    let (event, _) = proto
-                        .step(resp)
-                        .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                    match event {
-                        exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
-                        _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                            "MT_IMPORT reply was not ConnInfo".into(),
-                        )),
-                    }
-                }))
-            } else {
-                None
-            };
+        let conn_requester: Option<
+            Box<
+                dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
+                    + '_,
+            >,
+        > = if conn_info.is_none() {
+            Some(Box::new(move || {
+                let req = proto.import_connection_request(&conn_name);
+                transport
+                    .send(&req)
+                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                let resp = transport
+                    .recv()
+                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                let (event, _) = proto
+                    .step(resp)
+                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+                match event {
+                    exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
+                    _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                        "MT_IMPORT reply was not ConnInfo".into(),
+                    )),
+                }
+            }))
+        } else {
+            None
+        };
 
         let mut bridge = HostContextBridge::new(
             &mut input,

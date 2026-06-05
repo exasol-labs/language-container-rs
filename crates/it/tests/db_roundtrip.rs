@@ -233,14 +233,18 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
 
 /// Scenario: connect-back query — UDF issues `SELECT 42` via connect-back and
 /// emits the result; the DB receives 42.
-async fn connect_back_udf_queries_and_emits(conn: &mut Connection, udf_object: &str, harness: &Harness) -> Result<()> {
+async fn connect_back_udf_queries_and_emits(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+) -> Result<()> {
     // Use the container's eth0 IP — 127.0.0.1 triggers a server-side SIGABRT
     // in Exasol 2026.x when used as the connect-back address.
     let inner_ip = harness.container_inner_ip().await?;
-    conn.execute(
-        &format!("CREATE OR REPLACE CONNECTION CB_SELF TO '{inner_ip}:8563' \
-         USER 'sys' IDENTIFIED BY 'exasol'"),
-    )
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{inner_ip}:8563' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
     .await?;
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SCALAR SCRIPT connect_back_query() RETURNS BIGINT AS\n\

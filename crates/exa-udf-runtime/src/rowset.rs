@@ -293,7 +293,12 @@ pub struct HostContextBridge<'a> {
     /// `ConnInfo`. `FnOnce` because a single exchange is enough — the returned
     /// `ConnInfo` is used to open `conn`, which is cached for the batch.
     #[cfg(feature = "connect-back")]
-    conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>>,
+    conn_requester: Option<
+        Box<
+            dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
+                + 'a,
+        >,
+    >,
 }
 
 impl<'a> HostContextBridge<'a> {
@@ -302,7 +307,12 @@ impl<'a> HostContextBridge<'a> {
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
         #[cfg(feature = "connect-back")] conn_info: Option<exa_zmq_protocol::ConnInfo>,
-        #[cfg(feature = "connect-back")] conn_requester: Option<Box<dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>>,
+        #[cfg(feature = "connect-back")] conn_requester: Option<
+            Box<
+                dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
+                    + 'a,
+            >,
+        >,
     ) -> Self {
         HostContextBridge {
             input,
