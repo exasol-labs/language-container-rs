@@ -1,12 +1,10 @@
 # Feature: udf-sdk
 
-Provides the public Rust API that UDF authors depend on: the `Value` model, `ExaType`, the `UdfRun` and `UdfContext` traits, the stable C-ABI vtable, ABI constants, and the `#[exasol_udf]` attribute macro that wires an author's struct into a loadable cdylib.
+Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/`ExaType` model, the `#[repr(C)]` ABI vtable, and the connect-back surface — that UDF crates depend on without linking the host runtime or exarrow-rs.
 
 ## Background
 
-This is the only crate (plus `arrow = "58"`) that a UDF author's `.so` links. The single ABI crossing is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable`; rich trait objects never cross the boundary. The ABI is guarded by `EXA_UDF_ABI_VERSION = 1` and an `EXA_SDK_FINGERPRINT` of the form `"SDK_VERSION:RUSTC_HASH\0"`, baked via `build.rs`, so a `.so` built with a mismatched toolchain is rejected at load time rather than producing undefined behavior.
-
-For v1 the SDK exposes scalar and set/EMITS execution. Connect-back (`ExaConnection`, `exa()`, `exa_named()`, `exa_connect()`), single-call hooks (`default_output_columns`, `generate_sql_for_import_spec`, `generate_sql_for_export_spec`), and typed schema annotations (`#[exasol_udf(input(...), emits(...))]`) are out of scope for v1; the macro accepts the bare `#[exasol_udf]` form only. The `connect-back` Cargo feature is declared but compiles to nothing in v1.
+The SDK is the only crate a UDF author depends on (plus `arrow`). Its ABI constants and `#[repr(C)]` vtable are stable across the host loader and the proc macro. v2 adds the `virtual_schema_adapter_call` single-call hook, a feature-gated `connect-back` surface exposing the `ExaConnection` trait and `ConnectBackOptions` (with no exarrow-rs type in any public signature), and typed `#[exasol_udf(input(...), emits(...))]` annotation support that maps Rust types to `ExaType`.
 
 ## Scenarios
 
@@ -28,7 +26,7 @@ For v1 the SDK exposes scalar and set/EMITS execution. Connect-back (`ExaConnect
 ### Scenario: UdfRun default single-call hooks return Unimplemented
 
 * *GIVEN* a struct that implements `UdfRun` providing only `run`
-* *WHEN* a single-call hook (`default_output_columns`, `generate_sql_for_import_spec`, `generate_sql_for_export_spec`) is invoked
+* *WHEN* a single-call hook (`default_output_columns`, `generate_sql_for_import_spec`, `generate_sql_for_export_spec`, `virtual_schema_adapter_call`) is invoked
 * *THEN* the default implementation MUST return `UdfError::Unimplemented`
 * *AND* the trait MUST compile without the author providing those hooks
 
@@ -37,7 +35,7 @@ For v1 the SDK exposes scalar and set/EMITS execution. Connect-back (`ExaConnect
 * *GIVEN* the SDK `abi` module
 * *WHEN* the vtable type is referenced by the host loader and the macro
 * *THEN* `EXA_UDF_ABI_VERSION` MUST equal `1`
-* *AND* `ExaUdfVTable` MUST be `#[repr(C)]` with fields `abi_version`, `sdk_fingerprint`, `create`, `destroy`, `run`, and optional `default_output_columns`, `generate_sql_import`, `generate_sql_export`
+* *AND* `ExaUdfVTable` MUST be `#[repr(C)]` with fields `abi_version`, `sdk_fingerprint`, `create`, `destroy`, `run`, and optional `default_output_columns`, `generate_sql_import`, `generate_sql_export`, `virtual_schema_adapter_call`
 
 ### Scenario: SDK fingerprint is baked at build time
 
@@ -67,3 +65,40 @@ For v1 the SDK exposes scalar and set/EMITS execution. Connect-back (`ExaConnect
 * *WHEN* the crate is compiled as a cdylib
 * *THEN* the build MUST fail because of a duplicate `__exa_udf_entry` symbol
 * *AND* the failure MUST occur at link time rather than producing a silently-wrong artifact
+
+### Scenario: ExaConnection trait is defined behind the connect-back feature
+
+* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
+* *WHEN* the `connect_back` module is referenced
+* *THEN* it MUST expose an `ExaConnection` trait with `query_arrow`, `execute`, `import_arrow`, and `export_arrow` methods returning `Result<_, UdfError>`
+* *AND* it MUST expose a `ConnectBackOptions` enum with `Default`, `Named(String)`, and `Explicit { host, user, password }` variants
+* *AND* the `ExaConnection` trait MUST NOT reference any `exarrow-rs` type in its public signature
+
+### Scenario: UdfContext connect-back methods are absent without the feature
+
+* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature disabled
+* *WHEN* the crate is compiled
+* *THEN* the `UdfContext` methods `exa`, `exa_named`, and `exa_connect` MUST NOT be present
+* *AND* the crate MUST NOT depend on `tokio` or `exarrow-rs`
+
+### Scenario: UdfContext exposes connect-back methods with the feature
+
+* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
+* *WHEN* a UDF references the `UdfContext` trait
+* *THEN* the trait MUST expose `exa(&self) -> Result<&dyn ExaConnection, UdfError>` for the lazy default connection
+* *AND* it MUST expose `exa_named(&self, name: &str)` and `exa_connect(&self, opts: ConnectBackOptions)` each returning `Result<Box<dyn ExaConnection>, UdfError>`
+
+### Scenario: exasol_udf annotation generates schema metadata for matching types
+
+* *GIVEN* a struct annotated `#[exasol_udf(input(x: i64, label: String), emits(result: i64))]`
+* *WHEN* the crate is compiled as a cdylib
+* *THEN* the macro MUST map each annotated Rust type to its `ExaType` (`i64` to `Int64`, `String` to `String`, `f64` to `Double`)
+* *AND* it MUST embed the resulting input and emit column schema into the generated vtable for load-time validation
+* *AND* the bare `#[exasol_udf]` form MUST continue to compile with no embedded schema
+
+### Scenario: exasol_udf annotation with an unknown type fails to compile
+
+* *GIVEN* a struct annotated with an `input` or `emits` clause naming a type the macro cannot map to an `ExaType`
+* *WHEN* the crate is compiled
+* *THEN* the macro MUST emit a compile error naming the unsupported type
+* *AND* the error MUST point at the offending annotation span

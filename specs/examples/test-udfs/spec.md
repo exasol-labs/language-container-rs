@@ -1,10 +1,10 @@
 # Feature: test-udfs
 
-Provides the example UDF crates that the integration tests compile to fully-static musl `.so` artifacts and exercise against a real database: a scalar doubler, a set/EMITS filter, and a scalar JSON field extractor that statically links a third-party dependency.
+Provides the canonical example UDF crates that demonstrate each SDK capability and serve as fixtures for the integration tests.
 
 ## Background
 
-Each test UDF is a `crate-type = ["cdylib"]` crate that depends only on `exasol-udf-sdk` (and, for the JSON case, `serde_json`). Each uses the bare `#[exasol_udf]` attribute on a struct implementing `UdfRun`. They are built for `x86_64-unknown-linux-musl` so all Rust dependencies are statically linked and the `.so` has no glibc or system-library requirement, matching what the slim image can load. These crates are workspace members under `test-udfs/` but are excluded from the default `cargo build --workspace` toolchain expectations because they target musl.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. v2 adds a connect-back example that queries the database from inside `run`, a DML connect-back example that creates a table and inserts rows during `run`, and an annotated example that declares its schema via the typed `#[exasol_udf(input(...), emits(...))]` macro.
 
 ## Scenarios
 
@@ -35,3 +35,24 @@ Each test UDF is a `crate-type = ["cdylib"]` crate that depends only on `exasol-
 * *WHEN* it is built with `cargo build --release --target x86_64-unknown-linux-musl -p <crate>`
 * *THEN* the build MUST produce `target/x86_64-unknown-linux-musl/release/lib<crate>.so`
 * *AND* the artifact MUST export the `__exa_udf_entry` symbol
+
+### Scenario: connect-back-query emits a value fetched over connect-back
+
+* *GIVEN* an example UDF crate built against `exasol-udf-sdk` with the `connect-back` feature
+* *WHEN* its `run` calls `ctx.exa()?.query_arrow("SELECT 42")` and emits the first cell
+* *THEN* the example MUST compile as a cdylib for the musl target
+* *AND* it MUST emit the integer fetched from the query
+
+### Scenario: connect-back-insert creates a table and writes rows during run
+
+* *GIVEN* an example UDF crate built against `exasol-udf-sdk` with the `connect-back` feature
+* *WHEN* its `run` calls `ctx.exa()?.execute("CREATE TABLE IF NOT EXISTS cb_result (val BIGINT)")`, then for each input row calls `ctx.exa()?.execute(&format!("INSERT INTO cb_result VALUES ({})", value))`, and emits the row count
+* *THEN* the example MUST compile as a cdylib for the musl target
+* *AND* it MUST export the `__exa_udf_entry` symbol
+
+### Scenario: annotated-double declares its schema via the typed annotation
+
+* *GIVEN* an example UDF annotated `#[exasol_udf(input(x: i64), emits(result: i64))]`
+* *WHEN* the example is built for the musl target
+* *THEN* the generated vtable MUST embed the input column `x: Int64` and emit column `result: Int64`
+* *AND* the example MUST double its input as in `scalar-double`
