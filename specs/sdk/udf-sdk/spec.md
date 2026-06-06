@@ -6,6 +6,8 @@ Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/
 
 The SDK is the only crate a UDF author depends on (plus `arrow`). Its ABI constants and `#[repr(C)]` vtable are stable across the host loader and the proc macro. v2 adds the `virtual_schema_adapter_call` single-call hook, a feature-gated `connect-back` surface exposing the `ExaConnection` trait and `ConnectBackOptions` (with no exarrow-rs type in any public signature), and typed `#[exasol_udf(input(...), emits(...))]` annotation support that maps Rust types to `ExaType`.
 
+The connect-back surface is feature-gated. The `ExaConnection` trait exposes `query_arrow` and `execute` and references no exarrow-rs type. Every connection a UDF obtains through `exa`, `exa_named`, or `exa_connect` is a new external client session and a new transaction, independent of the invoking query.
+
 ## Scenarios
 
 ### Scenario: Value and ExaType cover the v1 column types
@@ -87,6 +89,8 @@ The SDK is the only crate a UDF author depends on (plus `arrow`). Its ABI consta
 * *WHEN* a UDF references the `UdfContext` trait
 * *THEN* the trait MUST expose `exa(&self) -> Result<&dyn ExaConnection, UdfError>` for the lazy default connection
 * *AND* it MUST expose `exa_named(&self, name: &str)` and `exa_connect(&self, opts: ConnectBackOptions)` each returning `Result<Box<dyn ExaConnection>, UdfError>`
+* *AND* every connection returned by these methods MUST be a new external client session and a new transaction, independent of the invoking query's session and transaction
+* *AND* the `ExaConnection` query methods (`query_arrow`, `execute`) MUST retain their existing signatures, so enabling new-session semantics requires no change to the author-facing API
 
 ### Scenario: exasol_udf annotation generates schema metadata for matching types
 

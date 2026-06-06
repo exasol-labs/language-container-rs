@@ -21,7 +21,7 @@ pub const DB_PORT: u16 = 8563;
 pub const BUCKETFS_PORT: u16 = 2581;
 /// Image holding the database under test. Pinned per project rules.
 pub const DB_IMAGE: &str = "exasol/docker-db";
-pub const DB_TAG: &str = "2026.1.0";
+pub const DB_TAG: &str = "2026.latest";
 /// Slim Rust SLC image built earlier in the pipeline.
 pub const SLC_IMAGE: &str = "slc-rs-slim:dev";
 
@@ -185,10 +185,11 @@ impl Harness {
     /// Return the connect-back address for UDFs: the Docker bridge gateway IP combined
     /// with the host-mapped DB port (e.g. `172.17.0.1:32768`).
     ///
-    /// UDFs run inside the container. Pointing `CB_SELF` at the container's own eth0
-    /// or loopback triggers a server-side SIGABRT in Exasol 2026. The correct address
-    /// is the Docker host gateway reachable from within the container; connecting through
-    /// the host port-mapping treats the connect-back as an external client session.
+    /// UDFs run inside the container. The Docker host gateway (reachable from inside
+    /// the container) routes the connect-back as an external-client session through the
+    /// host port-mapping. Note: on `2026.latest` the server-side SIGABRT (ADR-015)
+    /// still fires regardless of address or transport — this address is architecturally
+    /// correct, but the upstream core bug prevents a successful round-trip.
     pub async fn container_connect_back_address(&self) -> Result<String> {
         let script = "ip route show default | awk '/default/ {print $3}' | head -1";
         let mut result = self

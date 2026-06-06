@@ -1,6 +1,6 @@
 [package]
 name = "cargo-exaudf"
-version = "0.2.1"
+version.workspace = true
 edition = "2021"
 
 [[bin]]

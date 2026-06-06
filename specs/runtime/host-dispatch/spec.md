@@ -4,6 +4,8 @@ Orchestrates loading a UDF `.so`, building the host-side `UdfContext` bridge, an
 
 ## Background
 
+Connect-back opens a connection from inside the UDF sandbox back to Exasol. The host fetches credentials via `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) — a pure metadata retrieval equivalent to PyExasol's `exa.get_connection(NAME)` — then connects to the returned `address` as an ordinary external client over the exarrow-rs native binary protocol with server-certificate validation disabled.
+
 The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks, connect-back via a host implementation of the SDK `ExaConnection` trait over a dedicated `CONNECT_BACK_RT` tokio runtime, and load-time validation of typed `#[exasol_udf(input(...), emits(...))]` schemas against the database metadata.
 
 ## Scenarios
@@ -129,10 +131,18 @@ The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK 
 
 * *GIVEN* a `connection_information_rep` whose `address` is a routable Exasol endpoint and whose `kind` is `password`
 * *WHEN* the host opens the connect-back connection
-* *THEN* it MUST connect to the `address` exactly as an ordinary external client would, with no assumption of a dedicated internal connect-back proxy
-* *AND* it MUST authenticate with the `user` and `password` from the response, not a session token
+* *THEN* it MUST connect to the `address` exactly as an ordinary external client would, opening a new database session and a new transaction, authenticated with the `user` and `password` from the response and not a session token
+* *AND* it MUST NOT attempt to share or join the invoking query's session or transaction, because the Exasol core cannot share a transaction with a language-container UDF
 * *AND* it MUST disable server-certificate validation to match the project transport rule
-* *AND* it MUST use the exarrow-rs native binary protocol as the connect-back transport by relying on the exarrow-rs default `native` feature, and MUST NOT set a `transport=websocket` override in the DSN
+* *AND* it MUST use the exarrow-rs native binary protocol by relying on the default `native` feature, and MUST NOT set a `transport=websocket` override in the DSN
+
+### Scenario: Connect-back named connection makes the UDF portable across clusters
+
+* *GIVEN* a UDF script registered with a generic `%connection <NAME>` directive and no hardcoded cluster address in its source
+* *AND* a database `CREATE CONNECTION <NAME> TO '<cluster-address>:8563' USER '...' IDENTIFIED BY '...'` object that the operator populated with the correct address for the target cluster
+* *WHEN* the host requests credentials with `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) naming `<NAME>` and receives the `connection_information_rep`
+* *THEN* the host MUST build the connect-back DSN solely from the `address`, `user`, and `password` returned for that named connection
+* *AND* the host MUST NOT embed or assume any cluster-specific address of its own, so the same UDF artifact remains portable across clusters that differ only in the `CREATE CONNECTION` definition
 
 ### Scenario: Annotated schema is validated against the database metadata at load
 

@@ -53,9 +53,10 @@ impl ExaConnection for RuntimeExaConnection {
     }
 }
 
-/// Open a connect-back connection from the credentials surfaced during the
-/// handshake. SSL verification is disabled to match the in-cluster connect-back
-/// transport (the DB hands the UDF a trusted internal address).
+/// Open a new external-client session to the named-connection address.
+/// Connect-back is always a new session and a new transaction — the Exasol core
+/// cannot share the invoking query's transaction with a container UDF. SSL
+/// verification is disabled per project rules.
 pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, UdfError> {
     let dsn = build_dsn(conn_info);
     // Wrap in catch_unwind: panics in exarrow-rs/tokio/aws-lc-rs must not
@@ -87,7 +88,7 @@ pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, Udf
 ///
 /// No `transport=` override is emitted, so exarrow-rs uses its default `native`
 /// feature (the binary protocol) for the connect-back connection. SSL verification
-/// is disabled because the connect-back endpoint is a trusted in-cluster address.
+/// is disabled per project rules (`validateservercertificate=0`).
 fn build_dsn(conn_info: &ConnInfo) -> String {
     format!(
         "exasol://{}:{}@{}?validateservercertificate=0",

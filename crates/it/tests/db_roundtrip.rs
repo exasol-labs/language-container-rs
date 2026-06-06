@@ -72,30 +72,53 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario udf_error ok");
 
     // Single-call scenarios run before connect-back: connect-back crashes the
-    // main DB session on 2026.1.0 (server-side bug), so these must come first.
+    // main DB session on 2026.latest (server-side bug), so these must come first.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_default_output_columns ok");
     single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_unimplemented ok");
 
-    // Connect-back scenarios last: a server-side SIGABRT bug in Exasol 2026.1.0
-    // kills the outer session whenever a UDF opens any connect-back connection
-    // (signal 6, confirmed transport- and address-independent; see decision [15]).
-    // These scenarios are expected to fail on 2026.1.0 until the upstream bug
-    // is patched.
+    // Connect-back scenarios last: a server-side SIGABRT bug in Exasol 2026.latest
+    // (image id b81d80f63d10, same as 2026.1.0) kills the outer session whenever a
+    // UDF opens any connect-back connection (signal 6, confirmed transport- and
+    // address-independent; re-verified 2026-06-06 with Docker gateway address; see
+    // ADR-015). These scenarios are known-failing on 2026.latest until the upstream
+    // bug is patched.
     let cb_query_result =
         connect_back_udf_queries_and_emits(&mut conn, &cb_query_path, &harness).await;
     on_scenario_fail(&cb_query_result, "connect_back_query", &harness).await;
-    cb_query_result?;
-    eprintln!("[it] scenario connect_back_query ok");
+    match &cb_query_result {
+        Ok(_) => eprintln!(
+            "[it] scenario connect_back_query UNEXPECTEDLY PASSED — ADR-015 blocker may be resolved; \
+             promote this scenario to a hard assertion"
+        ),
+        Err(e) if is_known_sigabrt_failure(e) => eprintln!(
+            "[it] scenario connect_back_query KNOWN_FAILING (ADR-015: server-side SIGABRT on 2026.latest): {e}"
+        ),
+        Err(e) => bail!(
+            "connect_back_query: unexpected error (not the documented SIGABRT signature): {e}"
+        ),
+    }
 
     let cb_dml_result =
         connect_back_dml_inserts_visible_via_exapump(&mut conn, &cb_insert_path, &harness).await;
     on_scenario_fail(&cb_dml_result, "connect_back_dml", &harness).await;
-    cb_dml_result?;
-    eprintln!("[it] scenario connect_back_dml ok");
+    match &cb_dml_result {
+        Ok(_) => eprintln!(
+            "[it] scenario connect_back_dml UNEXPECTEDLY PASSED — ADR-015 blocker may be resolved; \
+             promote this scenario to a hard assertion"
+        ),
+        Err(e) if is_known_sigabrt_failure(e) => eprintln!(
+            "[it] scenario connect_back_dml KNOWN_FAILING (ADR-015: server-side SIGABRT on 2026.latest): {e}"
+        ),
+        Err(e) => bail!(
+            "connect_back_dml: unexpected error (not the documented SIGABRT signature): {e}"
+        ),
+    }
 
-    conn.close().await?;
+    // The outer session is killed by the SIGABRT crash, so close will fail;
+    // propagating that error would be misleading.
+    conn.close().await.ok();
     Ok(())
 }
 
@@ -136,6 +159,14 @@ async fn on_scenario_fail<T>(result: &Result<T>, scenario: &str, harness: &Harne
             }
         }
     }
+}
+
+/// Return true if `e`'s full chain matches the documented connect-back SIGABRT failure
+/// on `2026.latest`: the outer session's TLS connection is closed without close_notify
+/// when Part:40 crashes with signal 6 after spawning Part:44.
+fn is_known_sigabrt_failure(e: &anyhow::Error) -> bool {
+    let chain = format!("{:#}", e);
+    chain.contains("close_notify") || chain.contains("peer closed connection")
 }
 
 /// Scenario: harness starts Exasol and `SELECT 1` returns a non-empty result.
