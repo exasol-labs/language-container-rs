@@ -21,9 +21,13 @@ pub const DB_PORT: u16 = 8563;
 pub const BUCKETFS_PORT: u16 = 2581;
 /// Image holding the database under test. Pinned per project rules.
 pub const DB_IMAGE: &str = "exasol/docker-db";
-pub const DB_TAG: &str = "2026.latest";
 /// Slim Rust SLC image built earlier in the pipeline.
 pub const SLC_IMAGE: &str = "slc-rs-slim:dev";
+
+/// Exasol image tag. Reads `EXASOL_VERSION` env var; defaults to `2026.latest`.
+pub fn db_tag() -> String {
+    std::env::var("EXASOL_VERSION").unwrap_or_else(|_| "2026.latest".to_string())
+}
 
 /// Bucket name and BucketFS service name baked into the docker-db default.
 pub const BUCKET: &str = "default";
@@ -33,8 +37,11 @@ const BFS_WRITE_USER: &str = "w";
 /// A running database plus the host/port mapping needed to reach it.
 pub struct Harness {
     // Held to keep the container alive for the harness lifetime; dropping it
-    // tears the database down.
-    _container: ContainerAsync<GenericImage>,
+    // tears the database down. None in external (CI) mode where the container
+    // is managed outside the test process.
+    _container: Option<ContainerAsync<GenericImage>>,
+    // ID or name used for `docker exec` / `docker logs` diagnostics.
+    container_name: String,
     pub host: String,
     pub db_port: u16,
     pub bucketfs_port: u16,
@@ -42,16 +49,46 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// Start `exasol/docker-db` privileged, map the DB and BucketFS ports, and
-    /// wait until the boot sequence logs that all stages finished. The SQL layer
-    /// may still be settling, so callers use [`connect`] which retries.
+    /// Start the database harness.
     ///
-    /// BucketFS write credentials are random per instance, so they are read back
-    /// from `EXAConf` inside the running container rather than hardcoded.
+    /// **Testcontainers mode** (default): starts `exasol/docker-db` privileged,
+    /// maps ports, waits for "All stages finished.", and reads BucketFS
+    /// credentials from `EXAConf` inside the container.
+    ///
+    /// **External mode** (when `EXASOL_HOST` is set): skips container startup
+    /// and reads connection details from env vars. Used by CI where the
+    /// container is started and health-checked externally.
+    ///
+    /// External env vars:
+    /// - `EXASOL_HOST` — DB hostname (triggers external mode)
+    /// - `EXASOL_PORT` — DB SQL port (default `8563`)
+    /// - `BUCKETFS_PORT` — BucketFS HTTPS port (default `2581`)
+    /// - `BUCKETFS_PASSWORD` — BucketFS `default` bucket write password (required)
     pub async fn start() -> Result<Self> {
         install_crypto_provider();
 
-        let container = GenericImage::new(DB_IMAGE, DB_TAG)
+        if let Ok(host) = std::env::var("EXASOL_HOST") {
+            let db_port = std::env::var("EXASOL_PORT")
+                .unwrap_or_else(|_| "8563".to_string())
+                .parse::<u16>()
+                .context("EXASOL_PORT is not a valid port number")?;
+            let bucketfs_port = std::env::var("BUCKETFS_PORT")
+                .unwrap_or_else(|_| "2581".to_string())
+                .parse::<u16>()
+                .context("BUCKETFS_PORT is not a valid port number")?;
+            let bucketfs_write_password = std::env::var("BUCKETFS_PASSWORD")
+                .context("BUCKETFS_PASSWORD is required when EXASOL_HOST is set")?;
+            return Ok(Self {
+                _container: None,
+                container_name: "exasol-db".to_string(),
+                host,
+                db_port,
+                bucketfs_port,
+                bucketfs_write_password,
+            });
+        }
+
+        let container = GenericImage::new(DB_IMAGE, &db_tag())
             .with_exposed_port(DB_PORT.tcp())
             .with_exposed_port(BUCKETFS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("All stages finished."))
@@ -65,9 +102,11 @@ impl Harness {
         let db_port = container.get_host_port_ipv4(DB_PORT.tcp()).await?;
         let bucketfs_port = container.get_host_port_ipv4(BUCKETFS_PORT.tcp()).await?;
         let bucketfs_write_password = read_bucketfs_password(&container, "WritePasswd").await?;
+        let container_name = container.id().to_string();
 
         Ok(Self {
-            _container: container,
+            _container: Some(container),
+            container_name,
             host,
             db_port,
             bucketfs_port,
@@ -161,21 +200,18 @@ impl Harness {
         Ok(format!("/buckets/{BFS_SERVICE}/{BUCKET}/{path}"))
     }
 
-    /// Return the Docker container ID for out-of-process inspection.
+    /// Return the Docker container ID or name for out-of-process inspection.
     pub fn container_id(&self) -> &str {
-        self._container.id()
+        &self.container_name
     }
 
     /// Return the container's primary eth0 IP address (e.g. `172.17.0.3`).
     pub async fn container_inner_ip(&self) -> Result<String> {
         let script = "ip addr show eth0 | awk '/inet /{print $2}' | cut -d/ -f1 | head -1";
-        let mut result = self
-            ._container
-            .exec(ExecCommand::new(["bash", "-c", script]))
+        let ip = self
+            .exec_in_container(script)
             .await
-            .context("exec container_inner_ip")?;
-        let bytes = result.stdout_to_vec().await?;
-        let ip = String::from_utf8_lossy(&bytes).trim().to_string();
+            .context("container_inner_ip")?;
         if ip.is_empty() {
             anyhow::bail!("could not determine container eth0 IP");
         }
@@ -192,13 +228,10 @@ impl Harness {
     /// correct, but the upstream core bug prevents a successful round-trip.
     pub async fn container_connect_back_address(&self) -> Result<String> {
         let script = "ip route show default | awk '/default/ {print $3}' | head -1";
-        let mut result = self
-            ._container
-            .exec(ExecCommand::new(["bash", "-c", script]))
+        let gateway = self
+            .exec_in_container(script)
             .await
-            .context("exec container_connect_back_address")?;
-        let bytes = result.stdout_to_vec().await?;
-        let gateway = String::from_utf8_lossy(&bytes).trim().to_string();
+            .context("container_connect_back_address")?;
         if gateway.is_empty() {
             anyhow::bail!("could not determine container default gateway");
         }
@@ -206,37 +239,41 @@ impl Harness {
     }
 
     /// Read UDF client diagnostic logs from inside the container and return them as a string.
-    ///
-    /// exaudfclient writes `udf_diag.log` next to its own binary (inside the BucketFS-extracted
-    /// SLC). On failure it falls back to stderr, which is captured in the Docker container log.
     pub async fn dump_udf_logs(&self) -> String {
-        // Search broadly: next to the binary (BucketFS path) and any fallback location.
         let script = concat!(
             "echo '=== /tmp/cb_debug.txt ==='; cat /tmp/cb_debug.txt 2>/dev/null || echo '(not found)';",
             " echo '=== udf_diag.log search ===';",
             " find /buckets /exa/logs /tmp -name 'udf_diag.log' -o -name 'UDFClientDiag*'",
             " 2>/dev/null | sort | tail -10 | xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}' 2>/dev/null"
         );
-        match self
-            ._container
-            .exec(ExecCommand::new(["bash", "-c", script]))
-            .await
-        {
-            Ok(mut result) => {
-                let stdout = result.stdout_to_vec().await.unwrap_or_default();
-                let stderr = result.stderr_to_vec().await.unwrap_or_default();
-                let mut out = String::from_utf8_lossy(&stdout).into_owned();
-                if !stderr.is_empty() {
-                    out.push_str("\n[exec stderr]: ");
-                    out.push_str(&String::from_utf8_lossy(&stderr));
-                }
-                if out.trim().is_empty() {
-                    "(no UDF diagnostic log found in /buckets, /exa/logs, or /tmp)".to_string()
-                } else {
-                    out
-                }
-            }
+        match self.exec_in_container(script).await {
+            Ok(out) if !out.trim().is_empty() => out,
+            Ok(_) => "(no UDF diagnostic log found in /buckets, /exa/logs, or /tmp)".to_string(),
             Err(e) => format!("(exec failed: {e})"),
+        }
+    }
+
+    /// Execute a shell script inside the container and return trimmed stdout.
+    ///
+    /// Uses `testcontainers` exec in local mode; falls back to `docker exec
+    /// <container_name>` in external (CI) mode.
+    async fn exec_in_container(&self, script: &str) -> Result<String> {
+        match &self._container {
+            Some(container) => {
+                let mut result = container
+                    .exec(ExecCommand::new(["bash", "-c", script]))
+                    .await
+                    .context("exec in container")?;
+                let bytes = result.stdout_to_vec().await?;
+                Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+            }
+            None => {
+                let output = Command::new("docker")
+                    .args(["exec", &self.container_name, "bash", "-c", script])
+                    .output()
+                    .context("docker exec")?;
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            }
         }
     }
 }
