@@ -1,3 +1,7 @@
+[language-container-rs](../README.md) › [docs](index.md) › Cargo Ecosystem
+
+---
+
 # Cargo Ecosystem
 
 ## Workspace layout

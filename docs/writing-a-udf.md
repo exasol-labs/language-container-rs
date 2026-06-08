@@ -1,3 +1,7 @@
+[language-container-rs](../README.md) › [docs](index.md) › Writing a Rust UDF
+
+---
+
 # Writing a Rust UDF
 
 ## Prerequisites
