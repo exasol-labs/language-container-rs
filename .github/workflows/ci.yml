@@ -75,9 +75,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-1.91-
 
-      # dispatch tests in exa-udf-runtime load these .so fixtures at runtime
+      # dispatch/single_call tests in exa-udf-runtime dlopen these .so fixtures
       - name: Build test fixture cdylibs
-        run: cargo +1.91 build -p scalar-double -p annotated-fixture
+        run: cargo +1.91 build -p scalar-double -p annotated-fixture -p single-call-fixture
 
       - name: Run unit tests
         run: |
