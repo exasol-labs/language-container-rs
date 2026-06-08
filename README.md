@@ -1,50 +1,64 @@
-# slc-rs — Rust Script Language Container for Exasol
+# language-container-rs
 
-A slim Exasol language container that executes precompiled Rust UDFs (`.so`
-artifacts uploaded to BucketFS) via the native ZMQ+Protobuf SLC protocol.
+![Rust 1.84+](https://img.shields.io/badge/rust-1.84%2B-orange.svg)
+![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
+![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
 
-## Connect-Back
+A pure-Rust Exasol Script Language Container that executes precompiled `.so` UDFs from BucketFS via the native ZMQ+Protobuf SLC protocol.
 
-Connect-back lets a UDF query the database from inside its `run()` call.
+## What it is
 
-### Operator setup
+`language-container-rs` replaces the C++ launcher and `libexaudflib` entirely. UDFs are compiled to `x86_64-unknown-linux-musl` shared libraries, uploaded to BucketFS, and loaded at runtime through a thin FFI dispatch loop. No C++ toolchain, no JVM, no Python runtime.
 
-Create a named `CONNECTION` object pointing at a routable cluster endpoint:
+The workspace ships three crates for UDF authors, container operators, and build tooling — plus the protocol layer that wires them together.
 
-```sql
-CREATE CONNECTION CB_SELF
-  TO 'your-cluster-host:8563'
-  USER 'sys'
-  IDENTIFIED BY 'exasol';
+## Quick start
+
+```rust
+use exasol_udf_macros::exasol_udf;
+use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
+use exasol_udf_sdk::value::Value;
+
+#[exasol_udf]
+pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let doubled = match ctx.get(0)? {
+        Value::Int64(n)   => Value::Int64(n * 2),
+        Value::Numeric(s) => {
+            let n: i64 = s.parse().map_err(|e| UdfError::Type(format!("cannot parse '{}': {}", s, e)))?;
+            Value::Numeric((n * 2).to_string())
+        }
+        Value::Null => Value::Null,
+        _           => return Err(UdfError::Type("expected Int64 or Numeric".into())),
+    };
+    ctx.emit(&[doubled])
+}
 ```
 
-### UDF usage
-
-Reference the connection by name in the `%connection` directive; the runtime
-resolves credentials at execution time — the artifact hardcodes nothing:
+Build with `cargo exaudf build` (musl, release), upload the `.so` to BucketFS, then:
 
 ```sql
-CREATE OR REPLACE RUST SCALAR SCRIPT my_udf() RETURNS BIGINT AS
-%connection CB_SELF
-%udf_object /buckets/bfsdefault/default/udf/my_udf.so;
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.double(val BIGINT) RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libscalar_double.so;
 /
 ```
 
-### Semantics
+## Connect-back
 
-Connect-back always opens a **new external-client session** and a **new
-transaction**. The Exasol core cannot share the invoking query's transaction
-with a language-container UDF.
+UDFs can open a live Exasol session from inside `run()` to query or write back to the database. See [docs/writing-a-udf.md](docs/writing-a-udf.md#4-connect-back) for the full pattern.
 
-### Known issue — `2026.latest` server-side SIGABRT
+## Crates
 
-On `exasol/docker-db:2026.latest` (image id `b81d80f63d10`, same as `2026.1.0`)
-the server kills the invoking session with `SIGABRT` (signal 6) the moment the
-UDF opens a connect-back connection. The crash is **server-side** and happens
-regardless of the connect-back address or transport. The SLC implementation is
-correct and matches the Python/Java reference containers; the blocker is an
-upstream Exasol core defect (see ADR-015).
+| Crate | Audience | Purpose |
+|-------|----------|---------|
+| `exasol-udf-sdk` | UDF authors | Trait, macros, types |
+| `exa-udf-runtime` | Container operators | ZMQ host-dispatch runtime |
+| `cargo-exaudf` | Build tooling | Build/validate `.so` UDF artifacts |
 
-The two connect-back integration scenarios are retained in the test suite as
-**known-failing gates** — they will turn green automatically once Exasol ships
-a patched image.
+See [docs/cargo-ecosystem.md](docs/cargo-ecosystem.md) for the full workspace layout.
+
+## License
+
+MIT © Exasol AG — see [LICENSE](LICENSE).
