@@ -1,14 +1,7 @@
-# This config enables cdylib builds for x86_64-unknown-linux-musl.
-#
-# Rust 1.84's built-in musl target has dynamic-linking=false which prevents
-# cdylib output. We use a custom target spec (targets/x86_64-unknown-linux-musl-dylib.json)
-# with dynamic-linking=true to produce musl-linked shared objects.
-#
-# Build the test UDFs with:
-#   RUSTC_BOOTSTRAP=1 cargo build --release \
-#     --target targets/x86_64-unknown-linux-musl-dylib.json \
-#     -p scalar-double -p set-filter -p json-parse \
-#     -Z build-std=std,panic_abort
+# Build the test UDFs (glibc cdylib, loaded into the Debian-based SLC):
+#   cargo build --release -p scalar-double -p set-filter -p json-parse \
+#     -p single-call-fixture -p connect-back-cluster-ip \
+#     -p connect-back-query -p connect-back-insert
 
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"

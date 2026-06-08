@@ -335,13 +335,9 @@ pub async fn query_single_string(conn: &mut Connection, sql: &str) -> Result<Opt
     }
 }
 
-/// Read the bytes of a precompiled musl UDF artifact from the workspace target.
+/// Read the bytes of a precompiled UDF artifact from the workspace target directory.
 pub fn read_udf_artifact(lib_filename: &str) -> Result<Vec<u8>> {
-    let path = format!(
-        "{}/target/x86_64-unknown-linux-musl-dylib/release/{}",
-        workspace_root(),
-        lib_filename
-    );
+    let path = format!("{}/target/release/{}", workspace_root(), lib_filename);
     std::fs::read(&path).with_context(|| format!("reading UDF artifact {path}"))
 }
 
