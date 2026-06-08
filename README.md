@@ -1,4 +1,6 @@
-# language-container-rs
+<div align="center">
+
+![language-container-rs logo](assets/logo.svg)
 
 ![Rust 1.84+](https://img.shields.io/badge/rust-1.84%2B-orange.svg)
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)
@@ -7,6 +9,8 @@
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
 
 A pure-Rust Exasol Script Language Container that executes precompiled `.so` UDFs from BucketFS via the native ZMQ+Protobuf SLC protocol.
+
+</div>
 
 ## What it is
 

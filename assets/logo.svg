@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 185" width="260" height="185">
+
+  <!-- Shipping container holding language runtimes -->
+  <g>
+    <!-- Container body -->
+    <rect x="75" y="72" width="110" height="58" rx="6" fill="#00A854"/>
+
+    <!-- Top rail -->
+    <rect x="72" y="66" width="116" height="9" rx="4" fill="#008A44"/>
+    <!-- Bottom rail / base -->
+    <rect x="72" y="127" width="116" height="9" rx="4" fill="#008A44"/>
+
+    <!-- Corner castings -->
+    <rect x="72" y="66" width="12" height="9" rx="2" fill="#006B35"/>
+    <rect x="176" y="66" width="12" height="9" rx="2" fill="#006B35"/>
+    <rect x="72" y="127" width="12" height="9" rx="2" fill="#006B35"/>
+    <rect x="176" y="127" width="12" height="9" rx="2" fill="#006B35"/>
+
+    <!-- Corrugation ridges -->
+    <line x1="92"  y1="78" x2="92"  y2="124" stroke="#008A44" stroke-width="3" stroke-linecap="round"/>
+    <line x1="106" y1="78" x2="106" y2="124" stroke="#008A44" stroke-width="3" stroke-linecap="round"/>
+    <line x1="154" y1="78" x2="154" y2="124" stroke="#008A44" stroke-width="3" stroke-linecap="round"/>
+    <line x1="168" y1="78" x2="168" y2="124" stroke="#008A44" stroke-width="3" stroke-linecap="round"/>
+
+    <!-- Manifest label panel: Rust UDF() = what the container runs -->
+    <rect x="102" y="82" width="56" height="40" rx="4" fill="#E8F5E9"/>
+    <text x="130" y="98" font-family="'Courier New', monospace" font-size="11" font-weight="bold"
+          fill="#008A44" text-anchor="middle">Rust</text>
+    <text x="130" y="113" font-family="'Courier New', monospace" font-size="13" font-weight="bold"
+          fill="#008A44" text-anchor="middle">UDF()</text>
+
+    <!-- Highlight sheen -->
+    <rect x="79" y="76" width="5" height="50" rx="2.5" fill="#FFFFFF" opacity="0.12"/>
+  </g>
+
+  <!-- Ferris crab sitting on top of the container (Rust) -->
+  <g transform="translate(130, 44)">
+    <ellipse cx="0" cy="0" rx="30" ry="21" fill="#F74C00"/>
+    <ellipse cx="-8" cy="-6" rx="11" ry="7" fill="#FF8C42" opacity="0.5"/>
+    <g transform="translate(-36, -14) rotate(-20)">
+      <ellipse cx="0" cy="0" rx="13" ry="9" fill="#F74C00"/>
+      <circle cx="-9" cy="-5" r="6.5" fill="#F74C00"/>
+      <circle cx="-9" cy="5" r="6.5" fill="#F74C00"/>
+    </g>
+    <g transform="translate(36, -14) rotate(20)">
+      <ellipse cx="0" cy="0" rx="13" ry="9" fill="#F74C00"/>
+      <circle cx="9" cy="-5" r="6.5" fill="#F74C00"/>
+      <circle cx="9" cy="5" r="6.5" fill="#F74C00"/>
+    </g>
+    <circle cx="-10" cy="-5" r="7.5" fill="white"/>
+    <circle cx="10" cy="-5" r="7.5" fill="white"/>
+    <circle cx="-7" cy="-5" r="3.8" fill="#222"/>
+    <circle cx="13" cy="-5" r="3.8" fill="#222"/>
+    <circle cx="-9" cy="-7" r="1.8" fill="white"/>
+    <circle cx="11" cy="-7" r="1.8" fill="white"/>
+    <path d="M -11 7 Q 0 16 11 7" stroke="#222" stroke-width="2.8" fill="none" stroke-linecap="round"/>
+    <line x1="-17" y1="17" x2="-20" y2="26" stroke="#CE422B" stroke-width="4.5" stroke-linecap="round"/>
+    <line x1="-7" y1="19" x2="-9" y2="28" stroke="#CE422B" stroke-width="4.5" stroke-linecap="round"/>
+    <line x1="7" y1="19" x2="9" y2="28" stroke="#CE422B" stroke-width="4.5" stroke-linecap="round"/>
+    <line x1="17" y1="17" x2="20" y2="26" stroke="#CE422B" stroke-width="4.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Text: language-container-rs with white outline for dark mode -->
+  <text x="130" y="160" font-family="Inter, sans-serif" font-size="19" font-weight="bold"
+        fill="none" stroke="white" stroke-width="4" stroke-linejoin="round" text-anchor="middle">language-container-rs</text>
+  <text x="130" y="160" font-family="Inter, sans-serif" font-size="19" font-weight="bold"
+        fill="#333" text-anchor="middle">language-container-rs</text>
+</svg>
