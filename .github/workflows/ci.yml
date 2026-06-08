@@ -36,14 +36,14 @@ jobs:
             ${{ runner.os }}-cargo-1.91-
 
       - name: Check formatting
-        run: cargo +1.91 fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
         # connect-back-query, connect-back-insert, and it require separate
         # handling (arrow 58 / testcontainers); they are checked in the
         # integration job.
         run: |
-          cargo +1.91 clippy \
+          cargo clippy \
             --exclude connect-back-query \
             --exclude connect-back-insert \
             --exclude it \
@@ -71,7 +71,7 @@ jobs:
 
       - name: Run unit tests
         run: |
-          cargo +1.91 test \
+          cargo test \
             --exclude connect-back-query \
             --exclude connect-back-insert \
             --exclude it \
@@ -203,7 +203,7 @@ jobs:
           EXASOL_HOST: localhost
           EXASOL_PORT: "8563"
           BUCKETFS_PORT: "2581"
-        run: cargo +1.91 test -p it --features integration ${{ matrix.test_filter }}
+        run: cargo test -p it --features integration ${{ matrix.test_filter }}
 
       - name: Stop Exasol container
         if: always()

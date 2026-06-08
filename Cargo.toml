@@ -65,10 +65,7 @@ thiserror = "2"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-exarrow-rs = { version = "0.12.5", path = "/home/talos/code/exarrow-rs" }
-
-[patch.crates-io]
-exarrow-rs = { path = "/home/talos/code/exarrow-rs" }
+exarrow-rs = "0.12.5"
 
 [profile.release]
 strip = "symbols"

@@ -970,6 +970,8 @@ dependencies = [
 [[package]]
 name = "exarrow-rs"
 version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6cd89a95c37b355e14029ca881d02d7e0676cca3df8f6b170ae28d84821a1f3"
 dependencies = [
  "arrow",
  "async-trait",
