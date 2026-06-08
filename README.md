@@ -25,6 +25,34 @@ Two further capabilities ship out of the box:
 
 The workspace ships three crates for UDF authors, container operators, and build tooling — plus the protocol layer that wires them together.
 
+## Prerequisites
+
+- **Docker** — to build the language container image
+- **[exapump](https://github.com/exasol-labs/exapump)** — to upload to BucketFS and run SQL
+- **Rust 1.84+** with `cargo` — to compile UDFs
+- An Exasol instance: [SaaS free trial](https://cloud.exasol.com), [Docker image](https://hub.docker.com/r/exasol/docker-db), or enterprise
+
+## Install the language container
+
+`scripts/install.sh` builds the Docker image, exports the container filesystem, uploads it to BucketFS, and registers the `RUST` script language — all in one command:
+
+```bash
+scripts/install.sh \
+  --host localhost \
+  --password exasol \
+  --bfs-password <write-password>
+```
+
+The BucketFS write password for the Docker image can be read with:
+
+```bash
+docker exec exasol-db bash -c \
+  "xmllint --xpath '//BucketFSService[@id=\"bfsdefault\"]/Bucket[@id=\"default\"]/WritePasswd/text()' \
+  /exa/etc/EXAConf"
+```
+
+Full option reference: `scripts/install.sh --help`
+
 ## Quick start
 
 ```rust
