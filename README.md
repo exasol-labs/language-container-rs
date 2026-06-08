@@ -81,5 +81,9 @@ RETURNS BIGINT AS
 
 Full index → [docs/index.md](docs/index.md)
 
+## License
+
+Community-supported. Licensed under [MIT](LICENSE).
+
 ---
 Built with Rust 🦀 and made with ❤️ as part of [Exasol Labs](https://github.com/exasol-labs) 🧪.
