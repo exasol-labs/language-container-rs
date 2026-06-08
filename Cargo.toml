@@ -17,6 +17,7 @@ members = [
     "test-udfs/connect-back-query",
     "test-udfs/annotated-double",
     "test-udfs/connect-back-insert",
+    "test-udfs/connect-back-cluster-ip",
 ]
 # `it` is excluded from default builds: its integration deps (arrow 58,
 # testcontainers, reqwest) require Rust >= 1.85 and pull edition2024 crates the
@@ -41,7 +42,8 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
+license = "MIT"
 
 [workspace.dependencies]
 prost = "0.13"
