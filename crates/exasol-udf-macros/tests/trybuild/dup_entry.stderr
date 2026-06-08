@@ -1,7 +1,7 @@
 error[E0428]: the name `__exa_run_shim` is defined multiple times
-  --> tests/trybuild/dup_entry.rs:11:1
-   |
-6  | #[exasol_udf]
+ --> tests/trybuild/dup_entry.rs:11:1
+  |
+ 6 | #[exasol_udf]
    | ------------- previous definition of the value `__exa_run_shim` here
 ...
 11 | #[exasol_udf]
@@ -11,9 +11,9 @@ error[E0428]: the name `__exa_run_shim` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__exa_destroy_shim` is defined multiple times
-  --> tests/trybuild/dup_entry.rs:11:1
-   |
-6  | #[exasol_udf]
+ --> tests/trybuild/dup_entry.rs:11:1
+  |
+ 6 | #[exasol_udf]
    | ------------- previous definition of the value `__exa_destroy_shim` here
 ...
 11 | #[exasol_udf]
@@ -23,9 +23,9 @@ error[E0428]: the name `__exa_destroy_shim` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__EXA_VTABLE` is defined multiple times
-  --> tests/trybuild/dup_entry.rs:11:1
-   |
-6  | #[exasol_udf]
+ --> tests/trybuild/dup_entry.rs:11:1
+  |
+ 6 | #[exasol_udf]
    | ------------- previous definition of the value `__EXA_VTABLE` here
 ...
 11 | #[exasol_udf]
@@ -35,9 +35,9 @@ error[E0428]: the name `__EXA_VTABLE` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__exa_udf_entry` is defined multiple times
-  --> tests/trybuild/dup_entry.rs:11:1
-   |
-6  | #[exasol_udf]
+ --> tests/trybuild/dup_entry.rs:11:1
+  |
+ 6 | #[exasol_udf]
    | ------------- previous definition of the value `__exa_udf_entry` here
 ...
 11 | #[exasol_udf]
