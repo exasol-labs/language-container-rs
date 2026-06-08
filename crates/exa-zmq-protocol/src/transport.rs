@@ -7,51 +7,36 @@ pub struct ZmqTransport {
 }
 
 impl ZmqTransport {
-    /// Connect a DEALER socket to `endpoint` (e.g. "tcp://localhost:6583").
+    /// Connect a REQ socket to `endpoint` (e.g. "tcp://localhost:6583").
     ///
-    /// The DB binds a ROUTER socket. In the DEALER→ROUTER pattern the DEALER
-    /// sends one raw payload frame; the ROUTER prepends the sender identity
-    /// for its own routing and delivers [identity, payload] to the DB
-    /// application. The DB replies [identity, payload]; ROUTER strips the
-    /// identity before delivering to the DEALER, so both send and recv see
-    /// exactly one frame — the prost-encoded message. A REQ socket would
-    /// auto-insert an empty delimiter frame, making the DB see a three-frame
-    /// envelope [id, empty, payload]; it cannot parse the protobuf from the
-    /// empty frame and never replies, causing the post-MT_CLIENT hang.
+    /// The DB binds a REP socket. REQ↔REP enforces strict lock-step
+    /// alternation: the client sends exactly one request, waits for exactly
+    /// one reply, then may send again. The REQ socket manages the empty
+    /// delimiter frame automatically; both sides deliver and receive a single
+    /// payload frame — the prost-encoded message.
     pub fn connect(endpoint: &str) -> Result<Self, ProtocolError> {
         let ctx = zmq::Context::new();
-        let socket = ctx.socket(zmq::DEALER)?;
+        let socket = ctx.socket(zmq::REQ)?;
         socket.set_linger(0)?;
         socket.connect(endpoint)?;
         Ok(ZmqTransport { socket })
     }
 
-    /// Send one prost-encoded message to the DB's ROUTER socket.
-    ///
-    /// DEALER→ROUTER requires an empty delimiter frame before the payload so
-    /// the ROUTER can locate the boundary between the routing envelope and the
-    /// message body. Frame layout on the wire: [empty][protobuf_bytes].
+    /// Encodes and delivers the single request frame; the REQ lock-step
+    /// contract ensures the DB's REP socket is in receive state.
     pub fn send(&self, req: &ExascriptRequest) -> Result<(), ProtocolError> {
         let buf = req.encode_to_vec();
         tracing::debug!(mt = req.r#type, len = buf.len(), "send");
-        self.socket.send(b"" as &[u8], zmq::SNDMORE)?;
         self.socket.send(&buf, 0)?;
         Ok(())
     }
 
-    /// Receive one message from the DB's ROUTER socket and decode it.
-    ///
-    /// The ROUTER prepends an empty delimiter frame before the payload (mirror
-    /// of what `send` writes). We discard that frame and decode the second one.
+    /// Blocks until the DB's REP socket delivers its single reply frame; the
+    /// REQ lock-step contract guarantees this is the only frame.
     pub fn recv(&self) -> Result<ExascriptResponse, ProtocolError> {
         tracing::debug!("recv: waiting");
-        let _ = self.socket.recv_bytes(0)?; // empty delimiter frame
         let bytes = self.socket.recv_bytes(0)?;
-        tracing::debug!(
-            len = bytes.len(),
-            more = self.socket.get_rcvmore().unwrap_or(false),
-            "recv: got frame"
-        );
+        tracing::debug!(len = bytes.len(), "recv: got frame");
         let resp = ExascriptResponse::decode(bytes.as_slice())?;
         tracing::debug!(mt = resp.r#type, "recv: decoded");
         Ok(resp)

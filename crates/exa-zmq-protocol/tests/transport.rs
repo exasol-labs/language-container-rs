@@ -24,58 +24,42 @@ fn client_request() -> ExascriptRequest {
 fn transport_connects_to_ipc() {
     let ep = endpoint("connect");
     let ctx = zmq::Context::new();
-    // The DB binds a ROUTER socket; the client connects a DEALER.
-    let server = ctx.socket(zmq::ROUTER).unwrap();
+    // The DB binds a REP socket; the client connects a REQ.
+    let server = ctx.socket(zmq::REP).unwrap();
     server.bind(&ep).unwrap();
 
     let transport = ZmqTransport::connect(&ep);
-    assert!(transport.is_ok(), "DEALER should connect to bound ROUTER");
+    assert!(transport.is_ok(), "REQ should connect to bound REP");
 }
 
 #[test]
 fn transport_round_trip_single_frame() {
     let ep = endpoint("roundtrip");
     let ctx = zmq::Context::new();
-    // The DB side is a ROUTER socket. DEALER clients send one raw payload
-    // frame; ROUTER prepends the sender identity when delivering to the
-    // application ([identity, payload]). To reply, the server re-attaches the
-    // identity so ROUTER can route back. The DEALER sees just the payload
-    // frame — one prost message in, one prost message out.
-    let server = ctx.socket(zmq::ROUTER).unwrap();
+    // The DB side is a REP socket. REQ clients send one raw payload frame;
+    // REP strips the delimiter automatically and delivers just the payload.
+    // REP replies with a single frame that REQ receives as the payload.
+    let server = ctx.socket(zmq::REP).unwrap();
     server.bind(&ep).unwrap();
 
     let transport = ZmqTransport::connect(&ep).unwrap();
     transport.send(&client_request()).unwrap();
 
-    // ROUTER delivers [identity, empty, payload]; capture identity for reply.
-    let identity = server.recv_bytes(0).unwrap();
-    assert!(
-        server.get_rcvmore().unwrap(),
-        "expected more frames after identity"
-    );
-    let empty = server.recv_bytes(0).unwrap();
-    assert!(empty.is_empty(), "expected empty delimiter frame");
-    assert!(
-        server.get_rcvmore().unwrap(),
-        "expected payload after delimiter"
-    );
+    // REP delivers just the payload frame.
     let payload = server.recv_bytes(0).unwrap();
     let decoded = ExascriptRequest::decode(payload.as_slice()).unwrap();
     assert_eq!(decoded.r#type, MessageType::MtClient as i32);
     assert_eq!(decoded.connection_id, 42);
     assert_eq!(decoded.client.unwrap().client_name, "tcp://127.0.0.1:1");
 
-    // Reply: [identity, empty, payload] so ROUTER routes back to our DEALER.
+    // Reply: single frame; REP handles routing back to the REQ peer.
     let reply = ExascriptResponse {
         r#type: MessageType::MtInfo as i32,
         connection_id: 42,
         ..Default::default()
     };
-    server.send(identity, zmq::SNDMORE).unwrap();
-    server.send(b"" as &[u8], zmq::SNDMORE).unwrap();
     server.send(reply.encode_to_vec(), 0).unwrap();
 
-    // DEALER receives [empty, payload]; recv() discards the empty delimiter.
     let got = transport.recv().unwrap();
     assert_eq!(got.r#type, MessageType::MtInfo as i32);
     assert_eq!(got.connection_id, 42);
