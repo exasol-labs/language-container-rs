@@ -15,22 +15,19 @@ pub fn parse_udf_object_path(source: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Extract the connection name from a `%connection <name>` script directive.
+/// Extract the cluster node IP from the ZMQ endpoint string the runtime used
+/// to connect (e.g. `tcp://10.0.0.5:6583` → `Some("10.0.0.5")`).
 ///
-/// Returns the first such name found, or `None` when no `%connection` is
-/// present. Used as `script_name` in the MT_IMPORT credential request.
+/// Returns `None` for input lacking the `tcp://` scheme or a `:` port
+/// separator after the host.
 #[cfg(feature = "connect-back")]
-pub fn parse_connection_name(source: &str) -> Option<String> {
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("%connection") {
-            let name = rest.trim().trim_end_matches(';').trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
+pub fn parse_cluster_ip(endpoint: &str) -> Option<String> {
+    let rest = endpoint.strip_prefix("tcp://")?;
+    let (host, _port) = rest.rsplit_once(':')?;
+    if host.is_empty() {
+        return None;
     }
-    None
+    Some(host.to_string())
 }
 
 #[cfg(test)]
@@ -56,5 +53,20 @@ mod tests {
                 "/buckets/bfsdefault/default/udfs/libudf.so"
             ))
         );
+    }
+
+    #[cfg(feature = "connect-back")]
+    #[test]
+    fn parse_cluster_ip_strips_scheme_and_port() {
+        assert_eq!(
+            parse_cluster_ip("tcp://10.0.0.5:6583"),
+            Some("10.0.0.5".into())
+        );
+        assert_eq!(
+            parse_cluster_ip("tcp://192.168.1.100:8563"),
+            Some("192.168.1.100".into())
+        );
+        assert_eq!(parse_cluster_ip("bad"), None);
+        assert_eq!(parse_cluster_ip("tcp://noport"), None);
     }
 }

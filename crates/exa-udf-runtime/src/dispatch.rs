@@ -17,17 +17,16 @@ use exasol_udf_sdk::context::UdfContext;
 /// controls batch sizing on the wire, and the unified `HostContextBridge`
 /// presents each batch through the canonical `while ctx.next()?` iteration, so
 /// the dispatcher does not need to special-case the iteration shape.
+///
+/// `endpoint` is the ZMQ endpoint string the runtime connected to; it is
+/// threaded to the bridge so `cluster_ip()` can derive the node IP.
 pub fn run_udf(
     transport: &ZmqTransport,
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
+    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<(), RuntimeError> {
-    // Seed conn_info from the handshake; the run phase may update it when the
-    // DB sends MT_IMPORT (ConnInfo) in reply to MT_NEXT.
-    #[cfg(feature = "connect-back")]
-    let mut conn_info: Option<exa_zmq_protocol::ConnInfo> = meta.conn_info.clone();
-
     loop {
         match request(transport, proto, proto.run_request())? {
             HostEvent::Run => {}
@@ -43,7 +42,7 @@ pub fn run_udf(
             udf,
             meta,
             #[cfg(feature = "connect-back")]
-            &mut conn_info,
+            endpoint,
         )? {
             return early;
         }
@@ -69,7 +68,7 @@ fn consume_input(
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
-    #[cfg(feature = "connect-back")] conn_info: &mut Option<exa_zmq_protocol::ConnInfo>,
+    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<Option<Result<(), RuntimeError>>, RuntimeError> {
     loop {
         match request(transport, proto, proto.next_request())? {
@@ -83,7 +82,7 @@ fn consume_input(
                     &table,
                     meta,
                     #[cfg(feature = "connect-back")]
-                    conn_info.clone(),
+                    endpoint,
                 )?;
                 if !emitted.is_empty() {
                     let out = emitted.to_proto(&meta.output_columns);
@@ -102,9 +101,6 @@ fn consume_input(
             | HostEvent::Pending
             | HostEvent::Ping(_)
             | HostEvent::SingleCall { .. } => {}
-            #[cfg(feature = "connect-back")]
-            HostEvent::ConnInfo(ci) => *conn_info = Some(ci),
-            #[cfg(not(feature = "connect-back"))]
             HostEvent::ConnInfo(_) => {}
         }
     }
@@ -140,62 +136,59 @@ fn request(
 ///
 /// When the `connect-back` feature is enabled, `transport` and `proto` are
 /// used to build an on-demand MT_IMPORT closure passed to the bridge. The
-/// closure is only invoked if the UDF calls `exa()` and no proactive
-/// `conn_info` was available. The outer dispatch loop is blocked waiting for
-/// this function to return, so the ZMQ socket is idle during UDF execution and
-/// the MT_IMPORT exchange is safe to perform here.
+/// closure is invoked each time the UDF calls `connection(name)`, sending an
+/// MT_IMPORT credential request for that name. The outer dispatch loop is
+/// blocked waiting for this function to return, so the ZMQ socket is idle
+/// during UDF execution and the MT_IMPORT exchange is safe to perform here.
+///
+/// `endpoint` is the ZMQ endpoint string the runtime connected to; it is
+/// stored in the bridge so `cluster_ip()` can derive the node IP.
 fn run_batch(
     #[cfg(feature = "connect-back")] transport: &ZmqTransport,
     #[cfg(feature = "connect-back")] proto: &mut Protocol,
     udf: &LoadedUdf,
     table: &exa_proto::ExascriptTableData,
     meta: &UdfMeta,
-    #[cfg(feature = "connect-back")] conn_info: Option<exa_zmq_protocol::ConnInfo>,
+    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<EmitBuffer, RuntimeError> {
     let mut input = InputRowSet::from_proto(table, &meta.input_columns);
     let mut emit_buf = EmitBuffer::new();
     {
-        // Connection name from `%connection <name>` directive in the script source.
-        // Used as the `script_name` in the on-demand MT_IMPORT credential request.
+        // The credential fetcher must be `Fn` (the bridge calls it through a
+        // shared `&self` in `connection()`), but `proto.step()` needs `&mut`.
+        // A `RefCell` reconciles this: the closure borrows the cell mutably only
+        // for the duration of one MT_IMPORT exchange. Calls are serial — the
+        // dispatch loop is blocked here — so the borrow never overlaps.
         #[cfg(feature = "connect-back")]
-        let conn_name: String =
-            crate::artifact::parse_connection_name(&meta.source_code).unwrap_or_default();
+        let proto_cell = std::cell::RefCell::new(proto);
 
         #[cfg(feature = "connect-back")]
-        let conn_requester: Option<
-            Box<
-                dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
-                    + '_,
-            >,
-        > = if conn_info.is_none() {
-            Some(Box::new(move || {
-                let req = proto.import_connection_request(&conn_name);
-                transport
-                    .send(&req)
-                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                let resp = transport
-                    .recv()
-                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                let (event, _) = proto
-                    .step(resp)
-                    .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                match event {
-                    exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
-                    _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                        "MT_IMPORT reply was not ConnInfo".into(),
-                    )),
-                }
-            }))
-        } else {
-            None
-        };
+        let conn_requester: crate::rowset::ConnRequester = Box::new(move |conn_name: &str| {
+            let mut proto = proto_cell.borrow_mut();
+            let req = proto.import_connection_request(conn_name);
+            transport
+                .send(&req)
+                .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+            let resp = transport
+                .recv()
+                .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+            let (event, _) = proto
+                .step(resp)
+                .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+            match event {
+                exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
+                _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "MT_IMPORT reply was not ConnInfo".into(),
+                )),
+            }
+        });
 
         let mut bridge = HostContextBridge::new(
             &mut input,
             &mut emit_buf,
             &meta.input_columns,
             #[cfg(feature = "connect-back")]
-            conn_info,
+            endpoint.to_string(),
             #[cfg(feature = "connect-back")]
             conn_requester,
         );

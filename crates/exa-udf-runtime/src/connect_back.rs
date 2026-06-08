@@ -113,4 +113,43 @@ mod tests {
             "exasol://sys:exasol@10.0.0.5:8563?validateservercertificate=0"
         );
     }
+
+    /// The DSN uses `ConnInfo.address` as the host:port, not any other IP
+    /// that might be available in the runtime environment (e.g. the cluster IP).
+    #[test]
+    fn connect_back_dsn_targets_address_as_external_client() {
+        let info = ConnInfo {
+            kind: "GENERIC".into(),
+            address: "192.0.2.99:8563".into(),
+            user: "alice".into(),
+            password: "secret".into(),
+        };
+        let dsn = build_dsn(&info);
+        assert!(
+            dsn.contains("192.0.2.99"),
+            "DSN must embed conn.address; got: {dsn}"
+        );
+    }
+
+    /// The DSN is built solely from `ConnInfo` fields; no cluster node IP is
+    /// injected. Verified by using an address different from any node IP.
+    #[test]
+    fn connect_back_dsn_built_only_from_connection_object() {
+        let cluster_ip = "10.0.0.5"; // not in ConnInfo.address
+        let info = ConnInfo {
+            kind: "GENERIC".into(),
+            address: "192.0.2.55:8563".into(),
+            user: "bob".into(),
+            password: "pass".into(),
+        };
+        let dsn = build_dsn(&info);
+        assert!(
+            !dsn.contains(cluster_ip),
+            "DSN must not contain cluster IP; got: {dsn}"
+        );
+        assert!(
+            dsn.contains("192.0.2.55"),
+            "DSN must contain conn.address; got: {dsn}"
+        );
+    }
 }

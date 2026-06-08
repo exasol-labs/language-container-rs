@@ -12,28 +12,25 @@ pub trait UdfContext {
     /// Advance to the next input row (set UDFs only). Returns false when exhausted.
     fn next(&mut self) -> Result<bool, UdfError>;
 
-    /// Open (or reuse) the default connect-back connection, built from the
-    /// credentials surfaced during the handshake.
+    /// Return the IP address of the cluster node that started this language container.
+    /// The IP is parsed from the ZMQ endpoint; no network call is made.
     #[cfg(feature = "connect-back")]
-    fn exa(&mut self) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+    fn cluster_ip(&self) -> Result<String, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
-    /// Open a connect-back connection using a named connection object.
+    /// Fetch raw credentials for a named Exasol CONNECTION object.
     #[cfg(feature = "connect-back")]
-    fn exa_named(
-        &mut self,
-        _conn: &str,
-    ) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+    fn connection(&self, _name: &str) -> Result<crate::connect_back::ConnectionObject, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
-    /// Open a connect-back connection using the given options.
+    /// Open a live Exasol session using credentials from a `ConnectionObject`.
     #[cfg(feature = "connect-back")]
-    fn exa_connect(
+    fn connect_back(
         &mut self,
-        _options: crate::connect_back::ConnectBackOptions,
-    ) -> Result<&mut dyn crate::connect_back::ExaConnection, UdfError> {
+        _conn: &crate::connect_back::ConnectionObject,
+    ) -> Result<Box<dyn crate::connect_back::ExaConnection>, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 }

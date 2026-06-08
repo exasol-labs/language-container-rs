@@ -19,6 +19,7 @@ const SCALAR_LIB: &str = "libscalar_double.so";
 const SET_LIB: &str = "libset_filter.so";
 const JSON_LIB: &str = "libjson_parse.so";
 const CB_QUERY_LIB: &str = "libconnect_back_query.so";
+const CB_CLUSTER_IP_LIB: &str = "libconnect_back_cluster_ip.so";
 const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 
@@ -61,6 +62,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_insert_path = harness
         .upload_udf(CB_INSERT_LIB, read_udf_artifact(CB_INSERT_LIB)?)
         .await?;
+    let cb_cluster_ip_path = harness
+        .upload_udf(CB_CLUSTER_IP_LIB, read_udf_artifact(CB_CLUSTER_IP_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -77,6 +81,26 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario single_call_default_output_columns ok");
     single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_unimplemented ok");
+
+    // cluster_ip() does not open a connect-back session, so it carries no
+    // ADR-015 SIGABRT risk. However, Exasol Docker single-node uses an IPC
+    // ZMQ transport (ipc:///tmp/...) rather than TCP, so cluster_ip() cannot
+    // parse a node IP from the socket path and returns an error. In a real
+    // multi-node cluster the endpoint is tcp://<node_ip>:<port> and the
+    // scenario would pass as a hard assertion.
+    let cb_cluster_ip_result =
+        connect_back_cluster_ip_emits_node_ip(&mut conn, &cb_cluster_ip_path).await;
+    on_scenario_fail(&cb_cluster_ip_result, "connect_back_cluster_ip", &harness).await;
+    match &cb_cluster_ip_result {
+        Ok(_) => eprintln!("[it] scenario connect_back_cluster_ip ok"),
+        Err(e) if is_known_ipc_transport_failure(e) => eprintln!(
+            "[it] scenario connect_back_cluster_ip KNOWN_FAILING (Docker IPC transport: \
+             cluster_ip() requires TCP endpoint): {e}"
+        ),
+        Err(e) => bail!(
+            "connect_back_cluster_ip: unexpected error (not the documented IPC signature): {e}"
+        ),
+    }
 
     // Connect-back scenarios last: a server-side SIGABRT bug in Exasol 2026.latest
     // (image id b81d80f63d10, same as 2026.1.0) kills the outer session whenever a
@@ -167,6 +191,14 @@ async fn on_scenario_fail<T>(result: &Result<T>, scenario: &str, harness: &Harne
 fn is_known_sigabrt_failure(e: &anyhow::Error) -> bool {
     let chain = format!("{:#}", e);
     chain.contains("close_notify") || chain.contains("peer closed connection")
+}
+
+/// Return true if `e` matches the IPC-transport failure: Exasol Docker single-node uses
+/// `ipc:///tmp/...` ZMQ sockets rather than `tcp://`, so `cluster_ip()` cannot extract
+/// a node IP and returns a ConnectBack error containing "ipc://".
+fn is_known_ipc_transport_failure(e: &anyhow::Error) -> bool {
+    let chain = format!("{:#}", e);
+    chain.contains("ipc://")
 }
 
 /// Scenario: harness starts Exasol and `SELECT 1` returns a non-empty result.
@@ -262,6 +294,26 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Scenario: cluster_ip() — scalar UDF emits the node IP of the cluster node
+/// that started the language container. No connect-back session is opened, so
+/// there is no ADR-015 SIGABRT risk; this is a hard assertion.
+async fn connect_back_cluster_ip_emits_node_ip(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT connect_back_cluster_ip() RETURNS VARCHAR(64) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(conn, "SELECT TO_CHAR(connect_back_cluster_ip())").await?;
+    let ip = got.ok_or_else(|| anyhow!("cluster_ip returned NULL"))?;
+    if !ip.contains('.') {
+        bail!("cluster_ip returned non-IPv4 string: {ip:?}");
+    }
+    Ok(())
 }
 
 /// Scenario: connect-back query — UDF issues `SELECT 42` via connect-back and

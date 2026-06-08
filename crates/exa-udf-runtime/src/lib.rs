@@ -82,7 +82,14 @@ impl Runtime {
         let result = if meta.single_call_mode {
             single_call::run_single_call(&transport, &mut proto, &udf, &meta)
         } else {
-            dispatch::run_udf(&transport, &mut proto, &udf, &meta)
+            dispatch::run_udf(
+                &transport,
+                &mut proto,
+                &udf,
+                &meta,
+                #[cfg(feature = "connect-back")]
+                &self.endpoint,
+            )
         };
         tracing::debug!(ok = result.is_ok(), "run loop finished");
 

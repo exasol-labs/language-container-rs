@@ -23,8 +23,8 @@ impl UdfContext for Ctx {
 
 // When the `connect-back` feature is disabled, the connect-back methods must
 // not exist on the trait. This test compiles only because `Ctx` does not need
-// to provide `exa` / `exa_named` / `exa_connect` — proving they are absent from
-// the trait surface. A compile-time guard backs this up.
+// to provide `cluster_ip` / `connection` / `connect_back` — proving they are
+// absent from the trait surface. A compile-time guard backs this up.
 #[test]
 fn connect_back_methods_absent_without_feature() {
     let mut ctx = Ctx;

@@ -1,18 +1,14 @@
 use crate::error::UdfError;
 use arrow::record_batch::RecordBatch;
 
-/// Options for opening a connect-back connection.
-pub enum ConnectBackOptions {
-    /// Use the credentials surfaced during the handshake (default).
-    Default,
-    /// Override with a named connection object from the database.
-    Named(String),
-    /// Fully explicit credentials.
-    Explicit {
-        dsn: String,
-        user: String,
-        password: String,
-    },
+/// Credentials for a named Exasol CONNECTION object or any external system.
+#[cfg(feature = "connect-back")]
+#[derive(Debug, Clone)]
+pub struct ConnectionObject {
+    pub kind: String,
+    pub address: String,
+    pub user: String,
+    pub password: String,
 }
 
 /// A live Exasol connection the UDF can use for queries and DML.

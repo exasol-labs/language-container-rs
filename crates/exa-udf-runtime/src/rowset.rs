@@ -271,34 +271,30 @@ fn push_placeholder(
 /// row exists); subsequent calls advance. This lets both scalar and set UDFs
 /// use the canonical `while ctx.next()? { ... }` loop while the dispatch layer
 /// controls batch refills.
+///
+/// On-demand credential fetcher: given a CONNECTION name, sends MT_IMPORT to the
+/// DB and returns the resulting `ConnInfo`. `Fn` (not `FnOnce`) because
+/// `connection()` borrows `&self` and may be called repeatedly for different
+/// named connections within a single UDF run.
+#[cfg(feature = "connect-back")]
+pub type ConnRequester<'a> =
+    Box<dyn Fn(&str) -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>;
+
 pub struct HostContextBridge<'a> {
     input: &'a mut InputRowSet,
     emit_buf: &'a mut EmitBuffer,
     input_cols: &'a [ColumnMeta],
     started: bool,
-    /// Last error captured from a UDF context method (e.g. `exa()`). Surfaced
-    /// through `RuntimeError::Udf` so the full error appears in the SQL error.
-    last_error: Option<String>,
-    /// The lazily-opened default connect-back connection, cached for the life of
-    /// the batch so repeated `exa()` calls reuse the same session.
+    /// Last error captured from a UDF context method. Surfaced through
+    /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
+    /// because `connection()` records errors through a shared `&self` borrow.
+    last_error: std::cell::Cell<Option<String>>,
+    /// ZMQ endpoint string the runtime connected to (e.g.
+    /// `tcp://10.0.0.5:6583`). Stored so `cluster_ip()` can parse the node IP.
     #[cfg(feature = "connect-back")]
-    conn: Option<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>>,
-    /// Credentials surfaced during the handshake or a prior run-phase
-    /// MT_IMPORT. Used to open `conn` on first `exa()` without sending a new
-    /// request. `None` when no proactive credentials were received.
+    endpoint: String,
     #[cfg(feature = "connect-back")]
-    conn_info: Option<exa_zmq_protocol::ConnInfo>,
-    /// On-demand credential fetcher: called when `conn_info` is `None` and the
-    /// UDF invokes `exa()`. Sends MT_IMPORT to the DB and returns the resulting
-    /// `ConnInfo`. `FnOnce` because a single exchange is enough — the returned
-    /// `ConnInfo` is used to open `conn`, which is cached for the batch.
-    #[cfg(feature = "connect-back")]
-    conn_requester: Option<
-        Box<
-            dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
-                + 'a,
-        >,
-    >,
+    conn_requester: ConnRequester<'a>,
 }
 
 impl<'a> HostContextBridge<'a> {
@@ -306,24 +302,17 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
-        #[cfg(feature = "connect-back")] conn_info: Option<exa_zmq_protocol::ConnInfo>,
-        #[cfg(feature = "connect-back")] conn_requester: Option<
-            Box<
-                dyn FnOnce() -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError>
-                    + 'a,
-            >,
-        >,
+        #[cfg(feature = "connect-back")] endpoint: String,
+        #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
             input,
             emit_buf,
             input_cols,
             started: false,
-            last_error: None,
+            last_error: std::cell::Cell::new(None),
             #[cfg(feature = "connect-back")]
-            conn: None,
-            #[cfg(feature = "connect-back")]
-            conn_info,
+            endpoint,
             #[cfg(feature = "connect-back")]
             conn_requester,
         }
@@ -334,43 +323,32 @@ impl<'a> HostContextBridge<'a> {
         self.last_error.take()
     }
 
-    /// Open the default connect-back connection. Tries proactively-received
-    /// credentials first; falls back to an on-demand MT_IMPORT exchange.
+    /// Record an error message captured from a UDF context method. Available on
+    /// a shared borrow because `connection()` is a `&self` method.
     #[cfg(feature = "connect-back")]
-    fn open_default_connection(&mut self) -> Result<(), exasol_udf_sdk::error::UdfError> {
-        let info = if let Some(ci) = self.conn_info.take() {
-            ci
-        } else {
-            let fetcher = self.conn_requester.take().ok_or_else(|| {
-                exasol_udf_sdk::error::UdfError::ConnectBack(
-                    "no connection credentials available".into(),
-                )
-            })?;
-            fetcher()?
-        };
-        self.conn = Some(Box::new(crate::connect_back::open_connection(&info)?));
-        Ok(())
+    fn record_error(&self, message: String) {
+        self.last_error.set(Some(message));
     }
 
-    /// Inject a ready-made connection so the bridge can be exercised without a
-    /// live database. Intended for tests.
+    /// Inject a credential fetcher so the bridge can be exercised without a live
+    /// database. The supplied closure stands in for the on-demand MT_IMPORT
+    /// exchange. Intended for tests.
     #[cfg(feature = "connect-back")]
     #[doc(hidden)]
     pub fn with_connection(
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
-        conn: Box<dyn exasol_udf_sdk::connect_back::ExaConnection>,
+        conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
             input,
             emit_buf,
             input_cols,
             started: false,
-            last_error: None,
-            conn: Some(conn),
-            conn_info: None,
-            conn_requester: None,
+            last_error: std::cell::Cell::new(None),
+            endpoint: "tcp://127.0.0.1:6583".to_string(),
+            conn_requester,
         }
     }
 }
@@ -404,15 +382,54 @@ impl UdfContext for HostContextBridge<'_> {
     }
 
     #[cfg(feature = "connect-back")]
-    fn exa(&mut self) -> Result<&mut dyn exasol_udf_sdk::connect_back::ExaConnection, UdfError> {
-        if self.conn.is_none() {
-            let result = self.open_default_connection();
-            if let Err(ref e) = result {
-                self.last_error = Some(e.to_string());
-            }
-            result?;
+    fn cluster_ip(&self) -> Result<String, UdfError> {
+        let result = crate::artifact::parse_cluster_ip(&self.endpoint).ok_or_else(|| {
+            UdfError::ConnectBack(format!(
+                "could not parse cluster IP from endpoint; endpoint={:?}",
+                self.endpoint
+            ))
+        });
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
         }
-        Ok(self.conn.as_deref_mut().expect("connection just opened"))
+        result
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn connection(
+        &self,
+        name: &str,
+    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+        let result =
+            (self.conn_requester)(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
+                kind: ci.kind,
+                address: ci.address,
+                user: ci.user,
+                password: ci.password,
+            });
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
+        }
+        result
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn connect_back(
+        &mut self,
+        conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+    ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
+        let info = exa_zmq_protocol::ConnInfo {
+            kind: conn.kind.clone(),
+            address: conn.address.clone(),
+            user: conn.user.clone(),
+            password: conn.password.clone(),
+        };
+        let result = crate::connect_back::open_connection(&info)
+            .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>);
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
+        }
+        result
     }
 }
 
@@ -443,9 +460,13 @@ mod tests {
             emit,
             cols,
             #[cfg(feature = "connect-back")]
-            None,
+            "tcp://127.0.0.1:6583".to_string(),
             #[cfg(feature = "connect-back")]
-            None,
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
         )
     }
 

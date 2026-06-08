@@ -8,7 +8,8 @@ use exasol_udf_sdk::value::Value;
 /// first cell of the first result batch.
 #[exasol_udf]
 pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let batches = ctx.exa()?.query_arrow("SELECT 42")?;
+    let c = ctx.connection("CB_SELF")?;
+    let batches = ctx.connect_back(&c)?.query_arrow("SELECT 42")?;
     let first_val = batches
         .first()
         .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
