@@ -86,4 +86,4 @@ Full index → [docs/index.md](docs/index.md)
 Community-supported. Licensed under [MIT](LICENSE).
 
 ---
-Built with Rust 🦀 and made with ❤️ as part of [Exasol Labs](https://github.com/exasol-labs) 🧪.
+<div align="center">Built with Rust 🦀 and made with ❤️ as part of <a href="https://github.com/exasol-labs">Exasol Labs</a> 🧪.</div>
