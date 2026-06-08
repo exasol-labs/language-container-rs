@@ -147,6 +147,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends musl-tools
           rustup component add rust-src --toolchain 1.91
+          # musl-gcc sysroot (/usr/lib/x86_64-linux-musl) has no libgcc_s.so.1;
+          # the custom dylib target links it dynamically, so symlink it in.
+          sudo ln -sf /lib/x86_64-linux-gnu/libgcc_s.so.1 /usr/lib/x86_64-linux-musl/libgcc_s.so.1
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
