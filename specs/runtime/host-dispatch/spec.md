@@ -1,12 +1,10 @@
 # Feature: host-dispatch
 
-Orchestrates loading a UDF `.so`, building the host-side `UdfContext` bridge, and dispatching the database execution model — scalar/set run loops, single-call functions, and connect-back — over the wire protocol.
+Orchestrates loading a UDF `.so`, building the host-side `UdfContext` bridge, and dispatching the database execution model — scalar/set run loops and single-call functions — over the wire protocol. The connect-back host implementation is specified separately in `runtime/connect-back`.
 
 ## Background
 
-Connect-back opens a connection from inside the UDF sandbox back to Exasol. The host fetches credentials via `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) — a pure metadata retrieval equivalent to PyExasol's `exa.get_connection(NAME)` — then connects to the returned `address` as an ordinary external client over the exarrow-rs native binary protocol with server-certificate validation disabled.
-
-The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks, connect-back via a host implementation of the SDK `ExaConnection` trait over a dedicated `CONNECT_BACK_RT` tokio runtime, and load-time validation of typed `#[exasol_udf(input(...), emits(...))]` schemas against the database metadata.
+The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks and load-time validation of typed `#[exasol_udf(input(...), emits(...))]` schemas against the database metadata.
 
 ## Scenarios
 
@@ -102,47 +100,6 @@ The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK 
 * *WHEN* the single-call dispatcher receives a `HostEvent::SingleCall` with `Sc_Fn_Virtual_Schema_Adapter_Call` carrying a request string
 * *THEN* it MUST invoke the `virtual_schema_adapter_call` hook with the request payload
 * *AND* it MUST reply with `HostAction::SingleCallReturn` carrying the adapter response string
-
-### Scenario: Connect-back opens a connection from the handshake credentials
-
-* *GIVEN* a runtime built with the `connect-back` feature where `UdfMeta` carries connection information from `MT_INFO`
-* *WHEN* a UDF first calls `ctx.exa()`
-* *THEN* the `HostContextBridge` MUST open an `exarrow-rs` connection on the dedicated `CONNECT_BACK_RT` runtime using the handshake credentials
-* *AND* it MUST cache the connection for the remainder of the session
-* *AND* a subsequent `ctx.exa()` MUST return the same cached connection without reopening
-
-### Scenario: Connect-back query returns Arrow batches to the UDF
-
-* *GIVEN* a `HostContextBridge` holding an open connect-back connection
-* *WHEN* the UDF calls `query_arrow` with a SELECT statement
-* *THEN* the host MUST execute the query on the `CONNECT_BACK_RT` runtime and return the result as `Vec<RecordBatch>`
-* *AND* a query failure MUST be returned as `UdfError::ConnectBack` rather than panicking
-
-### Scenario: Connect-back retrieves credentials on demand when the handshake carries none
-
-* *GIVEN* a runtime built with the `connect-back` feature where `UdfMeta.conn_info` is `None` because `MT_INFO` carried no connection information
-* *AND* the UDF was registered with a `%connection <name>` directive naming a database `CONNECTION` object
-* *WHEN* the UDF first calls `ctx.exa()` during `run_batch`
-* *THEN* the host MUST send an `MT_IMPORT` request with `kind = PB_IMPORT_CONNECTION_INFORMATION` naming the connection, while the outer dispatch loop is blocked awaiting the function return
-* *AND* it MUST build the connect-back connection from the `address`, `user`, and `password` in the `connection_information_rep` response
-* *AND* if proactive handshake credentials are present they MUST take priority over the on-demand path
-
-### Scenario: Connect-back connects to the named connection address like an external client
-
-* *GIVEN* a `connection_information_rep` whose `address` is a routable Exasol endpoint and whose `kind` is `password`
-* *WHEN* the host opens the connect-back connection
-* *THEN* it MUST connect to the `address` exactly as an ordinary external client would, opening a new database session and a new transaction, authenticated with the `user` and `password` from the response and not a session token
-* *AND* it MUST NOT attempt to share or join the invoking query's session or transaction, because the Exasol core cannot share a transaction with a language-container UDF
-* *AND* it MUST disable server-certificate validation to match the project transport rule
-* *AND* it MUST use the exarrow-rs native binary protocol by relying on the default `native` feature, and MUST NOT set a `transport=websocket` override in the DSN
-
-### Scenario: Connect-back named connection makes the UDF portable across clusters
-
-* *GIVEN* a UDF script registered with a generic `%connection <NAME>` directive and no hardcoded cluster address in its source
-* *AND* a database `CREATE CONNECTION <NAME> TO '<cluster-address>:8563' USER '...' IDENTIFIED BY '...'` object that the operator populated with the correct address for the target cluster
-* *WHEN* the host requests credentials with `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) naming `<NAME>` and receives the `connection_information_rep`
-* *THEN* the host MUST build the connect-back DSN solely from the `address`, `user`, and `password` returned for that named connection
-* *AND* the host MUST NOT embed or assume any cluster-specific address of its own, so the same UDF artifact remains portable across clusters that differ only in the `CREATE CONNECTION` definition
 
 ### Scenario: Annotated schema is validated against the database metadata at load
 

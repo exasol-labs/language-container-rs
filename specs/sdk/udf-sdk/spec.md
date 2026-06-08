@@ -1,12 +1,10 @@
 # Feature: udf-sdk
 
-Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/`ExaType` model, the `#[repr(C)]` ABI vtable, and the connect-back surface — that UDF crates depend on without linking the host runtime or exarrow-rs.
+Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/`ExaType` model, and the `#[repr(C)]` ABI vtable — that UDF crates depend on without linking the host runtime or exarrow-rs. The connect-back surface is specified separately in `sdk/connect-back`.
 
 ## Background
 
-The SDK is the only crate a UDF author depends on (plus `arrow`). Its ABI constants and `#[repr(C)]` vtable are stable across the host loader and the proc macro. v2 adds the `virtual_schema_adapter_call` single-call hook, a feature-gated `connect-back` surface exposing the `ExaConnection` trait and `ConnectBackOptions` (with no exarrow-rs type in any public signature), and typed `#[exasol_udf(input(...), emits(...))]` annotation support that maps Rust types to `ExaType`.
-
-The connect-back surface is feature-gated. The `ExaConnection` trait exposes `query_arrow` and `execute` and references no exarrow-rs type. Every connection a UDF obtains through `exa`, `exa_named`, or `exa_connect` is a new external client session and a new transaction, independent of the invoking query.
+The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, and value types. It does not link the host runtime or exarrow-rs. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable from a struct that implements `UdfRun`. The SDK fingerprint, baked at build time from the SDK version and compiler hash, is embedded in the vtable for load-time compatibility checking by the host.
 
 ## Scenarios
 
@@ -67,38 +65,6 @@ The connect-back surface is feature-gated. The `ExaConnection` trait exposes `qu
 * *WHEN* the crate is compiled as a cdylib
 * *THEN* the build MUST fail because of a duplicate `__exa_udf_entry` symbol
 * *AND* the failure MUST occur at link time rather than producing a silently-wrong artifact
-
-### Scenario: ExaConnection trait is defined behind the connect-back feature
-
-* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
-* *WHEN* the `connect_back` module is referenced
-* *THEN* it MUST expose an `ExaConnection` trait with `query_arrow`, `execute`, `import_arrow`, and `export_arrow` methods returning `Result<_, UdfError>`
-* *AND* it MUST expose a `ConnectBackOptions` enum with `Default`, `Named(String)`, and `Explicit { host, user, password }` variants
-* *AND* the `ExaConnection` trait MUST NOT reference any `exarrow-rs` type in its public signature
-
-### Scenario: UdfContext connect-back methods are absent without the feature
-
-* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature disabled
-* *WHEN* the crate is compiled
-* *THEN* the `UdfContext` methods `exa`, `exa_named`, and `exa_connect` MUST NOT be present
-* *AND* the crate MUST NOT depend on `tokio` or `exarrow-rs`
-
-### Scenario: UdfContext exposes connect-back methods with the feature
-
-* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
-* *WHEN* a UDF references the `UdfContext` trait
-* *THEN* the trait MUST expose `exa(&self) -> Result<&dyn ExaConnection, UdfError>` for the lazy default connection
-* *AND* it MUST expose `exa_named(&self, name: &str)` and `exa_connect(&self, opts: ConnectBackOptions)` each returning `Result<Box<dyn ExaConnection>, UdfError>`
-* *AND* every connection returned by these methods MUST be a new external client session and a new transaction, independent of the invoking query's session and transaction
-* *AND* the `ExaConnection` query methods (`query_arrow`, `execute`) MUST retain their existing signatures, so enabling new-session semantics requires no change to the author-facing API
-
-### Scenario: exasol_udf annotation generates schema metadata for matching types
-
-* *GIVEN* a struct annotated `#[exasol_udf(input(x: i64, label: String), emits(result: i64))]`
-* *WHEN* the crate is compiled as a cdylib
-* *THEN* the macro MUST map each annotated Rust type to its `ExaType` (`i64` to `Int64`, `String` to `String`, `f64` to `Double`)
-* *AND* it MUST embed the resulting input and emit column schema into the generated vtable for load-time validation
-* *AND* the bare `#[exasol_udf]` form MUST continue to compile with no embedded schema
 
 ### Scenario: exasol_udf annotation with an unknown type fails to compile
 
