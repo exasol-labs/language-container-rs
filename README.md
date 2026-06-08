@@ -14,7 +14,14 @@ A pure-Rust Exasol Script Language Container that executes precompiled `.so` UDF
 
 ## What it is
 
-`language-container-rs` replaces the C++ launcher and `libexaudflib` entirely. UDFs are compiled to `x86_64-unknown-linux-musl` shared libraries, uploaded to BucketFS, and loaded at runtime through a thin FFI dispatch loop. No C++ toolchain, no JVM, no Python runtime.
+[Exasol](https://www.exasol.com) is a high-performance analytic database built for speed and scalability. You can try it immediately with the [SaaS free trial](https://cloud.exasol.com) or spin up a local instance using the [Docker image](https://hub.docker.com/r/exasol/docker-db).
+
+`language-container-rs` is the Rust Script Language Container for Exasol. It lets data engineers write UDFs in Rust — compiled to `.so` shared libraries, uploaded to BucketFS once, and loaded at query time. Third-party crates are statically linked into the `.so`, so adding a dependency never requires redeploying the language container.
+
+Two further capabilities ship out of the box:
+
+- **Connect-back** — a UDF can open an ADBC session back to Exasol mid-execution and stream Apache Arrow record batches to or from the database.
+- **Cluster distribution** — Exasol executes SET UDFs on every node in parallel. Grouping by [`IPROC()`](https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/iproc.htm) pins each group to the node that owns the data, saturating the full cluster with a single query.
 
 The workspace ships three crates for UDF authors, container operators, and build tooling — plus the protocol layer that wires them together.
 
