@@ -336,8 +336,16 @@ pub async fn query_single_string(conn: &mut Connection, sql: &str) -> Result<Opt
 }
 
 /// Read the bytes of a precompiled UDF artifact from the workspace target directory.
+///
+/// Set `UDF_TARGET` (e.g. `x86_64-unknown-linux-musl`) to read from the
+/// target-specific directory instead of the default `target/release/`.
 pub fn read_udf_artifact(lib_filename: &str) -> Result<Vec<u8>> {
-    let path = format!("{}/target/release/{}", workspace_root(), lib_filename);
+    let root = workspace_root();
+    let path = if let Ok(target) = std::env::var("UDF_TARGET") {
+        format!("{root}/target/{target}/release/{lib_filename}")
+    } else {
+        format!("{root}/target/release/{lib_filename}")
+    };
     std::fs::read(&path).with_context(|| format!("reading UDF artifact {path}"))
 }
 

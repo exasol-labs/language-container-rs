@@ -1,0 +1,68 @@
+# Stage 1: Builder (Debian/glibc — binary runs on Debian Exasol host after BucketFS extraction)
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# No libzmq3-dev: zmq-sys falls back to zeromq-src (static zmq), eliminating
+# the libzmq runtime dependency from the exported binary.
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ ./crates/
+COPY test-udfs/ ./test-udfs/
+COPY targets/ ./targets/
+
+# arrow v58 (edition2024) requires Cargo >= 1.85; drop the workspace toolchain
+# pin so the image's own toolchain is used.
+RUN rm rust-toolchain.toml
+
+RUN cargo build --release -p exaudfclient
+
+# Collect the exact glibc runtime libs (cp -L dereferences symlinks so we copy
+# real files rather than dangling symlinks into a musl Alpine chroot).
+RUN mkdir -p /glibc-rt/lib/x86_64-linux-gnu \
+               /glibc-rt/lib64 \
+               /glibc-rt/usr/lib/x86_64-linux-gnu \
+               /glibc-rt/etc/ld.so.conf.d && \
+    # Core glibc runtime (cp -L dereferences symlinks into real files)
+    cp -L /lib/x86_64-linux-gnu/libc.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
+    cp -L /lib/x86_64-linux-gnu/libm.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
+    cp -L /lib/x86_64-linux-gnu/libgcc_s.so.1 /glibc-rt/lib/x86_64-linux-gnu/ && \
+    cp -L /lib/x86_64-linux-gnu/libstdc++.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
+    cp -L /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /glibc-rt/lib64/ && \
+    # NSS modules (glibc dlopen's these at runtime for files/dns lookups)
+    cp -L /usr/lib/x86_64-linux-gnu/libnss_files.so.2 /glibc-rt/usr/lib/x86_64-linux-gnu/ && \
+    cp -L /usr/lib/x86_64-linux-gnu/libnss_dns.so.2 /glibc-rt/usr/lib/x86_64-linux-gnu/ && \
+    # ld.so.conf so the linker knows the search paths (generates ld.so.cache equivalent)
+    printf '/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n' \
+        > /glibc-rt/etc/ld.so.conf.d/x86_64-linux-gnu.conf && \
+    printf 'include /etc/ld.so.conf.d/*.conf\n' > /glibc-rt/etc/ld.so.conf && \
+    # Generate ld.so.cache inside the staged tree
+    ldconfig -r /glibc-rt
+
+# Stage 2: Runtime (Alpine — slim packaging layer only)
+# The binary is glibc-linked and runs on the Debian Exasol host after BucketFS
+# extraction; the Alpine image merely provides a small filesystem envelope with
+# the matching glibc runtime bundled for in-container dlopen compatibility.
+FROM alpine:3 AS runtime
+
+RUN apk add --no-cache ca-certificates
+
+ENV LANG=C.UTF-8
+
+# Bundle the glibc runtime from the builder so glibc-linked binaries and UDF
+# .so files can be loaded correctly inside the Exasol container sandbox.
+COPY --from=builder /glibc-rt/ /
+
+RUN mkdir -p /exaudf
+
+COPY --from=builder /build/target/release/exaudfclient /exaudf/exaudfclient
+RUN chmod +x /exaudf/exaudfclient
+
+COPY build_info/ /build_info/
+
+ENTRYPOINT ["/exaudf/exaudfclient"]

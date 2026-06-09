@@ -85,13 +85,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # ── step 1: build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "==> Building slc-rs-slim:dev …"
-  # The Dockerfile references an exarrow-rs build context. When crates.io
-  # supplies the crate (no local path patch), an empty temp dir satisfies
-  # Docker's COPY --from= instruction without patching Cargo.toml.
-  _TMP_BFS_CTX=$(mktemp -d)
-  trap 'rm -rf "$_TMP_BFS_CTX"' EXIT
   docker build \
-    --build-context "exarrow-rs=$_TMP_BFS_CTX" \
+    -f "$REPO_ROOT/Dockerfile.alpine" \
     -t slc-rs-slim:dev \
     "$REPO_ROOT"
   echo "==> Build complete."

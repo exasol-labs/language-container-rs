@@ -15,13 +15,6 @@ COPY crates/ ./crates/
 COPY test-udfs/ ./test-udfs/
 COPY targets/ ./targets/
 
-# Copy exarrow-rs (path dependency patched in Cargo.toml)
-# Provided via: --build-context exarrow-rs=/home/talos/code/exarrow-rs
-COPY --from=exarrow-rs . /exarrow-rs/
-
-# Rewrite the [patch.crates-io] path to the container-local location
-RUN sed -i 's|path = "/home/talos/code/exarrow-rs"|path = "/exarrow-rs"|g' Cargo.toml
-
 # arrow v58 (edition2024) requires Cargo >= 1.85; drop the workspace toolchain
 # pin so the image's own toolchain (1.91) is used rather than the pinned 1.84.
 RUN rm rust-toolchain.toml
