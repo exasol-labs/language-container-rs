@@ -93,6 +93,27 @@ Sequential dependencies:
 |------|----------|--------|
 | (none) | — | Spike adds `Dockerfile.alpine` alongside the existing `Dockerfile`; nothing is removed until the spike is accepted. |
 
+## Spike Notes
+
+### Architecture pivot — glibc bundling, not musl
+
+The original plan assumed a musl build (`rust:alpine` → `x86_64-unknown-linux-musl`). During implementation, two blockers ruled that out:
+
+1. **Exasol sandbox seccomp / CPU-instruction incompatibility with Rust 1.96+**: `rust:bookworm` (1.96.0) compiled binaries crash in the Exasol UDF sandbox. Using `rust:1.91-bookworm` (same as the Debian `Dockerfile`) resolves this.
+2. **Binary runs on the Debian Exasol host, not inside the Docker container**: `exaudfclient` is exported from the image via `docker export`, uploaded to BucketFS, and executed directly on the glibc Debian host. A musl binary would be ABI-incompatible there.
+
+Adopted approach: keep the builder as `rust:1.91-bookworm` (glibc), copy the exact glibc runtime libs from the builder into the Alpine runtime stage using `cp -L` (to dereference symlinks), and run Alpine:3 as the packaging layer only. This gives the small base image while keeping the binary glibc-linked. zmq is statically linked (no `libzmq3-dev` in the builder forces `zmq-sys` to use `zeromq-src` / zmq 4.3.4), eliminating the `libzmq.so.5` runtime dependency.
+
+### Image size delta (measured 2026-06-08)
+
+| Image | Base | `docker image inspect` size |
+|-------|------|----------------------------|
+| `slc-rs-slim:debian` | `debian:12-slim` | 122,067,659 bytes (122 MB) |
+| `slc-rs-slim:dev` (Alpine) | `alpine:3` | 32,292,573 bytes (32.3 MB) |
+| **Delta** | | **−89,775,086 bytes (−89.8 MB, 73.5% reduction, 3.8× smaller)** |
+
+The savings come from swapping `debian:12-slim` (75 MB base) for `alpine:3` (7 MB base) and removing `libzmq5`, `locales`, and related Debian runtime packages.
+
 ## Verification
 
 ### Scenario Coverage

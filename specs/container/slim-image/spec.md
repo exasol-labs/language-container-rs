@@ -1,32 +1,34 @@
 # Feature: slim-image
 
-Packages the `exaudfclient` binary into a slim Debian-based SLC Docker image (Option A only, no Rust toolchain) that Exasol can register as a `localzmq+protobuf` language container.
+Packages the `exaudfclient` binary into a slim Alpine-based SLC Docker image (Option A only, no Rust toolchain) that Exasol can register as a `localzmq+protobuf` language container.
 
 ## Background
 
-The slim image is a multi-stage build: a `rust:1.84-bookworm` builder compiles `exaudfclient` against `libzmq3-dev` and `protobuf-compiler`, and a `debian:12-slim` runtime stage ships only `libzmq5`, `ca-certificates`, and a UTF-8 locale. The runtime stage places the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The builder's toolchain MUST match `rust-toolchain.toml` (`1.84`) so Option-A artifacts pass the fingerprint check.
+The slim image is a multi-stage build: a `rust:1.91-bookworm` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`), then copies the glibc runtime libs (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libstdc++.so.6`, `ld-linux-x86-64.so.2`, NSS modules) with `cp -L` into an `alpine:3` runtime stage. The runtime stage ships only `ca-certificates` and the bundled glibc, placing the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The `exaudfclient` binary is glibc-linked — it runs on the Debian/glibc Exasol host after BucketFS extraction; Alpine serves as the packaging layer only.
 
 ## Scenarios
 
 ### Scenario: docker build produces a tagged slim image
 
-* *GIVEN* the workspace with a `Dockerfile` at the repository root
-* *WHEN* `docker build -t slc-rs-slim:dev .` is run
+* *GIVEN* the workspace with a `Dockerfile.alpine` at the repository root
+* *WHEN* `docker build -f Dockerfile.alpine -t slc-rs-slim:dev .` is run
 * *THEN* the build MUST complete successfully
 * *AND* the resulting image MUST contain an executable at `/exaudf/exaudfclient`
 
-### Scenario: Builder toolchain matches the pinned channel
+### Scenario: Builder toolchain and glibc runtime
 
-* *GIVEN* the Dockerfile builder stage `FROM rust:1.84-bookworm`
+* *GIVEN* the Dockerfile builder stage `FROM rust:1.91-bookworm`
 * *WHEN* the image is built
-* *THEN* the builder Rust version MUST equal the channel pinned in `rust-toolchain.toml`
-* *AND* the builder stage MUST install `libzmq3-dev`, `protobuf-compiler`, and `pkg-config`
+* *THEN* the builder MUST install `protobuf-compiler` and `pkg-config` but NOT `libzmq3-dev`
+* *AND* zmq MUST be statically linked via `zeromq-src`
+* *AND* the glibc runtime libs MUST be collected via `cp -L` into `/glibc-rt/` and staged into the runtime image
 
 ### Scenario: Runtime stage is slim and self-sufficient
 
-* *GIVEN* the Dockerfile runtime stage `FROM debian:12-slim`
+* *GIVEN* the Dockerfile runtime stage `FROM alpine:3`
 * *WHEN* the image is built
-* *THEN* it MUST install `libzmq5`, `ca-certificates`, and `locales` with `en_US.UTF-8` generated and `LANG=en_US.UTF-8` set
+* *THEN* it MUST install only `ca-certificates` via `apk`
+* *AND* it MUST set `ENV LANG=C.UTF-8`
 * *AND* it MUST NOT contain a Rust toolchain or a vendored Cargo registry
 
 ### Scenario: Language definitions file is present and well-formed
@@ -42,3 +44,34 @@ The slim image is a multi-stage build: a `rust:1.84-bookworm` builder compiles `
 * *WHEN* `/exaudf/exaudfclient` is invoked with no arguments inside the container
 * *THEN* it MUST print a usage message referencing `lang=rust`
 * *AND* it MUST exit with a non-zero code
+
+### Scenario: Alpine builder compiles the binary against musl
+
+* *GIVEN* a `Dockerfile.alpine` whose builder stage is `FROM rust:alpine`
+* *WHEN* the image is built
+* *THEN* the builder stage MUST install `zeromq-dev`, `protobuf-dev`, and `pkgconfig` via `apk`
+* *AND* it MUST compile `exaudfclient` for the `x86_64-unknown-linux-musl` target
+* *AND* the resulting binary MUST be a musl binary that runs on an `alpine:3` runtime without a glibc loader
+
+### Scenario: Alpine runtime stage is slim and self-sufficient
+
+* *GIVEN* the `Dockerfile.alpine` runtime stage `FROM alpine:3`
+* *WHEN* the image is built
+* *THEN* it MUST install `libzmq` and `ca-certificates` via `apk`
+* *AND* it MUST set `LANG=C.UTF-8` rather than running `locale-gen`, because Alpine/musl provides no `locales` package
+* *AND* it MUST place the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`
+* *AND* it MUST NOT contain a Rust toolchain or a vendored Cargo registry
+
+### Scenario: Alpine image passes the db-roundtrip integration suite
+
+* *GIVEN* the `slc-rs-slim:dev` image built from `Dockerfile.alpine` and a running `exasol/docker-db:2026.latest` container
+* *WHEN* the db-roundtrip integration harness registers the Alpine SLC, uploads the UDF artifacts, and runs every roundtrip scenario
+* *THEN* the scalar, set/EMITS, statically-linked-dependency, UDF-error, and single-call scenarios MUST all pass against the Alpine image
+* *AND* the Alpine image MUST be interchangeable with the Debian image for SLC registration, requiring no change to the `language_definitions.json` contract
+
+### Scenario: Alpine image is smaller than the Debian slim image
+
+* *GIVEN* both the Debian `slc-rs-slim:dev` image and the Alpine `slc-rs-slim:dev` image built from the same workspace
+* *WHEN* the compressed and on-disk sizes of both images are measured with `docker image inspect`
+* *THEN* the Alpine image on-disk size MUST be smaller than the Debian slim image
+* *AND* the measured size delta MUST be recorded in the plan's spike notes
