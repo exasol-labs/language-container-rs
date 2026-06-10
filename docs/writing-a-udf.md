@@ -135,7 +135,8 @@ CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.my_udf() RETURNS VARCHAR(100) AS
 ### Three connect-back methods on `UdfContext`
 
 ```rust
-// Synchronous — parses the node IP from the ZMQ endpoint, no network call
+// Reads the local node's primary IPv4 via getifaddrs (first non-loopback
+// interface, e.g. eth0); works on single-node Docker and multi-node clusters
 fn cluster_ip(&self) -> Result<String, UdfError>
 
 // Fetches credentials via ZMQ MT_IMPORT (one round-trip to the DB node)
@@ -157,32 +158,40 @@ pub fn connect_back_cluster_ip(ctx: &mut dyn UdfContext) -> Result<(), UdfError>
 
 ### Example: query the database and return a value
 
-```rust
-use arrow::array::Int64Array;
+Use `query()`, which returns rows of the SDK `Value` enum:
 
+```rust
 #[exasol_udf]
 pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let c = ctx.connection("CB_SELF")?;
-    let batches = ctx.connect_back(&c)?.query_arrow("SELECT 42")?;
-    let first_val = batches
-        .first()
-        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
-        .map(|a| a.value(0))
-        .unwrap_or(0);
-    ctx.emit(&[Value::Int64(first_val)])
+    let rows = ctx.connect_back(&c)?.query("SELECT CAST(42 AS BIGINT)")?;
+    let n: i64 = match rows.first().and_then(|r| r.first()) {
+        // BIGINT/DECIMAL arrive as Value::Numeric (decimal string).
+        Some(Value::Numeric(s)) => s.parse().unwrap_or(0),
+        Some(Value::Int64(n)) => *n,
+        _ => 0,
+    };
+    // Emit Numeric for a BIGINT output column (see Pitfalls in the write-back guide).
+    ctx.emit(&[Value::Numeric(n.to_string())])
 }
 ```
 
-`ExaConnection` exposes two methods:
+`ExaConnection` exposes:
 
 ```rust
-fn query_arrow(&mut self, sql: &str) -> Result<Vec<RecordBatch>, UdfError>;
+// FFI-safe: converts results to the SDK Value enum inside the runtime.
+fn query(&mut self, sql: &str)       -> Result<Vec<Vec<Value>>, UdfError>;
 fn execute(&mut self, sql: &str)     -> Result<u64, UdfError>;
+// Same-process only: returns arrow batches. Do NOT downcast these in UDF code —
+// the .so links its own arrow and TypeIds differ across the FFI boundary.
+fn query_arrow(&mut self, sql: &str) -> Result<Vec<RecordBatch>, UdfError>;
 ```
 
 ### Session semantics
 
-`connect_back` always opens a **new external-client session** in a **new independent transaction**. The invoking query's transaction is not accessible from the UDF — any writes committed in the connect-back session are immediately visible to other sessions once committed, independent of the outer query.
+`connect_back` always opens a **new external-client session** in a **new independent transaction** — a plain SQL login, exactly like any external client. The invoking query's transaction is not accessible from the UDF. Writes committed in the connect-back session are visible to other sessions once committed, independent of the outer query.
+
+For modifying the database from a UDF, read the **[write-back guide](write-back-guide.md)** — Exasol's Serializable isolation imposes rules (pre-commit the target, no DDL in the invoking schema, autocommit, emit BIGINT as `Numeric`) that you must follow to avoid transaction-conflict aborts. For the wire protocol behind UDF execution, see **[the protocol reference](protocol.md)**.
 
 ## 5. Build and deploy
 

@@ -1,19 +1,35 @@
-use arrow::array::Int64Array;
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::Value;
 
-/// Scalar UDF that issues a connect-back query (`SELECT 42`) and emits the
-/// first cell of the first result batch.
+/// SET UDF that issues a connect-back query (`SELECT CAST(42 AS BIGINT)`) and
+/// emits the first cell of the first result row.
+///
+/// Uses the FFI-safe `query()` API (returns SDK `Value`s) rather than
+/// `query_arrow()`: arrow arrays produced by the runtime cannot be downcast in
+/// UDF code because the `.so` links a separate copy of `arrow` with different
+/// `TypeId`s. BIGINT arrives as `Value::Numeric` (decimal string), so we parse
+/// it and re-emit it as Numeric (BIGINT EMITS columns travel as PB_NUMERIC).
 #[exasol_udf]
 pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    // Drain the single FROM DUAL input row before opening the connect-back session.
+    while ctx.next()? {}
     let c = ctx.connection("CB_SELF")?;
-    let batches = ctx.connect_back(&c)?.query_arrow("SELECT 42")?;
-    let first_val = batches
+    let mut conn = ctx.connect_back(&c)?;
+    let rows = conn.query("SELECT CAST(42 AS BIGINT)")?;
+    let cell = rows
         .first()
-        .and_then(|b| b.column(0).as_any().downcast_ref::<Int64Array>())
-        .map(|a| a.value(0))
-        .unwrap_or(0);
-    ctx.emit(&[Value::Int64(first_val)])
+        .and_then(|r| r.first())
+        .ok_or_else(|| UdfError::User("connect_back_query: empty result".into()))?;
+    let val: i64 = match cell {
+        Value::Int64(n) => *n,
+        Value::Int32(n) => *n as i64,
+        Value::Numeric(s) => s
+            .parse()
+            .map_err(|e| UdfError::Type(format!("cannot parse '{s}' as i64: {e}")))?,
+        other => return Err(UdfError::Type(format!("unexpected value {other:?}"))),
+    };
+    // BIGINT EMITS columns travel as PB_NUMERIC (decimal string).
+    ctx.emit(&[Value::Numeric(val.to_string())])
 }

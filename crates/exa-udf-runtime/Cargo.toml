@@ -15,10 +15,11 @@ libc = { workspace = true }
 serde_json = { workspace = true }
 arrow = { workspace = true, optional = true }
 exarrow-rs = { workspace = true, optional = true }
+rustls = { version = "0.23", features = ["aws_lc_rs"], optional = true }
 tokio = { workspace = true, optional = true }
 
 [features]
-connect-back = ["exasol-udf-sdk/connect-back", "dep:arrow", "dep:exarrow-rs", "dep:tokio"]
+connect-back = ["exasol-udf-sdk/connect-back", "dep:arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 
 [dev-dependencies]
 zmq = { workspace = true }

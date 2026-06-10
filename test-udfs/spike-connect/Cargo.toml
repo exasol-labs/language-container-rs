@@ -1,0 +1,14 @@
+[package]
+name = "spike-connect"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "spike-connect"
+path = "src/main.rs"
+
+[dependencies]
+exarrow-rs = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

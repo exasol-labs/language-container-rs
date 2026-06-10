@@ -17,7 +17,9 @@ members = [
     "test-udfs/connect-back-query",
     "test-udfs/annotated-double",
     "test-udfs/connect-back-insert",
+    "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
+    "test-udfs/spike-connect",
 ]
 # `it` is excluded from default builds: its integration deps (arrow 58,
 # testcontainers, reqwest) require Rust >= 1.85 and pull edition2024 crates the
@@ -42,7 +44,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 license = "MIT"
 
 [workspace.dependencies]
@@ -65,7 +67,7 @@ thiserror = "2"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-exarrow-rs = "0.12.5"
+exarrow-rs = { version = "0.12.5", features = ["websocket"] }
 
 [profile.release]
 strip = "symbols"

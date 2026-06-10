@@ -8,6 +8,7 @@ The integration harness starts an `exasol/docker-db:<version>` container (versio
 
 ## Scenarios
 
+<!-- DELTA:CHANGED -->
 ### Scenario: cluster_ip UDF emits the node IP
 
 * *GIVEN* a registered slim SLC session and a deployed scalar UDF that calls `ctx.cluster_ip()` and emits the returned string
@@ -15,7 +16,9 @@ The integration harness starts an `exasol/docker-db:<version>` container (versio
 * *THEN* the query MUST return a non-empty string that is a valid IPv4 address (four dot-separated octets, no port suffix)
 * *AND* `cluster_ip()` MUST derive the address from the local node's primary network interface (the first non-loopback IPv4 of the UDF process, e.g. the container `eth0` address) rather than from parsing the ZMQ endpoint string, so it returns a valid IPv4 on both single-node Docker and multi-node TCP deployments
 * *AND* the harness MUST assert the IPv4 result as a hard assertion on every version in the matrix (`2025.1`, `2025.2`, `2026.1`) — there is NO severity branch and NO unconditional skip
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: Connect-back UDF queries the database and emits the result
 
 * *GIVEN* a registered slim SLC session and a deployed connect-back query UDF that calls `ctx.connection("CB_SELF")` and then `ctx.connect_back(&conn_obj)` using the three-method API
@@ -26,7 +29,9 @@ The integration harness starts an `exasol/docker-db:<version>` container (versio
 * *AND* the emitted `BIGINT` value MUST be sent as `Value::Numeric` (Exasol delivers/expects `BIGINT` as `PB_NUMERIC`)
 * *AND* the connect-back session MUST be a new session and a new transaction, distinct from the invoking query's session, and the invoking query's session MUST remain alive throughout
 * *AND* the harness MUST assert this as a hard assertion on every version in the matrix (`2025.1`, `2025.2`, `2026.1`)
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: Connect-back DML UDF inserts rows and data is visible externally
 
 * *GIVEN* a registered slim SLC session and a deployed connect-back insert UDF that calls `ctx.connection("CB_SELF")` and then `ctx.connect_back(&conn_obj)` using the three-method API
@@ -36,7 +41,17 @@ The integration harness starts an `exasol/docker-db:<version>` container (versio
 * *WHEN* the UDF is invoked and its `connect_back` creates a new external-client session and inserts each input value into `cb_sink.cb_result` (no DDL and no explicit `COMMIT` — the connect-back session autocommits)
 * *THEN* `exapump` MUST be able to `SELECT val FROM cb_sink.cb_result ORDER BY val` against the same container and return exactly `10`, `20`, `30`, connecting with `validateservercertificate=0`
 * *AND* the connect-back session's transaction MUST commit independently of the invoking query's transaction, asserted as a hard assertion on every version in the matrix
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:REMOVED -->
+### Scenario: Connect-back UDF reaches a routable database endpoint without crashing the session
+
+* *GIVEN* a registered slim SLC session and a connect-back UDF with a generic `%connection CB_SELF` directive
+* *WHEN* the UDF opens a connect-back connection and runs a query
+* *THEN* this scenario MUST be removed, as its routable-endpoint and parent-session-survival assertions are now covered by the query and DML hard-assertion scenarios
+<!-- /DELTA:REMOVED -->
+
+<!-- DELTA:NEW -->
 ### Scenario: Connect-back write-back into a pre-committed table in the invoking schema
 
 * *GIVEN* a registered slim SLC session and a deployed connect-back SET UDF that number-crunches each input value (squares it) and connect-back-inserts the pair `(v, v*v)`
@@ -46,3 +61,4 @@ The integration harness starts an `exasol/docker-db:<version>` container (versio
 * *WHEN* the UDF is invoked as `SELECT crunch_writeback(v) FROM it_rust.crunch_in`, and afterwards a brand-new independent session inserts one more row into `it_rust.crunch_log`
 * *THEN* `exapump` MUST be able to `SELECT v_squared FROM it_rust.crunch_log ORDER BY v` and return the seeded row, the three UDF-written squares, and the post-UDF row (`1, 4, 9, 16, 25`)
 * *AND* same-schema write-back MUST succeed without a transaction-conflict abort, demonstrating that Serializable isolation is satisfied when the target is pre-committed, the UDF performs no DDL and no explicit `COMMIT` (autocommit), and the invoking query reads a different object than the UDF writes
+<!-- /DELTA:NEW -->

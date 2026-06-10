@@ -263,6 +263,71 @@ fn push_placeholder(
     }
 }
 
+/// Return the first non-loopback IPv4 address found on the local network
+/// interfaces by walking the `getifaddrs` linked list.
+///
+/// Uses `libc::getifaddrs` because the UDF process is a normal Linux process
+/// inside the Exasol container with full access to interface-enumeration
+/// syscalls, and this approach works on single-node Docker (where the ZMQ
+/// endpoint is `ipc://`) and multi-node TCP clusters alike.
+#[cfg(feature = "connect-back")]
+fn first_nonloopback_ipv4() -> Result<String, exasol_udf_sdk::error::UdfError> {
+    use exasol_udf_sdk::error::UdfError;
+
+    // Safety: `getifaddrs` is a POSIX syscall. `ifap` is only accessed inside
+    // this function and freed before return. No Rust references alias the raw
+    // pointer during traversal.
+    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+    let rc = unsafe { libc::getifaddrs(&mut ifap) };
+    if rc != 0 {
+        return Err(UdfError::ConnectBack(format!(
+            "getifaddrs failed with return code {rc}"
+        )));
+    }
+
+    let mut result: Option<String> = None;
+
+    // Walk the singly-linked list of interfaces.
+    let mut ifa = ifap;
+    while !ifa.is_null() {
+        // Safety: `ifa` is a valid pointer produced by `getifaddrs`.
+        let flags = unsafe { (*ifa).ifa_flags };
+        let addr_ptr = unsafe { (*ifa).ifa_addr };
+
+        // Skip interfaces that are not up or have no address.
+        if flags & libc::IFF_UP as u32 != 0 && !addr_ptr.is_null() {
+            // Safety: `addr_ptr` is non-null and valid per `getifaddrs` contract.
+            let family = unsafe { (*addr_ptr).sa_family };
+            if family == libc::AF_INET as libc::sa_family_t {
+                // Safety: family is AF_INET so the pointer refers to a sockaddr_in.
+                let sin = addr_ptr as *const libc::sockaddr_in;
+                let s_addr = unsafe { (*sin).sin_addr.s_addr };
+
+                // `s_addr` is in network byte order (big-endian). Converting to
+                // host order and extracting the high byte gives the first IP
+                // octet; 127 means loopback (127.0.0.0/8).
+                let octets = u32::from_be(s_addr).to_be_bytes();
+                if octets[0] != 127 {
+                    result = Some(format!(
+                        "{}.{}.{}.{}",
+                        octets[0], octets[1], octets[2], octets[3]
+                    ));
+                    break;
+                }
+            }
+        }
+
+        // Safety: `ifa_next` is null-terminated per `getifaddrs` contract.
+        ifa = unsafe { (*ifa).ifa_next };
+    }
+
+    // Always free the list regardless of outcome.
+    // Safety: `ifap` was initialised by `getifaddrs` and has not been modified.
+    unsafe { libc::freeifaddrs(ifap) };
+
+    result.ok_or_else(|| UdfError::ConnectBack("no non-loopback IPv4 interface found".into()))
+}
+
 /// Bridges one materialised input batch and an emit buffer to the SDK's
 /// `UdfContext`. The UDF advances through rows via `next` and reads the current
 /// row via `get`; `emit` appends to the buffer.
@@ -289,10 +354,6 @@ pub struct HostContextBridge<'a> {
     /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
     /// because `connection()` records errors through a shared `&self` borrow.
     last_error: std::cell::Cell<Option<String>>,
-    /// ZMQ endpoint string the runtime connected to (e.g.
-    /// `tcp://10.0.0.5:6583`). Stored so `cluster_ip()` can parse the node IP.
-    #[cfg(feature = "connect-back")]
-    endpoint: String,
     #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
 }
@@ -302,7 +363,6 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
-        #[cfg(feature = "connect-back")] endpoint: String,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -311,8 +371,6 @@ impl<'a> HostContextBridge<'a> {
             input_cols,
             started: false,
             last_error: std::cell::Cell::new(None),
-            #[cfg(feature = "connect-back")]
-            endpoint,
             #[cfg(feature = "connect-back")]
             conn_requester,
         }
@@ -347,7 +405,6 @@ impl<'a> HostContextBridge<'a> {
             input_cols,
             started: false,
             last_error: std::cell::Cell::new(None),
-            endpoint: "tcp://127.0.0.1:6583".to_string(),
             conn_requester,
         }
     }
@@ -383,12 +440,7 @@ impl UdfContext for HostContextBridge<'_> {
 
     #[cfg(feature = "connect-back")]
     fn cluster_ip(&self) -> Result<String, UdfError> {
-        let result = crate::artifact::parse_cluster_ip(&self.endpoint).ok_or_else(|| {
-            UdfError::ConnectBack(format!(
-                "could not parse cluster IP from endpoint; endpoint={:?}",
-                self.endpoint
-            ))
-        });
+        let result = first_nonloopback_ipv4();
         if let Err(ref e) = result {
             self.record_error(e.to_string());
         }
@@ -459,8 +511,6 @@ mod tests {
             input,
             emit,
             cols,
-            #[cfg(feature = "connect-back")]
-            "tcp://127.0.0.1:6583".to_string(),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(

@@ -17,7 +17,12 @@ impl ZmqTransport {
     pub fn connect(endpoint: &str) -> Result<Self, ProtocolError> {
         let ctx = zmq::Context::new();
         let socket = ctx.socket(zmq::REQ)?;
+        // Match reference libexaudflib socket options (from script-languages-release source).
+        // LINGER=0: discard pending messages on close — IPC channel, DB manages its own teardown.
+        // RCVTIMEO/SNDTIMEO=1000: bound blocking recv/send so a stalled DB doesn't hang the UDF.
         socket.set_linger(0)?;
+        socket.set_rcvtimeo(1000)?;
+        socket.set_sndtimeo(1000)?;
         socket.connect(endpoint)?;
         Ok(ZmqTransport { socket })
     }

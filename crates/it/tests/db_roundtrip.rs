@@ -13,7 +13,6 @@
 use anyhow::{anyhow, bail, Result};
 use exarrow_rs::adbc::Connection;
 use it::{query_single_string, read_udf_artifact, register_slc, Harness};
-use std::time::Duration;
 
 const SCALAR_LIB: &str = "libscalar_double.so";
 const SET_LIB: &str = "libset_filter.so";
@@ -22,6 +21,7 @@ const CB_QUERY_LIB: &str = "libconnect_back_query.so";
 const CB_CLUSTER_IP_LIB: &str = "libconnect_back_cluster_ip.so";
 const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
+const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -34,13 +34,23 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     sanity_select_one(&mut conn).await?;
     eprintln!("[it] SELECT 1 ok");
 
-    // Register the slim Rust SLC for this session, then make a working schema.
+    // Diagnostic: test Python3 built-in SLC connect-back BEFORE our SLC is
+    // registered (ALTER SESSION SET SCRIPT_LANGUAGES replaces all languages,
+    // so Python3 is only available in the default session state).
+    conn.execute("CREATE SCHEMA IF NOT EXISTS it_rust").await?;
+    conn.execute("OPEN SCHEMA it_rust").await?;
+    let python3_cb_addr = harness.connect_back_sql_address().await?;
+    eprintln!("[it] python3_connect_back: CB_SELF address = {python3_cb_addr}");
+    match connect_back_python3_queries_and_emits(&mut conn, &python3_cb_addr).await {
+        Ok(()) => eprintln!("[it] scenario python3_connect_back ok"),
+        Err(e) => eprintln!("[it] scenario python3_connect_back FAILED: {e:#}"),
+    }
+
+    // Register the slim Rust SLC for this session.
     eprintln!("[it] exporting + uploading SLC to BucketFS");
     let slc = harness.load_slc().await?;
     eprintln!("[it] SLC uploaded; registering SCRIPT_LANGUAGES");
     register_slc(&mut conn, &slc).await?;
-    conn.execute("CREATE SCHEMA IF NOT EXISTS it_rust").await?;
-    conn.execute("OPEN SCHEMA it_rust").await?;
     eprintln!("[it] SLC registered; uploading UDF artifacts");
 
     // Upload all UDF artifacts up front.
@@ -62,6 +72,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_insert_path = harness
         .upload_udf(CB_INSERT_LIB, read_udf_artifact(CB_INSERT_LIB)?)
         .await?;
+    let cb_crunch_path = harness
+        .upload_udf(CB_CRUNCH_LIB, read_udf_artifact(CB_CRUNCH_LIB)?)
+        .await?;
     let cb_cluster_ip_path = harness
         .upload_udf(CB_CLUSTER_IP_LIB, read_udf_artifact(CB_CLUSTER_IP_LIB)?)
         .await?;
@@ -75,130 +88,79 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     udf_error_surfaces_prefix(&mut conn).await?;
     eprintln!("[it] scenario udf_error ok");
 
-    // Single-call scenarios run before connect-back: connect-back crashes the
-    // main DB session on 2026.latest (server-side bug), so these must come first.
+    // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_default_output_columns ok");
     single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_unimplemented ok");
 
-    // cluster_ip() does not open a connect-back session, so it carries no
-    // ADR-015 SIGABRT risk. However, Exasol Docker single-node uses an IPC
-    // ZMQ transport (ipc:///tmp/...) rather than TCP, so cluster_ip() cannot
-    // parse a node IP from the socket path and returns an error. In a real
-    // multi-node cluster the endpoint is tcp://<node_ip>:<port> and the
-    // scenario would pass as a hard assertion.
-    let cb_cluster_ip_result =
-        connect_back_cluster_ip_emits_node_ip(&mut conn, &cb_cluster_ip_path).await;
-    on_scenario_fail(&cb_cluster_ip_result, "connect_back_cluster_ip", &harness).await;
-    match &cb_cluster_ip_result {
-        Ok(_) => eprintln!("[it] scenario connect_back_cluster_ip ok"),
-        Err(e) if is_known_ipc_transport_failure(e) => eprintln!(
-            "[it] scenario connect_back_cluster_ip KNOWN_FAILING (Docker IPC transport: \
-             cluster_ip() requires TCP endpoint): {e}"
-        ),
-        Err(e) => bail!(
-            "connect_back_cluster_ip: unexpected error (not the documented IPC signature): {e}"
-        ),
-    }
+    connect_back_cluster_ip_emits_node_ip(&mut conn, &cb_cluster_ip_path).await?;
+    eprintln!("[it] scenario connect_back_cluster_ip ok");
 
-    // Connect-back scenarios last: a server-side SIGABRT bug in Exasol 2026.latest
-    // (image id b81d80f63d10, same as 2026.1.0) kills the outer session whenever a
-    // UDF opens any connect-back connection (signal 6, confirmed transport- and
-    // address-independent; re-verified 2026-06-06 with Docker gateway address; see
-    // ADR-015). These scenarios are known-failing on 2026.latest until the upstream
-    // bug is patched.
-    let cb_query_result =
-        connect_back_udf_queries_and_emits(&mut conn, &cb_query_path, &harness).await;
-    on_scenario_fail(&cb_query_result, "connect_back_query", &harness).await;
-    match &cb_query_result {
-        Ok(_) => eprintln!(
-            "[it] scenario connect_back_query UNEXPECTEDLY PASSED — ADR-015 blocker may be resolved; \
-             promote this scenario to a hard assertion"
-        ),
-        Err(e) if is_known_sigabrt_failure(e) => eprintln!(
-            "[it] scenario connect_back_query KNOWN_FAILING (ADR-015: server-side SIGABRT on 2026.latest): {e}"
-        ),
-        Err(e) => bail!(
-            "connect_back_query: unexpected error (not the documented SIGABRT signature): {e}"
-        ),
+    if let Err(e) =
+        connect_back_dml_inserts_visible_via_exapump(&mut conn, &cb_insert_path, &harness).await
+    {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_dml failure:\n{logs}");
+        return Err(e);
     }
+    eprintln!("[it] scenario connect_back_dml ok");
 
-    let cb_dml_result =
-        connect_back_dml_inserts_visible_via_exapump(&mut conn, &cb_insert_path, &harness).await;
-    on_scenario_fail(&cb_dml_result, "connect_back_dml", &harness).await;
-    match &cb_dml_result {
-        Ok(_) => eprintln!(
-            "[it] scenario connect_back_dml UNEXPECTEDLY PASSED — ADR-015 blocker may be resolved; \
-             promote this scenario to a hard assertion"
-        ),
-        Err(e) if is_known_sigabrt_failure(e) => eprintln!(
-            "[it] scenario connect_back_dml KNOWN_FAILING (ADR-015: server-side SIGABRT on 2026.latest): {e}"
-        ),
-        Err(e) => bail!(
-            "connect_back_dml: unexpected error (not the documented SIGABRT signature): {e}"
-        ),
+    if let Err(e) = connect_back_udf_queries_and_emits(&mut conn, &cb_query_path, &harness).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_query failure:\n{logs}");
+        return Err(e);
     }
+    eprintln!("[it] scenario connect_back_query ok");
 
-    // The outer session is killed by the SIGABRT crash, so close will fail;
-    // propagating that error would be misleading.
-    conn.close().await.ok();
+    if let Err(e) = connect_back_writeback_same_schema(&mut conn, &cb_crunch_path, &harness).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_writeback failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario connect_back_writeback_same_schema ok");
+
+    conn.close().await?;
     Ok(())
 }
 
-/// On scenario failure: dump UDF logs from the container, then optionally sleep so the
-/// container stays alive for manual inspection.
-///
-/// Set `KEEP_CONTAINER_SECS=<n>` to keep the container alive for n seconds after a failure.
-/// While sleeping, `docker exec -it <container_id> bash` can be used to inspect logs
-/// under `/exa/logs/db/EXADB/`.
-async fn on_scenario_fail<T>(result: &Result<T>, scenario: &str, harness: &Harness) {
-    if let Err(e) = result {
-        eprintln!("[it] scenario {scenario} FAILED: {e}");
-        let logs = harness.dump_udf_logs().await;
-        eprintln!("[it] --- UDF diagnostic logs ---\n{logs}\n[it] --- end UDF logs ---");
-
-        // Capture container stderr/stdout via docker logs.
-        let container_id = harness.container_id();
-        let docker_out = std::process::Command::new("docker")
-            .args(["logs", "--tail", "200", container_id])
-            .output();
-        match docker_out {
-            Ok(out) => {
-                let combined = [out.stdout, out.stderr].concat();
-                eprintln!(
-                    "[it] --- docker logs (last 200 lines) ---\n{}\n[it] --- end docker logs ---",
-                    String::from_utf8_lossy(&combined)
-                );
-            }
-            Err(e) => eprintln!("[it] docker logs failed: {e}"),
-        }
-
-        if let Ok(secs_str) = std::env::var("KEEP_CONTAINER_SECS") {
-            if let Ok(secs) = secs_str.parse::<u64>() {
-                eprintln!(
-                    "[it] KEEP_CONTAINER_SECS={secs}: container {container_id} still alive; sleeping {secs}s for manual inspection"
-                );
-                tokio::time::sleep(Duration::from_secs(secs)).await;
-            }
-        }
+/// Diagnostic: Python3 built-in SLC connect-back. Tests whether the SIGABRT is
+/// Rust-SLC-specific or a universal Exasol single-node-Docker bug. Uses Python3's
+/// built-in PyExasol (same approach as strata-rs CACHE_QUERY) to SELECT 42 via
+/// a connect-back session and emit the result.
+async fn connect_back_python3_queries_and_emits(
+    conn: &mut Connection,
+    cb_addr: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF_PY TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
+    conn.execute(
+        r#"CREATE OR REPLACE PYTHON3 SET SCRIPT cb_py_query(dummy BOOLEAN) EMITS (val BIGINT) AS
+import pyexasol
+def run(ctx):
+    while ctx.next(): pass
+    cred = exa.get_connection('CB_SELF_PY')
+    c = pyexasol.connect(dsn=cred.address, user=cred.user,
+        password=cred.password, encryption=True,
+        websocket_sslopt={'cert_reqs': 0})
+    r = c.execute('SELECT 42').fetchone()
+    c.close()
+    ctx.emit(r[0])
+/"#,
+    )
+    .await?;
+    let got = query_single_string(
+        conn,
+        "SELECT TO_CHAR(val) FROM (SELECT cb_py_query(TRUE) FROM DUAL)",
+    )
+    .await?;
+    if got.as_deref() != Some("42") {
+        bail!("python3_connect_back: val returned {got:?}, expected 42");
     }
-}
-
-/// Return true if `e`'s full chain matches the documented connect-back SIGABRT failure
-/// on `2026.latest`: the outer session's TLS connection is closed without close_notify
-/// when Part:40 crashes with signal 6 after spawning Part:44.
-fn is_known_sigabrt_failure(e: &anyhow::Error) -> bool {
-    let chain = format!("{:#}", e);
-    chain.contains("close_notify") || chain.contains("peer closed connection")
-}
-
-/// Return true if `e` matches the IPC-transport failure: Exasol Docker single-node uses
-/// `ipc:///tmp/...` ZMQ sockets rather than `tcp://`, so `cluster_ip()` cannot extract
-/// a node IP and returns a ConnectBack error containing "ipc://".
-fn is_known_ipc_transport_failure(e: &anyhow::Error) -> bool {
-    let chain = format!("{:#}", e);
-    chain.contains("ipc://")
+    Ok(())
 }
 
 /// Scenario: harness starts Exasol and `SELECT 1` returns a non-empty result.
@@ -297,8 +259,7 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
 }
 
 /// Scenario: cluster_ip() — scalar UDF emits the node IP of the cluster node
-/// that started the language container. No connect-back session is opened, so
-/// there is no ADR-015 SIGABRT risk; this is a hard assertion.
+/// that started the language container.
 async fn connect_back_cluster_ip_emits_node_ip(
     conn: &mut Connection,
     udf_object: &str,
@@ -310,7 +271,9 @@ async fn connect_back_cluster_ip_emits_node_ip(
     .await?;
     let got = query_single_string(conn, "SELECT TO_CHAR(connect_back_cluster_ip())").await?;
     let ip = got.ok_or_else(|| anyhow!("cluster_ip returned NULL"))?;
-    if !ip.contains('.') {
+    // Validate it's a dotted-quad IPv4: exactly 3 dots, all parts numeric 0-255
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 || parts.iter().any(|p| p.parse::<u8>().is_err()) {
         bail!("cluster_ip returned non-IPv4 string: {ip:?}");
     }
     Ok(())
@@ -323,24 +286,30 @@ async fn connect_back_udf_queries_and_emits(
     udf_object: &str,
     harness: &Harness,
 ) -> Result<()> {
-    // Connect via the Docker host gateway + mapped port so the UDF opens an
-    // external-client session rather than connecting to the container's own IP,
-    // which triggers a server-side SIGABRT in Exasol 2026.
-    let cb_addr = harness.container_connect_back_address().await?;
+    let cb_addr = harness.connect_back_sql_address().await?;
+    eprintln!("[it] connect_back_query: CB_SELF address = {cb_addr}");
     conn.execute(&format!(
         "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
          USER 'sys' IDENTIFIED BY 'exasol'"
     ))
     .await?;
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT connect_back_query() RETURNS BIGINT AS\n\
-         %connection CB_SELF\n\
+        "CREATE OR REPLACE RUST SET SCRIPT connect_back_query(dummy BOOLEAN) EMITS (val BIGINT) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
-    let got = query_single_string(conn, "SELECT TO_CHAR(connect_back_query())").await?;
+    let result = query_single_string(
+        conn,
+        "SELECT TO_CHAR(val) FROM (SELECT connect_back_query(TRUE) FROM DUAL)",
+    )
+    .await;
+    if result.is_err() {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_query failure:\n{logs}");
+    }
+    let got = result?;
     if got.as_deref() != Some("42") {
-        bail!("connect_back_query returned {got:?}, expected 42");
+        bail!("connect_back_query val returned {got:?}, expected 42");
     }
     Ok(())
 }
@@ -371,23 +340,39 @@ async fn single_call_unimplemented_returns_undefined(
     Ok(())
 }
 
-/// Scenario: connect-back DML — the UDF inserts rows into `cb_result` via
-/// connect-back DML and we verify the values are visible via `exapump`.
+/// Scenario: connect-back DML — the UDF inserts rows into `cb_sink.cb_result`
+/// via a connect-back session and we verify the values are visible via `exapump`.
+///
+/// The target table lives in a SEPARATE schema (`cb_sink`) that the invoking
+/// query never reads, and is created+committed BEFORE the query runs. Exasol's
+/// Serializable isolation would otherwise force the invoking query's transaction
+/// into WAIT FOR COMMIT (and a deadlock-detector SIGABRT) if the connect-back
+/// session wrote to or created objects in the invoking query's own schema.
 async fn connect_back_dml_inserts_visible_via_exapump(
     conn: &mut Connection,
     udf_object: &str,
     harness: &Harness,
 ) -> Result<()> {
-    conn.execute("DROP TABLE IF EXISTS cb_result").await?;
+    // Pre-create the connect-back sink in a separate schema, committed before
+    // the invoking query runs, so the connect-back transaction is disjoint from
+    // the query's locks. exarrow-rs autocommits each statement.
+    conn.execute("CREATE SCHEMA IF NOT EXISTS cb_sink").await?;
+    conn.execute("CREATE OR REPLACE TABLE cb_sink.cb_result (val BIGINT)")
+        .await?;
+    // Restore the active schema for the script/input objects below.
+    conn.execute("OPEN SCHEMA it_rust").await?;
 
-    // CB_SELF was created in connect_back_udf_queries_and_emits; reuse it here.
+    let cb_addr = harness.connect_back_sql_address().await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT connect_back_insert(val BIGINT) EMITS (cnt BIGINT) AS\n\
-         %connection CB_SELF\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
-
     conn.execute("CREATE OR REPLACE TABLE vals (v BIGINT)")
         .await?;
     conn.execute("INSERT INTO vals VALUES (10), (20), (30)")
@@ -397,13 +382,13 @@ async fn connect_back_dml_inserts_visible_via_exapump(
 
     let output = std::process::Command::new("exapump")
         .args([
-            "-c",
+            "sql",
+            "-d",
             &format!(
                 "exasol://sys:exasol@{}:{}?validateservercertificate=0",
                 harness.host, harness.db_port
             ),
-            "-q",
-            "SELECT val FROM cb_result ORDER BY val",
+            "SELECT val FROM cb_sink.cb_result ORDER BY val",
         ])
         .output()
         .map_err(|e| anyhow!("running exapump: {e}"))?;
@@ -411,7 +396,91 @@ async fn connect_back_dml_inserts_visible_via_exapump(
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in ["10", "20", "30"] {
         if !stdout.contains(expected) {
-            bail!("exapump output missing {expected}: {stdout}");
+            bail!(
+                "exapump output missing {expected}: stdout={stdout} stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Scenario: connect-back write-back into a pre-committed table in the invoking
+/// query's OWN schema, exercising the realistic before/UDF/after ordering.
+///
+/// Demonstrates that same-schema write-back is safe under Exasol's Serializable
+/// isolation when the contract is respected:
+/// 1. `crunch_log` is created and **committed before** the query (autocommit), so
+///    the connect-back session can see it and the UDF does no DDL.
+/// 2. The invoking query reads a **different** table (`crunch_in`) than the UDF
+///    writes (`crunch_log`), avoiding a read-write WAIT FOR COMMIT conflict.
+/// 3. The UDF number-crunches (squares) each input and connect-back-inserts
+///    `(v, v*v)`; the connect-back session autocommits each insert.
+/// 4. A **new** connection inserts another row after the UDF, proving the table
+///    stays usable from an independent session.
+async fn connect_back_writeback_same_schema(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+) -> Result<()> {
+    // (1) Pre-create + seed the target table in the invoking schema, committed
+    // before the query runs (exarrow-rs autocommits each statement).
+    conn.execute("CREATE OR REPLACE TABLE it_rust.crunch_log (v BIGINT, v_squared BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.crunch_log VALUES (1, 1)")
+        .await?;
+
+    // (2) Separate input table — the query reads this, never crunch_log.
+    conn.execute("CREATE OR REPLACE TABLE it_rust.crunch_in (v BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.crunch_in VALUES (2), (3), (4)")
+        .await?;
+
+    let cb_addr = harness.connect_back_sql_address().await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT crunch_writeback(v BIGINT) EMITS (cnt BIGINT) AS\n\
+         %connection CB_SELF\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    // (3) Run the UDF: connect-back inserts (2,4), (3,9), (4,16) into crunch_log.
+    conn.query("SELECT crunch_writeback(v) FROM it_rust.crunch_in")
+        .await?;
+
+    // (4) A brand-new independent session inserts another row post-UDF.
+    let mut conn2 = harness.connect().await?;
+    conn2
+        .execute("INSERT INTO it_rust.crunch_log VALUES (5, 25)")
+        .await?;
+    conn2.close().await?;
+
+    // (5) Verify all rows (before + UDF + after) are present externally.
+    let output = std::process::Command::new("exapump")
+        .args([
+            "sql",
+            "-d",
+            &format!(
+                "exasol://sys:exasol@{}:{}?validateservercertificate=0",
+                harness.host, harness.db_port
+            ),
+            "SELECT v_squared FROM it_rust.crunch_log ORDER BY v",
+        ])
+        .output()
+        .map_err(|e| anyhow!("running exapump: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for expected in ["1", "4", "9", "16", "25"] {
+        if !stdout.contains(expected) {
+            bail!(
+                "exapump output missing {expected}: stdout={stdout} stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
     Ok(())

@@ -24,9 +24,41 @@ pub const DB_IMAGE: &str = "exasol/docker-db";
 /// Slim Rust SLC image built earlier in the pipeline.
 pub const SLC_IMAGE: &str = "slc-rs-slim:dev";
 
-/// Exasol image tag. Reads `EXASOL_VERSION` env var; defaults to `2026.latest`.
+/// The database version series currently under test.
+///
+/// Reads `EXASOL_DB_SERIES`; if unset, falls back to the compiled default feature.
+/// Panics on unrecognised values.
+pub fn db_series() -> String {
+    if let Ok(val) = std::env::var("EXASOL_DB_SERIES") {
+        match val.as_str() {
+            "2025-1" | "2025-2" | "2026-1" => return val,
+            _ => panic!(
+                "unrecognised EXASOL_DB_SERIES: {val:?}; expected one of 2025-1, 2025-2, 2026-1"
+            ),
+        }
+    }
+    if cfg!(feature = "db-2026-1") {
+        "2026-1".to_string()
+    } else if cfg!(feature = "db-2025-2") {
+        "2025-2".to_string()
+    } else if cfg!(feature = "db-2025-1") {
+        "2025-1".to_string()
+    } else {
+        panic!("no db-* feature enabled and EXASOL_DB_SERIES not set")
+    }
+}
+
+/// Exasol image tag. `EXASOL_VERSION` wins if set; otherwise derived from `db_series()`.
 pub fn db_tag() -> String {
-    std::env::var("EXASOL_VERSION").unwrap_or_else(|_| "2026.latest".to_string())
+    if let Ok(v) = std::env::var("EXASOL_VERSION") {
+        return v;
+    }
+    match db_series().as_str() {
+        "2025-1" => "2025.1.11".to_string(),
+        "2025-2" => "2025.2.1".to_string(),
+        "2026-1" => "2026.1.0".to_string(),
+        s => unreachable!("db_series() returned unrecognised series: {s:?}"),
+    }
 }
 
 /// Bucket name and BucketFS service name baked into the docker-db default.
@@ -218,37 +250,55 @@ impl Harness {
         Ok(ip)
     }
 
-    /// Return the connect-back address for UDFs: the Docker bridge gateway IP combined
-    /// with the host-mapped DB port (e.g. `172.17.0.1:32768`).
+    /// Return the address for `CB_SELF` that UDFs use for the connect-back TCP session.
     ///
-    /// UDFs run inside the container. The Docker host gateway (reachable from inside
-    /// the container) routes the connect-back as an external-client session through the
-    /// host port-mapping. Note: on `2026.latest` the server-side SIGABRT (ADR-015)
-    /// still fires regardless of address or transport — this address is architecturally
-    /// correct, but the upstream core bug prevents a successful round-trip.
-    pub async fn container_connect_back_address(&self) -> Result<String> {
-        let script = "ip route show default | awk '/default/ {print $3}' | head -1";
-        let gateway = self
-            .exec_in_container(script)
-            .await
-            .context("container_connect_back_address")?;
-        if gateway.is_empty() {
-            anyhow::bail!("could not determine container default gateway");
+    /// Connect-back must open a **regular login session** to the cluster's SQL
+    /// listener, NOT through Exasol's internal CoreDB proxy at `127.0.0.1:8563`.
+    /// The CoreDB proxy links the new session to the invoking SQL worker (Part:40),
+    /// causing Part:40 to wait for the connect-back session to deregister (~10 s)
+    /// and then crash with SIGABRT.
+    ///
+    /// In testcontainers mode (local Docker, `self._container.is_some()`):
+    ///   Returns `<container-eth0-ip>:8563` — the direct SQL listener, exactly the
+    ///   same path any external client (PyExasol, JDBC, exarrow-rs) uses. Exasol
+    ///   treats the session as fully independent of Part:40.
+    ///
+    /// In external mode (`EXASOL_HOST` set, `self._container.is_none()`):
+    ///   Returns `<self.host>:<self.db_port>` — the cluster SQL endpoint the harness
+    ///   already knows, reachable from within the node.
+    pub async fn connect_back_sql_address(&self) -> Result<String> {
+        if self._container.is_some() {
+            let ip = self.container_inner_ip().await?;
+            Ok(format!("{ip}:8563"))
+        } else {
+            Ok(format!("{}:{}", self.host, self.db_port))
         }
-        Ok(format!("{}:{}", gateway, self.db_port))
     }
 
     /// Read UDF client diagnostic logs from inside the container and return them as a string.
     pub async fn dump_udf_logs(&self) -> String {
         let script = concat!(
-            "echo '=== /tmp/cb_debug.txt ==='; cat /tmp/cb_debug.txt 2>/dev/null || echo '(not found)';",
-            " echo '=== udf_diag.log search ===';",
-            " find /buckets /exa/logs /tmp -name 'udf_diag.log' -o -name 'UDFClientDiag*'",
-            " 2>/dev/null | sort | tail -10 | xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}' 2>/dev/null"
+            // Search entire container filesystem for debug files the SLC may have written
+            "echo '=== Searching for exaudf debug files ===';",
+            " find / -maxdepth 8 \\( -name 'cb_debug.txt' -o -name 'exaudf_started.txt' -o -name 'udf_trace.txt' \\)",
+            " 2>/dev/null | head -10",
+            " | xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}' 2>/dev/null;",
+            " echo '=== EXASolution log tail ===';",
+            " tail -50 /exa/logs/logd/EXASolution_DB1.log 2>/dev/null || echo '(not found)';",
+            " echo '=== exa logs list ===';",
+            " find /exa/logs -type f 2>/dev/null | head -20;",
+            // Show exasql crash logs specifically — these contain the abort reason
+            " echo '=== exasql crash logs ===';",
+            " find /exa/logs/cored -name 'exasql.*' -type f 2>/dev/null",
+            " | sort | xargs -I{} sh -c 'echo \"=== {} ===\"; tail -30 {} 2>/dev/null' 2>/dev/null;",
+            " echo '=== Script runner log tail ===';",
+            " find /exa/logs -type f 2>/dev/null",
+            " | xargs -I{} sh -c 'echo \"--- {} ---\"; tail -10 {} 2>/dev/null' 2>/dev/null",
+            " | head -120",
         );
         match self.exec_in_container(script).await {
             Ok(out) if !out.trim().is_empty() => out,
-            Ok(_) => "(no UDF diagnostic log found in /buckets, /exa/logs, or /tmp)".to_string(),
+            Ok(_) => "(no UDF diagnostic log found)".to_string(),
             Err(e) => format!("(exec failed: {e})"),
         }
     }
@@ -471,11 +521,67 @@ fn export_image_filesystem(image: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_base64;
+    use super::{db_series, db_tag, decode_base64};
+    use std::sync::Mutex;
+
+    // Serialise tests that mutate process-wide env vars. The Rust test harness
+    // runs tests in parallel by default, so concurrent env-var writes cause
+    // spurious failures without this guard.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn decodes_known_base64() {
         assert_eq!(decode_base64("aGVsbG8=").unwrap(), "hello");
         assert_eq!(decode_base64("aGpYMHM4dE5zSk1n").unwrap(), "hjX0s8tNsJMg");
+    }
+
+    #[test]
+    fn db_series_returns_env_var_when_recognised() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("EXASOL_DB_SERIES", "2025-1");
+        let result = db_series();
+        std::env::remove_var("EXASOL_DB_SERIES");
+        assert_eq!(result, "2025-1");
+    }
+
+    #[test]
+    fn db_series_fallback_matches_enabled_feature() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("EXASOL_DB_SERIES");
+        let series = db_series();
+        assert!(
+            ["2025-1", "2025-2", "2026-1"].contains(&series.as_str()),
+            "db_series() fallback returned unexpected value: {series:?}"
+        );
+    }
+
+    #[test]
+    fn db_tag_uses_exasol_version_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("EXASOL_DB_SERIES");
+        std::env::set_var("EXASOL_VERSION", "2025.1.99");
+        let tag = db_tag();
+        std::env::remove_var("EXASOL_VERSION");
+        assert_eq!(tag, "2025.1.99");
+    }
+
+    #[test]
+    fn db_tag_maps_series_to_known_image_tags() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("EXASOL_VERSION");
+        let series_to_tag = [
+            ("2025-1", "2025.1.11"),
+            ("2025-2", "2025.2.1"),
+            ("2026-1", "2026.1.0"),
+        ];
+        for (series, expected_tag) in series_to_tag {
+            std::env::set_var("EXASOL_DB_SERIES", series);
+            let tag = db_tag();
+            std::env::remove_var("EXASOL_DB_SERIES");
+            assert_eq!(
+                tag, expected_tag,
+                "series {series:?} should map to {expected_tag:?}"
+            );
+        }
     }
 }

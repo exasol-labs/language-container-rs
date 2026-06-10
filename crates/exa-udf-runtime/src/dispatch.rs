@@ -17,15 +17,11 @@ use exasol_udf_sdk::context::UdfContext;
 /// controls batch sizing on the wire, and the unified `HostContextBridge`
 /// presents each batch through the canonical `while ctx.next()?` iteration, so
 /// the dispatcher does not need to special-case the iteration shape.
-///
-/// `endpoint` is the ZMQ endpoint string the runtime connected to; it is
-/// threaded to the bridge so `cluster_ip()` can derive the node IP.
 pub fn run_udf(
     transport: &ZmqTransport,
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
-    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<(), RuntimeError> {
     loop {
         match request(transport, proto, proto.run_request())? {
@@ -36,14 +32,7 @@ pub fn run_udf(
             _ => {}
         }
 
-        if let Some(early) = consume_input(
-            transport,
-            proto,
-            udf,
-            meta,
-            #[cfg(feature = "connect-back")]
-            endpoint,
-        )? {
+        if let Some(early) = consume_input(transport, proto, udf, meta)? {
             return early;
         }
 
@@ -68,7 +57,6 @@ fn consume_input(
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
-    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<Option<Result<(), RuntimeError>>, RuntimeError> {
     loop {
         match request(transport, proto, proto.next_request())? {
@@ -81,8 +69,6 @@ fn consume_input(
                     udf,
                     &table,
                     meta,
-                    #[cfg(feature = "connect-back")]
-                    endpoint,
                 )?;
                 if !emitted.is_empty() {
                     let out = emitted.to_proto(&meta.output_columns);
@@ -140,16 +126,12 @@ fn request(
 /// MT_IMPORT credential request for that name. The outer dispatch loop is
 /// blocked waiting for this function to return, so the ZMQ socket is idle
 /// during UDF execution and the MT_IMPORT exchange is safe to perform here.
-///
-/// `endpoint` is the ZMQ endpoint string the runtime connected to; it is
-/// stored in the bridge so `cluster_ip()` can derive the node IP.
 fn run_batch(
     #[cfg(feature = "connect-back")] transport: &ZmqTransport,
     #[cfg(feature = "connect-back")] proto: &mut Protocol,
     udf: &LoadedUdf,
     table: &exa_proto::ExascriptTableData,
     meta: &UdfMeta,
-    #[cfg(feature = "connect-back")] endpoint: &str,
 ) -> Result<EmitBuffer, RuntimeError> {
     let mut input = InputRowSet::from_proto(table, &meta.input_columns);
     let mut emit_buf = EmitBuffer::new();
@@ -187,8 +169,6 @@ fn run_batch(
             &mut input,
             &mut emit_buf,
             &meta.input_columns,
-            #[cfg(feature = "connect-back")]
-            endpoint.to_string(),
             #[cfg(feature = "connect-back")]
             conn_requester,
         );

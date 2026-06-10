@@ -15,21 +15,6 @@ pub fn parse_udf_object_path(source: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Extract the cluster node IP from the ZMQ endpoint string the runtime used
-/// to connect (e.g. `tcp://10.0.0.5:6583` → `Some("10.0.0.5")`).
-///
-/// Returns `None` for input lacking the `tcp://` scheme or a `:` port
-/// separator after the host.
-#[cfg(feature = "connect-back")]
-pub fn parse_cluster_ip(endpoint: &str) -> Option<String> {
-    let rest = endpoint.strip_prefix("tcp://")?;
-    let (host, _port) = rest.rsplit_once(':')?;
-    if host.is_empty() {
-        return None;
-    }
-    Some(host.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,20 +38,5 @@ mod tests {
                 "/buckets/bfsdefault/default/udfs/libudf.so"
             ))
         );
-    }
-
-    #[cfg(feature = "connect-back")]
-    #[test]
-    fn parse_cluster_ip_strips_scheme_and_port() {
-        assert_eq!(
-            parse_cluster_ip("tcp://10.0.0.5:6583"),
-            Some("10.0.0.5".into())
-        );
-        assert_eq!(
-            parse_cluster_ip("tcp://192.168.1.100:8563"),
-            Some("192.168.1.100".into())
-        );
-        assert_eq!(parse_cluster_ip("bad"), None);
-        assert_eq!(parse_cluster_ip("tcp://noport"), None);
     }
 }

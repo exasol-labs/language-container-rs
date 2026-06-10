@@ -5,6 +5,29 @@ fn main() {
     // Must happen before any library code that might read HOME.
     std::env::set_var("HOME", "/tmp");
 
+    // Debug tracing: write to /tmp so it survives even when BucketFS is read-only.
+    // This file is read by the integration test harness via dump_udf_logs().
+    let _ = std::fs::write(
+        "/tmp/exaudf_started.txt",
+        format!(
+            "exaudfclient started; args: {:?}\n",
+            std::env::args().collect::<Vec<_>>()
+        ),
+    );
+
+    // Probe whether getrandom(2) is available; BoringSSL aborts if it is not
+    // and /dev/urandom is also absent (BucketFS chroot strips device nodes).
+    let mut probe = [0u8; 1];
+    let gr_rc = unsafe {
+        libc::syscall(
+            libc::SYS_getrandom,
+            probe.as_mut_ptr() as *mut libc::c_void,
+            1usize,
+            0u32,
+        )
+    };
+    eprintln!("[slc] getrandom probe rc={gr_rc}");
+
     let diag_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("udf_diag.log")));
@@ -42,7 +65,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     match run(&args) {
-        Ok(()) => {}
+        Ok(()) => {
+            // Force immediate process exit. The reference C++ exaudfclient_main
+            // does `return 0` from a function whose caller immediately exits; the OS
+            // then reaps the process via waitpid(). Without this call, Rust's normal
+            // cleanup tries to join the static connect-back Tokio runtime (reactor +
+            // blocking threads), delaying exit by ~10 s and causing Part:40's
+            // TimerWatchDog to fire SIGABRT before waitpid() ever succeeds.
+            std::process::exit(0);
+        }
         Err(Exit { code, message }) => {
             eprintln!("{}", message);
             error!("{}", message);
@@ -89,7 +120,10 @@ fn run(args: &[String]) -> Result<(), Exit> {
     let parser_version = resolve_parser_version(args);
     tracing::debug!("parser_version={}", parser_version);
 
-    let client_name = format!("exaudfclient-rust-v{}", parser_version);
+    // MT_CLIENT's client_name field is documented as "URL of the client in form:
+    // tcp://10.10.1.1:2000". Send the actual ZMQ endpoint URL so Part:40 recognises
+    // this as a valid SLC connection and allows connect-back sessions without crashing.
+    let client_name = endpoint.clone();
     let runtime = Runtime::new(endpoint.clone(), client_name);
     runtime
         .run()

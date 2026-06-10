@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exaudf"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "exasol-udf-sdk",
  "libloading",
@@ -581,6 +581,14 @@ dependencies = [
 
 [[package]]
 name = "connect-back-cluster-ip"
+version = "0.1.0"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
+name = "connect-back-crunch"
 version = "0.1.0"
 dependencies = [
  "exasol-udf-macros",
@@ -928,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -938,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -949,6 +957,7 @@ dependencies = [
  "libc",
  "libloading",
  "prost",
+ "rustls",
  "serde_json",
  "thiserror",
  "tokio",
@@ -958,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "exa-proto",
  "prost",
@@ -983,6 +992,7 @@ dependencies = [
  "chrono",
  "cipher",
  "flate2",
+ "futures-util",
  "hex",
  "num-bigint",
  "parquet",
@@ -995,12 +1005,13 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "urlencoding",
 ]
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1011,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "thiserror",
@@ -1019,10 +1030,11 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "exa-udf-runtime",
+ "libc",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1734,7 +1746,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2751,6 +2763,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3021,6 +3034,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3102,6 +3126,16 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spike-connect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "exarrow-rs",
+ "tokio",
 ]
 
 [[package]]
@@ -3454,6 +3488,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3634,6 +3684,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand",
+ "rustls",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror",
+ "utf-8",
+]
+
+[[package]]
 name = "twox-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3687,6 +3756,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"

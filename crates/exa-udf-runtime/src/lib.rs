@@ -58,14 +58,27 @@ impl Runtime {
             "handshake complete"
         );
 
-        let so_path = parse_udf_object_path(&meta.source_code).ok_or_else(|| {
-            RuntimeError::Unsupported(
-                "no %udf_object directive in source; JIT not supported in v1".into(),
-            )
-        })?;
+        let so_path = match parse_udf_object_path(&meta.source_code) {
+            Some(p) => p,
+            None => {
+                let e = RuntimeError::Unsupported(
+                    "no %udf_object directive in source; JIT not supported in v1".into(),
+                );
+                let _ = transport
+                    .send(&proto.error_close_request(UDF_ERROR_CLOSE_CODE, &e.to_string()));
+                return Err(e);
+            }
+        };
         tracing::debug!(?so_path, "resolved udf object");
 
-        let udf = LoadedUdf::open(&so_path)?;
+        let udf = match LoadedUdf::open(&so_path) {
+            Ok(u) => u,
+            Err(e) => {
+                let _ = transport
+                    .send(&proto.error_close_request(UDF_ERROR_CLOSE_CODE, &e.to_string()));
+                return Err(e);
+            }
+        };
         tracing::debug!("udf loaded; entering run loop");
 
         // Validate the UDF's annotated schema (if any) against the metadata the
@@ -82,14 +95,7 @@ impl Runtime {
         let result = if meta.single_call_mode {
             single_call::run_single_call(&transport, &mut proto, &udf, &meta)
         } else {
-            dispatch::run_udf(
-                &transport,
-                &mut proto,
-                &udf,
-                &meta,
-                #[cfg(feature = "connect-back")]
-                &self.endpoint,
-            )
+            dispatch::run_udf(&transport, &mut proto, &udf, &meta)
         };
         tracing::debug!(ok = result.is_ok(), "run loop finished");
 

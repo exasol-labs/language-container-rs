@@ -159,11 +159,12 @@ jobs:
             -p single-call-fixture \
             -p connect-back-cluster-ip \
             -p connect-back-query \
-            -p connect-back-insert
+            -p connect-back-insert \
+            -p connect-back-crunch
 
       - name: Build IT test binary (compile once)
         run: |
-          BIN=$(cargo +1.91 test --no-run -p it --features integration \
+          BIN=$(cargo +1.91 test --no-run -p it --features integration,db-2026-1 \
               --message-format=json 2>/dev/null \
             | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
             | grep -v '^null$' | head -1)
@@ -194,11 +195,11 @@ jobs:
       matrix:
         include:
           - exasol_version: "2025.1.11"
-            test_filter: "--skip connect_back"
+            db_series: "2025-1"
           - exasol_version: "2025.2.1"
-            test_filter: "--skip connect_back"
+            db_series: "2025-2"
           - exasol_version: "2026.1.0"
-            test_filter: ""
+            db_series: "2026-1"
     steps:
       # No checkout or Rust install needed: the IT binary and UDF .so files are
       # pre-compiled in build-artifacts and downloaded below.
@@ -259,12 +260,13 @@ jobs:
       - name: Run integration tests
         env:
           EXASOL_VERSION: ${{ matrix.exasol_version }}
+          EXASOL_DB_SERIES: ${{ matrix.db_series }}
           EXASOL_HOST: localhost
           EXASOL_PORT: "8563"
           BUCKETFS_PORT: "2581"
         run: |
           chmod +x it-runner
-          ./it-runner ${{ matrix.test_filter }}
+          ./it-runner
 
       - name: Stop Exasol container
         if: always()

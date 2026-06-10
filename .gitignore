@@ -1,1 +1,7 @@
 /target/
+
+# Serena MCP cache
+/.serena/
+
+# Built IT test-runner binary (CI artifact, produced by `cargo test --no-run`)
+/it-runner

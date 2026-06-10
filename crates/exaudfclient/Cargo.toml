@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 exa-udf-runtime = { path = "../exa-udf-runtime", features = ["connect-back"] }
+libc = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
