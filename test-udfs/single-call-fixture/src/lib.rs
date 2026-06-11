@@ -33,6 +33,7 @@ unsafe extern "C" fn default_output_columns(result: *mut *mut c_char) -> i32 {
 }
 
 unsafe extern "C" fn virtual_schema_adapter_call(
+    _ctx: *mut std::ffi::c_void,
     json_arg: *const c_char,
     result: *mut *mut c_char,
 ) -> i32 {

@@ -63,3 +63,26 @@ the SQL statement that failed. The runtime has the statement in hand
 `db_roundtrip_all_scenarios` is verified locally on `2026.1.0`. CI runs the
 `2025.1.11` / `2025.2.1` / `2026.1.0` matrix; a local sweep across all three
 (via `EXASOL_VERSION` / `EXASOL_DB_SERIES`) would catch version drift earlier.
+
+---
+
+## Spec library organisation
+
+### B-005: Split runtime/host-dispatch into a rowset-codec sub-feature
+
+**Raised by:** `2026-06-11-vs-adapter-and-single-call-connect-back` (2026-06-11)
+**Severity:** low
+
+`runtime/host-dispatch` now carries 16 scenarios, above the library's 10-scenario
+soft limit. The root cause is the rowset codec scenarios (row-major packing,
+NULL-cell handling, EmitBuffer, InputRowSet) co-located with loader, bridge, and
+dispatcher scenarios. These are cleanly separable:
+
+- **`runtime/host-dispatch`** — loader, bridge (row iteration), scalar/set
+  dispatch, single-call dispatch, VS adapter dispatch, schema validation
+- **`runtime/rowset-codec`** (new) — `EmitBuffer::to_proto`, `InputRowSet::from_proto`,
+  row-major packing, NULL-cell bitmap logic, declared-type dispatch
+
+**Proposed action:** create `specs/runtime/rowset-codec/spec.md` and migrate the
+four codec scenarios there in a future plan. No code change is needed — this is a
+spec library reorganisation only.

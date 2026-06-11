@@ -86,7 +86,8 @@ fn consume_input(
             | HostEvent::Meta(_)
             | HostEvent::Pending
             | HostEvent::Ping(_)
-            | HostEvent::SingleCall { .. } => {}
+            | HostEvent::SingleCall { .. }
+            | HostEvent::SingleCallAck => {}
             HostEvent::ConnInfo(_) => {}
         }
     }

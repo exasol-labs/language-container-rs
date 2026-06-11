@@ -30,63 +30,41 @@ impl InputRowSet {
         let n_rows = table.rows as usize;
         let n_cols = meta.len();
 
-        // Compute the per-column base offset within its type block.
+        // Row-major within each type block: cells appear in (row, column) order,
+        // so a column's value for row `r` is the `r`-th time that column's type
+        // block is consumed while walking rows then columns. Per-type running
+        // cursors advance only when a non-null cell of that type is read, mirroring
+        // how `to_proto` packs (and how Exasol lays out emitted/input batches).
         let mut string_idx = 0usize;
         let mut bool_idx = 0usize;
         let mut int32_idx = 0usize;
         let mut int64_idx = 0usize;
         let mut double_idx = 0usize;
 
-        let mut col_offsets: Vec<(ExaType, usize)> = Vec::with_capacity(n_cols);
-        for col in meta {
-            match col.typ {
-                ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
-                    col_offsets.push((col.typ.clone(), string_idx));
-                    string_idx += n_rows;
-                }
-                ExaType::Boolean => {
-                    col_offsets.push((ExaType::Boolean, bool_idx));
-                    bool_idx += n_rows;
-                }
-                ExaType::Int32 => {
-                    col_offsets.push((ExaType::Int32, int32_idx));
-                    int32_idx += n_rows;
-                }
-                ExaType::Int64 => {
-                    col_offsets.push((ExaType::Int64, int64_idx));
-                    int64_idx += n_rows;
-                }
-                ExaType::Double => {
-                    col_offsets.push((ExaType::Double, double_idx));
-                    double_idx += n_rows;
-                }
-                ExaType::Unsupported => {
-                    col_offsets.push((ExaType::Unsupported, 0));
-                }
-            }
-        }
-
         let mut rows: Vec<Vec<Value>> = Vec::with_capacity(n_rows);
         for r in 0..n_rows {
             let mut row: Vec<Value> = Vec::with_capacity(n_cols);
-            for (c, (typ, offset)) in col_offsets.iter().enumerate() {
+            for (c, col) in meta.iter().enumerate() {
                 let is_null = table
                     .data_nulls
                     .get(null_index(r, c, n_cols))
                     .copied()
                     .unwrap_or(false);
                 if is_null {
+                    // A NULL cell occupies no slot in its type block; do not
+                    // advance the per-type cursor (see `to_proto`).
                     row.push(Value::Null);
                     continue;
                 }
-                let v = match typ {
+                let v = match col.typ {
                     ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
                         let s = table
                             .data_string
-                            .get(offset + r)
+                            .get(string_idx)
                             .cloned()
                             .unwrap_or_default();
-                        match typ {
+                        string_idx += 1;
+                        match col.typ {
                             ExaType::Numeric => Value::Numeric(s),
                             ExaType::Timestamp => Value::Timestamp(s),
                             ExaType::Date => Value::Date(s),
@@ -94,16 +72,24 @@ impl InputRowSet {
                         }
                     }
                     ExaType::Boolean => {
-                        Value::Boolean(table.data_bool.get(offset + r).copied().unwrap_or(false))
+                        let b = table.data_bool.get(bool_idx).copied().unwrap_or(false);
+                        bool_idx += 1;
+                        Value::Boolean(b)
                     }
                     ExaType::Int32 => {
-                        Value::Int32(table.data_int32.get(offset + r).copied().unwrap_or(0))
+                        let i = table.data_int32.get(int32_idx).copied().unwrap_or(0);
+                        int32_idx += 1;
+                        Value::Int32(i)
                     }
                     ExaType::Int64 => {
-                        Value::Int64(table.data_int64.get(offset + r).copied().unwrap_or(0))
+                        let i = table.data_int64.get(int64_idx).copied().unwrap_or(0);
+                        int64_idx += 1;
+                        Value::Int64(i)
                     }
                     ExaType::Double => {
-                        Value::Double(table.data_double.get(offset + r).copied().unwrap_or(0.0))
+                        let f = table.data_double.get(double_idx).copied().unwrap_or(0.0);
+                        double_idx += 1;
+                        Value::Double(f)
                     }
                     ExaType::Unsupported => Value::Null,
                 };
@@ -184,33 +170,37 @@ impl EmitBuffer {
         let mut data_double: Vec<f64> = Vec::new();
         let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
 
-        // Column-major within each type block: iterate columns, then rows.
-        for (c, col) in meta.iter().enumerate() {
-            for (r, row) in self.rows.iter().enumerate() {
+        // Row-major within each type block: iterate rows, then columns, so a
+        // column's cells appear in the block interleaved with the other columns
+        // of the same type. This matches the layout Exasol's emit handler reads
+        // (and that `from_proto` decodes); a column-major layout silently lands
+        // later rows' values in the wrong column.
+        //
+        // Each value is packed into the block dictated by the declared column
+        // type, not the runtime `Value` variant: a connect-back SELECT may
+        // return a DECIMAL column as `Value::Int64`, but the EMITS column is
+        // `ExaType::Numeric` (string block).
+        for (r, row) in self.rows.iter().enumerate() {
+            for (c, col) in meta.iter().enumerate() {
                 let v = row.get(c).unwrap_or(&Value::Null);
                 if matches!(v, Value::Null) {
+                    // A NULL cell is recorded only in the bitmap; it does NOT
+                    // occupy a slot in its type block. Exasol's reader consumes
+                    // type-block entries only for non-null cells and consults the
+                    // bitmap for nullness — a placeholder would shift every later
+                    // cell of that type into the wrong column.
                     data_nulls[null_index(r, c, n_cols)] = true;
-                    // Push a placeholder into the column's type block so the
-                    // block width stays n_rows and indexing remains symmetric.
-                    push_placeholder(
-                        &col.typ,
-                        &mut data_string,
-                        &mut data_bool,
-                        &mut data_int32,
-                        &mut data_int64,
-                        &mut data_double,
-                    );
                     continue;
                 }
-                match v {
-                    Value::String(s) | Value::Numeric(s) | Value::Timestamp(s) | Value::Date(s) => {
-                        data_string.push(s.clone());
+                match col.typ {
+                    ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
+                        data_string.push(value_to_block_string(v));
                     }
-                    Value::Boolean(b) => data_bool.push(*b),
-                    Value::Int32(i) => data_int32.push(*i),
-                    Value::Int64(i) => data_int64.push(*i),
-                    Value::Double(f) => data_double.push(*f),
-                    Value::Null => unreachable!("null handled above"),
+                    ExaType::Boolean => data_bool.push(value_to_bool(v)),
+                    ExaType::Int32 => data_int32.push(value_to_i64(v) as i32),
+                    ExaType::Int64 => data_int64.push(value_to_i64(v)),
+                    ExaType::Double => data_double.push(value_to_f64(v)),
+                    ExaType::Unsupported => {}
                 }
             }
         }
@@ -241,25 +231,52 @@ impl EmitBuffer {
     }
 }
 
-/// Push a type-appropriate placeholder for a NULL cell into the right block,
-/// keeping every type block exactly `n_rows` wide per column.
-fn push_placeholder(
-    typ: &ExaType,
-    data_string: &mut Vec<String>,
-    data_bool: &mut Vec<bool>,
-    data_int32: &mut Vec<i32>,
-    data_int64: &mut Vec<i64>,
-    data_double: &mut Vec<f64>,
-) {
-    match typ {
-        ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
-            data_string.push(String::new());
-        }
-        ExaType::Boolean => data_bool.push(false),
-        ExaType::Int32 => data_int32.push(0),
-        ExaType::Int64 => data_int64.push(0),
-        ExaType::Double => data_double.push(0.0),
-        ExaType::Unsupported => {}
+/// Render a non-null `Value` as the text form for a string/numeric/temporal
+/// block. Numeric, string and temporal variants pass through; numeric integer
+/// and double variants are stringified so a DECIMAL EMITS column receiving a
+/// `Value::Int64`/`Value::Double` from a connect-back SELECT still serialises.
+fn value_to_block_string(v: &Value) -> String {
+    match v {
+        Value::String(s) | Value::Numeric(s) | Value::Timestamp(s) | Value::Date(s) => s.clone(),
+        Value::Int32(i) => i.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Double(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Null => String::new(),
+    }
+}
+
+/// Coerce a non-null `Value` to `i64` for an INT32/INT64 EMITS column.
+fn value_to_i64(v: &Value) -> i64 {
+    match v {
+        Value::Int32(i) => *i as i64,
+        Value::Int64(i) => *i,
+        Value::Double(f) => *f as i64,
+        Value::Numeric(s) | Value::String(s) => s.parse().unwrap_or(0),
+        Value::Boolean(b) => *b as i64,
+        _ => 0,
+    }
+}
+
+/// Coerce a non-null `Value` to `f64` for a DOUBLE EMITS column.
+fn value_to_f64(v: &Value) -> f64 {
+    match v {
+        Value::Double(f) => *f,
+        Value::Int32(i) => *i as f64,
+        Value::Int64(i) => *i as f64,
+        Value::Numeric(s) | Value::String(s) => s.parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Coerce a non-null `Value` to `bool` for a BOOLEAN EMITS column.
+fn value_to_bool(v: &Value) -> bool {
+    match v {
+        Value::Boolean(b) => *b,
+        Value::Int32(i) => *i != 0,
+        Value::Int64(i) => *i != 0,
+        Value::String(s) | Value::Numeric(s) => s == "true" || s == "TRUE" || s == "1",
+        _ => false,
     }
 }
 
@@ -485,6 +502,117 @@ impl UdfContext for HostContextBridge<'_> {
     }
 }
 
+/// A `UdfContext` for single-call mode (e.g. the virtual-schema adapter call).
+///
+/// Single-call hooks receive no input rows and emit no output rows: the DB
+/// exchanges one JSON request for one JSON response. The data methods therefore
+/// return [`UdfError::Unimplemented`] — only credential resolution
+/// (`connection`) and self-connections (`connect_back`) are meaningful, and
+/// those reuse the same on-demand MT_IMPORT machinery as the data-UDF bridge.
+pub struct SingleCallContext<'a> {
+    /// Last error captured from a context method, surfaced through
+    /// `RuntimeError::Udf`. A `Cell` because `connection()` borrows `&self`.
+    last_error: std::cell::Cell<Option<String>>,
+    #[cfg(feature = "connect-back")]
+    conn_requester: ConnRequester<'a>,
+    /// Anchors the `'a` lifetime when connect-back is disabled (the requester is
+    /// the only `'a` user otherwise).
+    #[cfg(not(feature = "connect-back"))]
+    _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> SingleCallContext<'a> {
+    pub fn new(#[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>) -> Self {
+        SingleCallContext {
+            last_error: std::cell::Cell::new(None),
+            #[cfg(feature = "connect-back")]
+            conn_requester,
+            #[cfg(not(feature = "connect-back"))]
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Take the last error message captured from a context method.
+    pub fn take_last_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn record_error(&self, message: String) {
+        self.last_error.set(Some(message));
+    }
+}
+
+impl UdfContext for SingleCallContext<'_> {
+    fn num_columns(&self) -> usize {
+        0
+    }
+
+    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
+        Err(UdfError::Unimplemented(
+            "single-call mode has no input columns".into(),
+        ))
+    }
+
+    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented(
+            "single-call mode does not emit rows".into(),
+        ))
+    }
+
+    fn next(&mut self) -> Result<bool, UdfError> {
+        Err(UdfError::Unimplemented(
+            "single-call mode has no input rows".into(),
+        ))
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn cluster_ip(&self) -> Result<String, UdfError> {
+        let result = first_nonloopback_ipv4();
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
+        }
+        result
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn connection(
+        &self,
+        name: &str,
+    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+        let result =
+            (self.conn_requester)(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
+                kind: ci.kind,
+                address: ci.address,
+                user: ci.user,
+                password: ci.password,
+            });
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
+        }
+        result
+    }
+
+    #[cfg(feature = "connect-back")]
+    fn connect_back(
+        &mut self,
+        conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+    ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
+        let info = exa_zmq_protocol::ConnInfo {
+            kind: conn.kind.clone(),
+            address: conn.address.clone(),
+            user: conn.user.clone(),
+            password: conn.password.clone(),
+        };
+        let result = crate::connect_back::open_connection(&info)
+            .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>);
+        if let Err(ref e) = result {
+            self.record_error(e.to_string());
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +768,92 @@ mod tests {
                 Value::Double(2.5),
                 Value::Boolean(false),
             ]
+        );
+    }
+
+    #[test]
+    fn emit_packs_by_declared_type_not_value_variant() {
+        // A connect-back SELECT can return a DECIMAL column as Value::Int64, but
+        // the EMITS column is ExaType::Numeric (string block). to_proto must
+        // place it in the string block so the DB reads it from the right block.
+        let meta = vec![col("region", ExaType::String), col("id", ExaType::Numeric)];
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![Value::String("EU".into()), Value::Int64(1)]);
+        emit.push(vec![Value::String("EU".into()), Value::Int64(2)]);
+
+        let table = emit.to_proto(&meta);
+        // Both columns are numeric/string -> the string block holds all cells in
+        // row-major (row, column) order: row0 region,id then row1 region,id.
+        assert_eq!(table.data_string, vec!["EU", "1", "EU", "2"]);
+        assert!(table.data_int64.is_empty());
+
+        let rs = InputRowSet::from_proto(&table, &meta);
+        assert_eq!(
+            rs.row(0).unwrap(),
+            &[Value::String("EU".into()), Value::Numeric("1".into())]
+        );
+        assert_eq!(
+            rs.row(1).unwrap(),
+            &[Value::String("EU".into()), Value::Numeric("2".into())]
+        );
+    }
+
+    #[test]
+    fn emit_string_block_is_row_major_across_columns() {
+        // Two same-type-block columns over two rows must interleave row-major in
+        // data_string: row0(c0,c1) then row1(c0,c1). A column-major layout would
+        // land row1's first cell where the DB expects row0's second column.
+        let meta = vec![col("a", ExaType::Numeric), col("b", ExaType::String)];
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![
+            Value::Numeric("100".into()),
+            Value::String("AAA".into()),
+        ]);
+        emit.push(vec![
+            Value::Numeric("200".into()),
+            Value::String("BBB".into()),
+        ]);
+
+        let table = emit.to_proto(&meta);
+        assert_eq!(table.data_string, vec!["100", "AAA", "200", "BBB"]);
+
+        let rs = InputRowSet::from_proto(&table, &meta);
+        assert_eq!(
+            rs.row(0).unwrap(),
+            &[Value::Numeric("100".into()), Value::String("AAA".into())]
+        );
+        assert_eq!(
+            rs.row(1).unwrap(),
+            &[Value::Numeric("200".into()), Value::String("BBB".into())]
+        );
+    }
+
+    #[test]
+    fn emit_null_cell_occupies_no_type_block_slot() {
+        // A NULL numeric cell must not reserve a slot in the string block: the
+        // bitmap marks it, and only the non-null "5" occupies the block. A
+        // placeholder would shift "AAA"/"BBB" into the numeric column.
+        let meta = vec![col("id", ExaType::Numeric), col("note", ExaType::String)];
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![Value::Null, Value::String("AAA".into())]);
+        emit.push(vec![
+            Value::Numeric("5".into()),
+            Value::String("BBB".into()),
+        ]);
+
+        let table = emit.to_proto(&meta);
+        // row0: id=NULL (skipped), note="AAA"; row1: id="5", note="BBB".
+        assert_eq!(table.data_string, vec!["AAA", "5", "BBB"]);
+        assert_eq!(table.data_nulls, vec![true, false, false, false]);
+
+        let rs = InputRowSet::from_proto(&table, &meta);
+        assert_eq!(
+            rs.row(0).unwrap(),
+            &[Value::Null, Value::String("AAA".into())]
+        );
+        assert_eq!(
+            rs.row(1).unwrap(),
+            &[Value::Numeric("5".into()), Value::String("BBB".into())]
         );
     }
 

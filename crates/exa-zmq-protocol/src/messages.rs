@@ -13,6 +13,10 @@ pub enum HostEvent {
     NextData(exa_proto::ExascriptTableData),
     Done,
     Cleanup,
+    /// The DB acknowledged the container's single-call MT_RETURN result by
+    /// echoing MT_RETURN. The container continues the single-call loop (closing
+    /// the run with MT_DONE); the session ends only on a later MT_CLEANUP.
+    SingleCallAck,
     Finished,
     Close(Option<String>),
     Ping(String),

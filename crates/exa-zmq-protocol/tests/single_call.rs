@@ -145,6 +145,36 @@ fn conn_info_is_parsed_from_import_response() {
     }
 }
 
+/// In single-call mode the DB acknowledges the container's MT_RETURN (16) by
+/// echoing MT_RETURN.  The protocol must surface `HostEvent::SingleCallAck` so
+/// the caller continues the single-call loop (closing the run with MT_DONE).
+#[test]
+fn mt_return_ack_in_single_call_mode_emits_single_call_ack() {
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto, single_call_meta());
+
+    let (ev, _) = proto.step(response(MessageType::MtReturn)).unwrap();
+    assert!(
+        matches!(ev, HostEvent::SingleCallAck),
+        "expected SingleCallAck for MT_RETURN ACK in single_call_mode, got {ev:?}"
+    );
+}
+
+/// MT_RETURN from DB in non-single-call mode is still a protocol error.
+#[test]
+fn mt_return_in_non_single_call_mode_is_protocol_error() {
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto, scalar_meta());
+
+    let err = proto.step(response(MessageType::MtReturn)).unwrap_err();
+    match err {
+        exa_zmq_protocol::ProtocolError::UnexpectedMessage(ty, _) => {
+            assert_eq!(ty, MessageType::MtReturn as i32);
+        }
+        other => panic!("expected UnexpectedMessage, got {other:?}"),
+    }
+}
+
 // --- Task 1.4: MT_CALL in non-single-call mode is a protocol error ---
 
 #[test]

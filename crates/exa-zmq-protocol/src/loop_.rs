@@ -81,6 +81,15 @@ impl Protocol {
             (MessageType::MtDone, Phase::Run) => Ok((HostEvent::Done, None)),
             (MessageType::MtReset, Phase::Run) => Ok((HostEvent::Reset, None)),
 
+            // In single-call mode the DB acknowledges the container's MT_RETURN
+            // result by echoing MT_RETURN (see the canonical C++ `send_return`).
+            // Surface it as `SingleCallAck` so the caller continues the loop with
+            // MT_DONE; the session ends only when a later MT_RUN/MT_DONE is
+            // answered with MT_CLEANUP.
+            (MessageType::MtReturn, Phase::Run) if self.single_call_mode => {
+                Ok((HostEvent::SingleCallAck, None))
+            }
+
             // MT_CALL is only valid in single-call mode.
             (MessageType::MtCall, Phase::Run) if self.single_call_mode => {
                 let call = resp

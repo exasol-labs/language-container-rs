@@ -6,7 +6,7 @@ Implements the `localzmq+protobuf` wire protocol between the Exasol database and
 
 The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a `REQ` socket to `ipc://<socket_path>`. Each protobuf message is a single ZMQ frame; the `REQ` socket manages the request/reply delimiter automatically, so the client neither writes nor strips an empty delimiter frame. The state machine MUST be pure — it consumes decoded `ExascriptResponse` values and produces `ExascriptRequest` values and `HostEvent`s without performing any socket I/O, so it can be unit-tested with fixtures.
 
-v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_UNDEFINED_CALL`) carrying a `SingleCallFunctionId`, and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response for connect-back. The error close path continues to use the prefix `F-UDF-CL-RUST-####`.
+v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_UNDEFINED_CALL`) carrying a `SingleCallFunctionId`, and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response for connect-back. The error close path continues to use the prefix `F-UDF-CL-RUST-####`. In single-call mode the DB acknowledges the container's `MT_RETURN` result by echoing `MT_RETURN`; the state machine surfaces this as `HostEvent::SingleCallAck` so the dispatch loop can close the run with `MT_DONE`. In non-single-call mode, `MT_RETURN` in the run phase remains a protocol error.
 
 ## Scenarios
 
@@ -109,10 +109,11 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 
 ### Scenario: Single-call return is serialized to MT_RETURN
 
-* *GIVEN* a `Protocol` that has emitted a `HostEvent::SingleCall`
+* *GIVEN* a `Protocol` in single-call mode that has emitted a `HostEvent::SingleCall`
 * *WHEN* the host supplies a `HostAction::SingleCallReturn` carrying a result payload string
 * *THEN* the next `next_request` MUST emit an `MT_RETURN` request whose body carries the result payload
-* *AND* the protocol MUST then advance to the close sequence
+* *AND* when the DB echoes `MT_RETURN` as the acknowledgement, the state machine MUST emit `HostEvent::SingleCallAck` so the dispatch loop can close the run with `MT_DONE`
+* *AND* the protocol MUST NOT advance to the close sequence on `MT_RETURN` alone — the session ends only on a subsequent `MT_CLEANUP`
 
 ### Scenario: Unimplemented single-call hook is serialized to MT_UNDEFINED_CALL
 
@@ -127,3 +128,10 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 * *WHEN* the `MT_INFO` response carries an `ExascriptConnectionInformationRep` with host, port, user, and password
 * *THEN* the `HostEvent::Info` MUST carry the decoded connection information alongside the script source and connection id
 * *AND* a missing `ExascriptConnectionInformationRep` MUST yield `HostEvent::Info` with the connection information absent rather than a protocol error
+
+### Scenario: MT_RETURN DB acknowledgement in single-call mode surfaces SingleCallAck
+
+* *GIVEN* a `Protocol` in single-call mode where `single_call_mode = true`
+* *WHEN* the DB sends `MT_RETURN` in the Run phase (acknowledging the container's `MT_RETURN` result)
+* *THEN* the state machine MUST emit `HostEvent::SingleCallAck` and MUST NOT treat this as a protocol error
+* *AND* in a non-single-call protocol, an `MT_RETURN` received in the Run phase MUST still be surfaced as a `ProtocolError::UnexpectedMessage`

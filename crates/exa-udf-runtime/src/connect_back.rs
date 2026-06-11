@@ -123,6 +123,51 @@ impl ExaConnection for RuntimeExaConnection {
             }
         }
     }
+
+    fn begin(&mut self) -> Result<(), UdfError> {
+        self.run_txn_op("begin", |inner| inner.begin_transaction())
+    }
+
+    fn commit(&mut self) -> Result<(), UdfError> {
+        self.run_txn_op("commit", |inner| inner.commit())
+    }
+
+    fn rollback(&mut self) -> Result<(), UdfError> {
+        self.run_txn_op("rollback", |inner| inner.rollback())
+    }
+}
+
+impl RuntimeExaConnection {
+    /// Drive an async transaction control operation to completion on the shared
+    /// connect-back runtime, mapping `QueryError` to [`UdfError::ConnectBack`]
+    /// and catching any panic so it cannot cross the UDF FFI boundary — the same
+    /// contract as `query_arrow`/`execute`.
+    fn run_txn_op<'a, F, Fut>(&'a mut self, name: &str, op: F) -> Result<(), UdfError>
+    where
+        F: FnOnce(&'a mut Connection) -> Fut,
+        Fut: std::future::Future<Output = Result<(), exarrow_rs::error::QueryError>> + 'a,
+    {
+        cb_log(&format!("[cb] {name}"));
+        let fut = op(&mut self.inner);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            connect_back_rt()
+                .block_on(fut)
+                .map_err(|e| UdfError::ConnectBack(e.to_string()))
+        }));
+        cb_log(&format!("[cb] {name}: returned from block_on"));
+        match result {
+            Ok(r) => r,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                cb_log(&format!("[cb] {name} panic: {msg}"));
+                Err(UdfError::ConnectBack(format!("panic in {name}: {msg}")))
+            }
+        }
+    }
 }
 
 /// Open a new external-client session to the named-connection address.

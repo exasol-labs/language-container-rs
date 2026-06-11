@@ -50,6 +50,36 @@ pub trait ExaConnection: Send {
 
     /// Execute a DML/DDL statement, returning the affected row count.
     fn execute(&mut self, sql: &str) -> Result<u64, UdfError>;
+
+    /// Begin an explicit transaction (disable autocommit).
+    ///
+    /// The default returns [`UdfError::Unimplemented`] so connections that do
+    /// not manage transactions (e.g. mocks in unit tests) keep compiling.
+    fn begin(&mut self) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented(
+            "begin not supported on this connection".into(),
+        ))
+    }
+
+    /// Commit the active transaction.
+    ///
+    /// The default returns [`UdfError::Unimplemented`] so connections that do
+    /// not manage transactions (e.g. mocks in unit tests) keep compiling.
+    fn commit(&mut self) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented(
+            "commit not supported on this connection".into(),
+        ))
+    }
+
+    /// Roll back the active transaction.
+    ///
+    /// The default returns [`UdfError::Unimplemented`] so connections that do
+    /// not manage transactions (e.g. mocks in unit tests) keep compiling.
+    fn rollback(&mut self) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented(
+            "rollback not supported on this connection".into(),
+        ))
+    }
 }
 
 /// Convert arrow record batches into rows of the SDK's [`Value`] type.

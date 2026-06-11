@@ -30,6 +30,18 @@ impl ExaConnection for MockConn {
 }
 
 #[test]
+fn transaction_methods_default_to_unimplemented() {
+    // begin/commit/rollback exist on the trait surface so UDF code can call
+    // them on a Box<dyn ExaConnection>. A connection that does not implement
+    // them (the mock) inherits the defaults, which signal Unimplemented —
+    // matching the cluster_ip/connection/connect_back convention.
+    let mut conn: Box<dyn ExaConnection> = Box::new(MockConn { last_sql: None });
+    assert!(matches!(conn.begin(), Err(UdfError::Unimplemented(_))));
+    assert!(matches!(conn.commit(), Err(UdfError::Unimplemented(_))));
+    assert!(matches!(conn.rollback(), Err(UdfError::Unimplemented(_))));
+}
+
+#[test]
 fn connection_object_exposes_fields() {
     let obj = ConnectionObject {
         kind: "EXA".into(),

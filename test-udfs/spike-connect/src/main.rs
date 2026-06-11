@@ -8,7 +8,7 @@
 //!
 //! Exit 0 on success, 1 on any failure. Prints the result row to stdout.
 use anyhow::{anyhow, Context, Result};
-use arrow::array::{Decimal128Array, Int64Array};
+use arrow::array::Int64Array;
 use exarrow_rs::adbc::{Connection, Driver};
 
 #[tokio::main]

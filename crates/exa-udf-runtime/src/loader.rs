@@ -114,18 +114,23 @@ impl LoadedUdf {
         Some(unsafe { call_noarg_hook("default_output_columns", hook) })
     }
 
-    /// Call the `virtual_schema_adapter_call` single-call hook with `json_arg`.
+    /// Call the `virtual_schema_adapter_call` single-call hook with `json_arg`,
+    /// threading the host context pointer so the adapter can call
+    /// `ctx.connection(...)` / `ctx.connect_back(...)` during the call.
     ///
     /// # Safety
     ///
-    /// See [`LoadedUdf::call_default_output_columns`].
+    /// In addition to [`LoadedUdf::call_default_output_columns`], `ctx` must be a
+    /// pointer to a live `&mut dyn UdfContext` (double indirection) per the ABI
+    /// contract in `exasol_udf_sdk::abi`, valid for the duration of the call.
     pub unsafe fn call_virtual_schema_adapter_call(
         &self,
+        ctx: *mut std::ffi::c_void,
         json_arg: &str,
     ) -> Option<Result<String, RuntimeError>> {
         let vtable = unsafe { &*self.vtable };
         let hook = vtable.virtual_schema_adapter_call?;
-        Some(unsafe { call_arg_hook("virtual_schema_adapter_call", json_arg, hook) })
+        Some(unsafe { call_ctx_arg_hook("virtual_schema_adapter_call", ctx, json_arg, hook) })
     }
 
     /// Call the `generate_sql_for_import_spec` single-call hook.
@@ -194,6 +199,35 @@ unsafe fn call_arg_hook(
         .map_err(|_| RuntimeError::Udf(format!("{name}: argument contains interior NUL")))?;
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(c_arg.as_ptr(), &mut out) };
+    if rc != 0 {
+        if !out.is_null() {
+            unsafe { libc::free(out as *mut libc::c_void) };
+        }
+        return Err(RuntimeError::Udf(format!(
+            "single-call hook {name} returned error code {rc}"
+        )));
+    }
+    Ok(unsafe { crate::single_call::take_c_string(out) })
+}
+
+/// Drive a context-plus-argument single-call hook: thread the host context
+/// pointer (double-indirected `&mut dyn UdfContext`) and a NUL-terminated JSON
+/// string into the hook, check the return code, and take ownership of the
+/// heap-allocated result string it wrote.
+unsafe fn call_ctx_arg_hook(
+    name: &str,
+    ctx: *mut std::ffi::c_void,
+    arg: &str,
+    hook: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *const std::ffi::c_char,
+        *mut *mut std::ffi::c_char,
+    ) -> i32,
+) -> Result<String, RuntimeError> {
+    let c_arg = std::ffi::CString::new(arg)
+        .map_err(|_| RuntimeError::Udf(format!("{name}: argument contains interior NUL")))?;
+    let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rc = unsafe { hook(ctx, c_arg.as_ptr(), &mut out) };
     if rc != 0 {
         if !out.is_null() {
             unsafe { libc::free(out as *mut libc::c_void) };

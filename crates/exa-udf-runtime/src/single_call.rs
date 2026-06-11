@@ -2,6 +2,7 @@ use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
 use exa_proto::SingleCallFunctionId;
 use exa_zmq_protocol::{HostAction, HostEvent, Protocol, UdfMeta, ZmqTransport};
+use exasol_udf_sdk::context::UdfContext;
 use std::ffi::{c_char, CStr};
 
 /// Drive a single-call session.
@@ -23,37 +24,58 @@ pub fn run_single_call(
     udf: &LoadedUdf,
     _meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
-    // Open the phase, mirroring the scalar/set loop.
-    let mut event = request(transport, proto, proto.run_request())?;
-
+    // Mirror the canonical C++ single-call loop:
+    //   loop { MT_RUN -> MT_CALL; dispatch; MT_RETURN/-UNDEFINED; MT_DONE }
+    //   then MT_FINISHED.
+    // The DB acknowledges the container's MT_RETURN with MT_RETURN (not
+    // MT_CLEANUP); the session only ends when the DB answers a later MT_RUN or
+    // MT_DONE with MT_CLEANUP.
     loop {
-        match event {
+        match request(transport, proto, proto.run_request())? {
             HostEvent::SingleCall {
                 fn_id, json_arg, ..
             } => {
-                let reply = match invoke_hook(udf, fn_id, json_arg.as_deref())? {
+                let reply = match invoke_hook(transport, proto, udf, fn_id, json_arg.as_deref())? {
                     HookOutcome::Returned(result) => proto.return_request(result),
                     HookOutcome::Undefined => proto.undefined_call_request(fn_name(fn_id)),
                 };
-                event = request(transport, proto, reply)?;
+                // Send MT_RETURN/MT_UNDEFINED_CALL and consume the DB's ack.
+                // The ack is MT_RETURN (`SingleCallAck`); a defensive MT_CLEANUP
+                // ends the session early.
+                match request(transport, proto, reply)? {
+                    HostEvent::SingleCallAck => {}
+                    HostEvent::Cleanup => break,
+                    HostEvent::Close(msg) => return close_error(msg),
+                    other => return unexpected(other),
+                }
             }
-            // The DB ends the session by answering MT_RUN (or a call's reply)
-            // with MT_CLEANUP.
+            // The DB ends the session by answering MT_RUN with MT_CLEANUP.
             HostEvent::Cleanup => break,
             HostEvent::Close(msg) => return close_error(msg),
-            // No other message is valid in single-call mode. Retrying the wire
-            // here would risk a livelock, so surface it as a hard error.
-            other => {
-                return Err(RuntimeError::Udf(format!(
-                    "unexpected message in single-call mode: {other:?}"
-                )));
-            }
+            other => return unexpected(other),
+        }
+
+        // Close the run with MT_DONE; the DB answers MT_DONE to continue or
+        // MT_CLEANUP to end the session.
+        match request(transport, proto, proto.done_request())? {
+            HostEvent::Done => {}
+            HostEvent::Cleanup => break,
+            HostEvent::Close(msg) => return close_error(msg),
+            other => return unexpected(other),
         }
     }
 
     // Client-initiated teardown: MT_FINISHED, then the DB echoes it.
     request(transport, proto, proto.finished_reply())?;
     Ok(())
+}
+
+/// No other message is valid at this point in single-call mode. Retrying the
+/// wire here would risk a livelock, so surface it as a hard error.
+fn unexpected(event: HostEvent) -> Result<(), RuntimeError> {
+    Err(RuntimeError::Udf(format!(
+        "unexpected message in single-call mode: {event:?}"
+    )))
 }
 
 /// The result of routing one `MT_CALL` to a vtable hook.
@@ -64,7 +86,15 @@ enum HookOutcome {
 
 /// Route a single-call function id to its vtable hook, returning the hook's
 /// string result or `Undefined` when the UDF did not register the hook.
+///
+/// `transport` and `proto` are used only by `virtual_schema_adapter_call`, which
+/// is handed a [`SingleCallContext`] so the adapter can call
+/// `ctx.connection(name)` (an on-demand MT_IMPORT exchange) and
+/// `ctx.connect_back(...)` during the call. The dispatch loop is blocked waiting
+/// here, so the ZMQ socket is idle and the MT_IMPORT exchange is safe to perform.
 fn invoke_hook(
+    transport: &ZmqTransport,
+    proto: &mut Protocol,
     udf: &LoadedUdf,
     fn_id: SingleCallFunctionId,
     json_arg: Option<&str>,
@@ -74,9 +104,9 @@ fn invoke_hook(
         SingleCallFunctionId::ScFnDefaultOutputColumns => unsafe {
             udf.call_default_output_columns()
         },
-        SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => unsafe {
-            udf.call_virtual_schema_adapter_call(arg)
-        },
+        SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => {
+            return invoke_vs_adapter_call(transport, proto, udf, arg);
+        }
         SingleCallFunctionId::ScFnGenerateSqlForImportSpec => unsafe {
             udf.call_generate_sql_for_import_spec(arg)
         },
@@ -88,6 +118,64 @@ fn invoke_hook(
     match result {
         Some(Ok(s)) => Ok(HookOutcome::Returned(s)),
         Some(Err(e)) => Err(e),
+        None => Ok(HookOutcome::Undefined),
+    }
+}
+
+/// Invoke the `virtual_schema_adapter_call` hook with a live [`SingleCallContext`]
+/// threaded through the ABI's double-indirection, so the adapter can resolve
+/// CONNECTION credentials and open self-connections mid-call.
+fn invoke_vs_adapter_call(
+    transport: &ZmqTransport,
+    proto: &mut Protocol,
+    udf: &LoadedUdf,
+    arg: &str,
+) -> Result<HookOutcome, RuntimeError> {
+    // `transport`/`proto` feed the on-demand MT_IMPORT closure only when
+    // connect-back is enabled; without it the context's `connection()` /
+    // `connect_back()` inherit the trait's Unimplemented defaults.
+    #[cfg(not(feature = "connect-back"))]
+    let _ = (transport, proto);
+
+    #[cfg(feature = "connect-back")]
+    let proto_cell = std::cell::RefCell::new(proto);
+
+    #[cfg(feature = "connect-back")]
+    let conn_requester: crate::rowset::ConnRequester = Box::new(move |conn_name: &str| {
+        let mut proto = proto_cell.borrow_mut();
+        let req = proto.import_connection_request(conn_name);
+        transport
+            .send(&req)
+            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+        let resp = transport
+            .recv()
+            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+        let (event, _) = proto
+            .step(resp)
+            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
+        match event {
+            HostEvent::ConnInfo(ci) => Ok(ci),
+            _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                "MT_IMPORT reply was not ConnInfo".into(),
+            )),
+        }
+    });
+
+    let mut bridge = crate::rowset::SingleCallContext::new(
+        #[cfg(feature = "connect-back")]
+        conn_requester,
+    );
+    // ABI contract: pass a pointer to a `&mut dyn UdfContext` (double
+    // indirection), exactly as the run loop does.
+    let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
+    let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
+    let result = unsafe { udf.call_virtual_schema_adapter_call(ctx_ptr, arg) };
+    match result {
+        Some(Ok(s)) => Ok(HookOutcome::Returned(s)),
+        Some(Err(e)) => Err(match bridge.take_last_error() {
+            Some(detail) => RuntimeError::Udf(format!("{e}: {detail}")),
+            None => e,
+        }),
         None => Ok(HookOutcome::Undefined),
     }
 }

@@ -239,6 +239,67 @@ fn unimplemented_hook_replies_undefined_call() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
+/// The DB acknowledges the container's MT_RETURN with MT_RETURN (16), not
+/// MT_CLEANUP (11).  The runtime must then close the run with MT_DONE, get
+/// MT_CLEANUP, and finish cleanly — mirroring the canonical C++ single-call
+/// loop (`send_run` -> `send_return` -> `send_done` -> `send_finished`).
+#[test]
+fn mt_return_ack_terminates_session() {
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 19u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("ret-ack");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+            Some("{}"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "expected MT_RETURN"
+    );
+    // ACK the container's MT_RETURN with MT_RETURN (not MT_CLEANUP).
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+
+    // After the MT_RETURN ack, the container closes the run with MT_DONE.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtDone as i32,
+        "expected MT_DONE after MT_RETURN ack"
+    );
+    // The DB ends the session with MT_CLEANUP.
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
 #[test]
 fn single_call_mode_routes_to_dispatcher() {
     // A bare cleanup right after MT_RUN must end the single-call session
