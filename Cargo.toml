@@ -44,7 +44,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 license = "MIT"
 
 [workspace.dependencies]
@@ -67,7 +67,7 @@ thiserror = "2"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-exarrow-rs = { version = "0.12.5", features = ["websocket"] }
+exarrow-rs = { version = "0.12.7", features = ["websocket"] }
 
 [profile.release]
 strip = "symbols"

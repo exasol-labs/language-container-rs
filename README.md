@@ -3,12 +3,11 @@
 ![language-container-rs logo](assets/logo.svg)
 
 ![Rust 1.84+](https://img.shields.io/badge/rust-1.84%2B-orange.svg)
-![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
 
-A pure-Rust Exasol Script Language Container that executes precompiled `.so` UDFs from BucketFS via the native ZMQ+Protobuf SLC protocol.
+A pure-Rust Exasol Language Container that executes precompiled `.so` UDFs from BucketFS via the native ZMQ+Protobuf SLC protocol.
 
 </div>
 
@@ -16,7 +15,7 @@ A pure-Rust Exasol Script Language Container that executes precompiled `.so` UDF
 
 [Exasol](https://www.exasol.com) is a high-performance analytic database built for speed and scalability. You can try it immediately with the [SaaS free trial](https://cloud.exasol.com) or spin up a local instance using the [Docker image](https://hub.docker.com/r/exasol/docker-db).
 
-`language-container-rs` is the Rust Script Language Container for Exasol. It lets data engineers write UDFs in Rust — compiled to `.so` shared libraries, uploaded to BucketFS once, and loaded at query time. Third-party crates are statically linked into the `.so`, so adding a dependency never requires redeploying the language container.
+`language-container-rs` is the Rust Language Container for Exasol. It lets data engineers write UDFs in Rust — compiled to `.so` shared libraries, uploaded to BucketFS once, and loaded at query time. Third-party crates are statically linked into the `.so`, so adding a dependency never requires redeploying the language container.
 
 Two further capabilities ship out of the box:
 

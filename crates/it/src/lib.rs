@@ -252,27 +252,21 @@ impl Harness {
 
     /// Return the address for `CB_SELF` that UDFs use for the connect-back TCP session.
     ///
-    /// Connect-back must open a **regular login session** to the cluster's SQL
-    /// listener, NOT through Exasol's internal CoreDB proxy at `127.0.0.1:8563`.
-    /// The CoreDB proxy links the new session to the invoking SQL worker (Part:40),
-    /// causing Part:40 to wait for the connect-back session to deregister (~10 s)
-    /// and then crash with SIGABRT.
-    ///
-    /// In testcontainers mode (local Docker, `self._container.is_some()`):
-    ///   Returns `<container-eth0-ip>:8563` — the direct SQL listener, exactly the
-    ///   same path any external client (PyExasol, JDBC, exarrow-rs) uses. Exasol
-    ///   treats the session as fully independent of Part:40.
-    ///
-    /// In external mode (`EXASOL_HOST` set, `self._container.is_none()`):
-    ///   Returns `<self.host>:<self.db_port>` — the cluster SQL endpoint the harness
-    ///   already knows, reachable from within the node.
+    /// Connect-back is a regular external-client login to the node's own SQL
+    /// listener, exactly like PyExasol/JDBC. The UDF runs inside the DB
+    /// container's network namespace, so the correct address is the container's
+    /// eth0 IP — never localhost/127.0.0.1, which hits Exasol's CoreDB proxy and
+    /// crashes the invoking SQL worker (Part:40) with SIGABRT. Both testcontainers
+    /// and external mode target a local Docker container (named `exasol-db` in
+    /// external mode) reachable via `docker exec`, so container_inner_ip() works
+    /// in both. A genuine remote cluster (no local container) is not a current
+    /// use and would need an explicit CB-address override.
     pub async fn connect_back_sql_address(&self) -> Result<String> {
-        if self._container.is_some() {
-            let ip = self.container_inner_ip().await?;
-            Ok(format!("{ip}:8563"))
-        } else {
-            Ok(format!("{}:{}", self.host, self.db_port))
-        }
+        let ip = self.container_inner_ip().await?;
+        // Always the container-internal SQL port (DB_PORT), regardless of any
+        // host port mapping carried in `self.db_port` — the UDF runs inside the
+        // DB container's network namespace where the listener is on DB_PORT.
+        Ok(format!("{ip}:{DB_PORT}"))
     }
 
     /// Read UDF client diagnostic logs from inside the container and return them as a string.

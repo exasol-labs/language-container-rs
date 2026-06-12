@@ -37,13 +37,32 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     // Diagnostic: test Python3 built-in SLC connect-back BEFORE our SLC is
     // registered (ALTER SESSION SET SCRIPT_LANGUAGES replaces all languages,
     // so Python3 is only available in the default session state).
+    //
+    // Run on a dedicated throwaway connection so a VM crash (or any other
+    // non-fatal failure) cannot poison the shared `conn` used by all asserted
+    // scenarios below. The CONNECTION and SCRIPT objects created here are
+    // DB-global and persist across sessions, so the main connection still has
+    // access to them if needed.
     conn.execute("CREATE SCHEMA IF NOT EXISTS it_rust").await?;
     conn.execute("OPEN SCHEMA it_rust").await?;
     let python3_cb_addr = harness.connect_back_sql_address().await?;
     eprintln!("[it] python3_connect_back: CB_SELF address = {python3_cb_addr}");
-    match connect_back_python3_queries_and_emits(&mut conn, &python3_cb_addr).await {
-        Ok(()) => eprintln!("[it] scenario python3_connect_back ok"),
-        Err(e) => eprintln!("[it] scenario python3_connect_back FAILED: {e:#}"),
+    match harness.connect().await {
+        Ok(mut diag_conn) => {
+            diag_conn
+                .execute("CREATE SCHEMA IF NOT EXISTS it_rust")
+                .await
+                .ok();
+            diag_conn.execute("OPEN SCHEMA it_rust").await.ok();
+            match connect_back_python3_queries_and_emits(&mut diag_conn, &python3_cb_addr).await {
+                Ok(()) => eprintln!("[it] scenario python3_connect_back ok"),
+                Err(e) => eprintln!("[it] scenario python3_connect_back FAILED: {e:#}"),
+            }
+            let _ = diag_conn.close().await;
+        }
+        Err(e) => {
+            eprintln!("[it] scenario python3_connect_back SKIPPED: could not open diagnostic connection: {e:#}");
+        }
     }
 
     // Register the slim Rust SLC for this session.
