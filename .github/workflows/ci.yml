@@ -204,6 +204,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.alpine
           build-contexts: exarrow-rs=${{ github.workspace }}/exarrow-rs
           push: true
           tags: ghcr.io/exasol-labs/language-container-rs/slc:${{ github.sha }}
