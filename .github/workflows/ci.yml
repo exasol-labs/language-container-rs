@@ -289,7 +289,17 @@ jobs:
 
       - name: Start Exasol ${{ matrix.exasol_version }}
         run: |
+          # --shm-size: the Exasol UDF script VM needs far more shared memory
+          # than Docker's 64 MB default; the default starves the VM and any UDF
+          # (python3 or Rust) dies with "Internal error: VM crashed" while plain
+          # SQL still works. exarrow-rs uses 1–2g; UDF execution is heavier, so 2g.
+          # --memory: bound the DB under the ~8 GB runner — the docker-db image
+          # auto-sizes its DB RAM from the cgroup limit, leaving headroom for
+          # exaudfclient. COSLWD_ENABLED mirrors exarrow-rs.
           docker run -d --name exasol-db --privileged \
+            --shm-size=2g \
+            --memory=6g \
+            -e COSLWD_ENABLED=1 \
             -p 8563:8563 -p 2581:2581 \
             exasol/docker-db:${{ matrix.exasol_version }}
 
