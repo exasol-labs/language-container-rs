@@ -3,22 +3,35 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # RAM guard for the ~8 GB runner: cap concurrent codegen units (peak rustc/
+  # linker memory) rather than letting cargo fan out across all 8 cores; drop
+  # release debuginfo (smaller, cheaper link); incremental is useless on a CI
+  # cache and just inflates target/.
+  CARGO_BUILD_JOBS: "4"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  check-and-lint:
-    name: Check & Lint
-    runs-on: ubuntu-latest
+  # ── build early ──────────────────────────────────────────────────────────
+  # Single job that compiles everything once and warms the shared cargo cache
+  # for lint/unit-tests, and produces the release .so + IT binary artifacts the
+  # integration matrix consumes. Everything else needs this (directly or
+  # transitively), so the DAG reflects "build early".
+  build:
+    name: Build (warm cache + artifacts)
+    runs-on: ubuntu-latest-8-cores
     steps:
       - uses: actions/checkout@v4
 
       # arrow 58 requires Cargo ≥ 1.85 to parse its edition2024 manifest.
-      # The workspace pin (1.84) is for the artifact build; linting needs 1.91.
+      # The workspace pin (1.84) is for the artifact build; CI uses 1.91.
       - name: Install Rust 1.91
         uses: dtolnay/rust-toolchain@1.91
         with:
@@ -37,9 +50,79 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-1.91-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-1.91-
+            ${{ runner.os }}-cargo-
+
+      # Debug compile warms target/ for lint + unit-tests. This also builds the
+      # dlopen fixtures (scalar-double / annotated-fixture / single-call-fixture)
+      # that exa-udf-runtime's dispatch/single_call tests load at runtime.
+      - name: Build workspace (debug, warm cache)
+        run: |
+          cargo +1.91 build \
+            --exclude connect-back-query \
+            --exclude connect-back-insert \
+            --exclude it \
+            --workspace
+
+      - name: Build UDF .so artifacts (release)
+        run: |
+          cargo +1.91 build --release \
+            -p scalar-double \
+            -p set-filter \
+            -p json-parse \
+            -p single-call-fixture \
+            -p connect-back-cluster-ip \
+            -p connect-back-query \
+            -p connect-back-insert \
+            -p connect-back-crunch
+
+      - name: Build IT test binary (compile once)
+        run: |
+          BIN=$(cargo +1.91 test --no-run -p it --features integration,db-2026-1 \
+              --message-format=json 2>/dev/null \
+            | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
+            | grep -v '^null$' | head -1)
+          cp "$BIN" it-runner
+
+      - name: Upload UDF .so artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: udf-libs
+          path: target/release/lib*.so
+
+      - name: Upload IT test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-test
+          path: it-runner
+
+  # ── fan-out: lint / unit-tests / build-slc all need build ────────────────
+  lint:
+    name: Check & Lint
+    runs-on: ubuntu-latest-8-cores
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.91
+        uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: clippy, rustfmt
+
+      - name: Ensure rustfmt/clippy available on 1.91
+        run: rustup component add rustfmt clippy --toolchain 1.91
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Check formatting
         run: cargo +1.91 fmt --all -- --check
@@ -57,7 +140,8 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-8-cores
+    needs: [build]
     steps:
       - uses: actions/checkout@v4
 
@@ -71,11 +155,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-1.91-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-1.91-
+            ${{ runner.os }}-cargo-
 
       # dispatch/single_call tests in exa-udf-runtime dlopen these .so fixtures
+      # (cache hit after the build job).
       - name: Build test fixture cdylibs
         run: cargo +1.91 build -p scalar-double -p annotated-fixture -p single-call-fixture
 
@@ -90,7 +175,7 @@ jobs:
   build-slc:
     name: Build SLC image
     runs-on: ubuntu-latest-8-cores
-    needs: [check-and-lint, unit-tests]
+    needs: [build]
     permissions:
       packages: write
       contents: read
@@ -129,63 +214,11 @@ jobs:
         id: meta
         run: echo "slc_image=ghcr.io/exasol-labs/language-container-rs/slc:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-  build-artifacts:
-    name: Build UDF .so artifacts & IT binary
-    runs-on: ubuntu-latest-8-cores
-    needs: [check-and-lint, unit-tests]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91
-
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-artifacts-1.91-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-artifacts-1.91-
-
-      - name: Build UDF .so artifacts
-        run: |
-          cargo +1.91 build --release \
-            -p scalar-double \
-            -p set-filter \
-            -p json-parse \
-            -p single-call-fixture \
-            -p connect-back-cluster-ip \
-            -p connect-back-query \
-            -p connect-back-insert \
-            -p connect-back-crunch
-
-      - name: Build IT test binary (compile once)
-        run: |
-          BIN=$(cargo +1.91 test --no-run -p it --features integration,db-2026-1 \
-              --message-format=json 2>/dev/null \
-            | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
-            | grep -v '^null$' | head -1)
-          cp "$BIN" it-runner
-
-      - name: Upload UDF .so artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: udf-libs
-          path: target/release/lib*.so
-
-      - name: Upload IT test binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: it-test
-          path: it-runner
-
+  # ── viability gate: integration matrix over Exasol DB versions ───────────
   integration:
     name: IT (${{ matrix.exasol_version }})
     runs-on: ubuntu-latest-8-cores
-    needs: [build-slc, build-artifacts]
+    needs: [lint, unit-tests, build-slc]
     timeout-minutes: 45
     permissions:
       packages: read
@@ -202,7 +235,7 @@ jobs:
             db_series: "2026-1"
     steps:
       # No checkout or Rust install needed: the IT binary and UDF .so files are
-      # pre-compiled in build-artifacts and downloaded below.
+      # pre-compiled in the build job and downloaded below.
       - name: Download UDF .so artifacts
         uses: actions/download-artifact@v4
         with:
@@ -225,6 +258,27 @@ jobs:
         run: |
           docker pull ${{ needs.build-slc.outputs.slc_image }}
           docker tag  ${{ needs.build-slc.outputs.slc_image }} slc-rs-slim:dev
+
+      # Cache the (multi-GB) Exasol DB image per matrix version so each leg
+      # loads it from a tarball instead of re-pulling from Docker Hub every run.
+      - name: Cache Exasol DB image
+        id: exa-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/exasol-db-${{ matrix.exasol_version }}.tar
+          key: exasol-db-${{ matrix.exasol_version }}
+
+      - name: Load or pull Exasol image
+        run: |
+          TAR=/tmp/exasol-db-${{ matrix.exasol_version }}.tar
+          if [ -f "$TAR" ]; then
+            echo "Loading Exasol image from cache..."
+            docker load -i "$TAR"
+          else
+            echo "Pulling Exasol image from registry..."
+            docker pull exasol/docker-db:${{ matrix.exasol_version }}
+            docker save exasol/docker-db:${{ matrix.exasol_version }} -o "$TAR"
+          fi
 
       - name: Install exapump
         run: |
@@ -273,3 +327,48 @@ jobs:
         run: |
           docker stop exasol-db || true
           docker rm   exasol-db || true
+
+  # ── release: tag-only, gated on the full pipeline succeeding ─────────────
+  release:
+    name: Release
+    runs-on: ubuntu-latest-8-cores
+    needs: [integration]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # GitHub Release
+      packages: write   # re-tag SLC image in GHCR
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$TAG" != "$CRATE" ]; then
+            echo "tag $TAG != Cargo.toml version $CRATE"
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-tag SLC image at version + latest
+        run: |
+          SRC=ghcr.io/exasol-labs/language-container-rs/slc:${{ github.sha }}
+          VER="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create \
+            -t ghcr.io/exasol-labs/language-container-rs/slc:"$VER" \
+            -t ghcr.io/exasol-labs/language-container-rs/slc:latest \
+            "$SRC"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          name: ${{ github.ref_name }}
