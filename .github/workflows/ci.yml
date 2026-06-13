@@ -300,24 +300,52 @@ jobs:
             docker save exasol/docker-db:${{ matrix.exasol_version }} -o "$TAR"
           fi
 
+      # Cache the exapump release binary per pinned version so each matrix leg
+      # installs it from cache instead of re-downloading from GitHub releases
+      # every run. Bump the key's version suffix when EXAPUMP_VERSION changes.
+      - name: Cache exapump
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/exapump
+          key: exapump-v0.9.2
+
       - name: Install exapump
+        env:
+          EXAPUMP_VERSION: "0.9.2"
         run: |
-          curl -fsSL https://github.com/exasol-labs/exapump/releases/download/v0.9.2/exapump-0.9.2-linux-x86_64 \
-            -o /usr/local/bin/exapump
-          chmod +x /usr/local/bin/exapump
+          CACHED=~/.cache/exapump/exapump
+          if [ ! -x "$CACHED" ]; then
+            echo "exapump not in cache; downloading v${EXAPUMP_VERSION}..."
+            mkdir -p ~/.cache/exapump
+            curl -fsSL "https://github.com/exasol-labs/exapump/releases/download/v${EXAPUMP_VERSION}/exapump-${EXAPUMP_VERSION}-linux-x86_64" \
+              -o "$CACHED"
+            chmod +x "$CACHED"
+          else
+            echo "Using cached exapump."
+          fi
+          install -m 0755 "$CACHED" /usr/local/bin/exapump
 
       - name: Start Exasol ${{ matrix.exasol_version }}
         run: |
-          # --shm-size: the Exasol UDF script VM needs far more shared memory
-          # than Docker's 64 MB default; the default starves the VM and any UDF
-          # (python3 or Rust) dies with "Internal error: VM crashed" while plain
-          # SQL still works. exarrow-rs uses 1–2g; UDF execution is heavier, so 2g.
-          # --memory: bound the DB under the ~8 GB runner — the docker-db image
-          # auto-sizes its DB RAM from the cgroup limit, leaving headroom for
-          # exaudfclient. COSLWD_ENABLED mirrors exarrow-rs.
+          # UDF execution ("VM crashed", SQL state 22002) fails only on the CI
+          # runner — it does NOT reproduce locally even with --memory=6g and swap
+          # disabled on a same-sized (32 GB, cgroup v2) host. So the cause is
+          # runner-environment-specific, not the docker mem flags alone.
+          # EXA_DB_MEM_SIZE: pin Exasol's DB RAM to 4 GiB (plenty for these tests)
+          # instead of letting docker-db auto-size from the cgroup. This removes
+          # reliance on auto-sizing, which may pick a pathological value on the
+          # runner; it mirrors the working strata-rs / exarrow-rs setups.
+          # --memory: generous ceiling on this ubuntu-latest-8-cores runner
+          # (32 GB) — fits DB(4) + shm(2) + sandbox + OS. Replaces the previous
+          # 6g cap (sized for a 7 GB runner); exarrow-rs sets no --memory at all.
+          # --shm-size: the UDF script VM needs far more than Docker's 64 MB
+          # default; 2g (exarrow-rs uses 1g but never spawns the UDF sandbox).
+          # The "Dump Exasol logs on failure" step below captures the real
+          # abort reason if this is still red.
           docker run -d --name exasol-db --privileged \
             --shm-size=2g \
-            --memory=6g \
+            --memory=12g \
+            -e EXA_DB_MEM_SIZE='4 GiB' \
             -e COSLWD_ENABLED=1 \
             -p 8563:8563 -p 2581:2581 \
             exasol/docker-db:${{ matrix.exasol_version }}
@@ -351,6 +379,34 @@ jobs:
         run: |
           chmod +x it-runner
           ./it-runner
+
+      # On failure, capture the DB-side abort reason so a red run shows *why*
+      # instead of just "VM crashed". An OOM-killed UDF sandbox shows up in
+      # dmesg / the cored crash logs.
+      - name: Dump Exasol logs on failure
+        if: failure()
+        run: |
+          echo "=== container memory / host free ==="
+          docker stats --no-stream exasol-db || true
+          free -m || true
+          echo "=== kernel OOM evidence ==="
+          dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -40 || true
+          docker exec exasol-db sh -c 'dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -40' || true
+          echo "=== exasql crash logs ==="
+          docker exec exasol-db sh -c 'find /exa/logs/cored -name "exasql.*" -type f 2>/dev/null | sort | xargs -I{} sh -c "echo === {} ===; tail -40 {}"' || true
+          echo "=== EXASolution DB log tail ==="
+          docker exec exasol-db sh -c 'tail -80 /exa/logs/logd/EXASolution_DB1.log 2>/dev/null' || true
+          echo "=== collecting /exa/logs tree for artifact ==="
+          rm -rf exa-logs && mkdir -p exa-logs
+          docker cp exasol-db:/exa/logs exa-logs/ 2>/dev/null || true
+
+      - name: Upload Exasol logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exa-logs-${{ matrix.exasol_version }}
+          path: exa-logs/
+          if-no-files-found: ignore
 
       - name: Stop Exasol container
         if: always()
