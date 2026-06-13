@@ -244,14 +244,12 @@ jobs:
   # ── viability gate: integration matrix over Exasol DB versions ───────────
   integration:
     name: IT (${{ matrix.exasol_version }})
-    # Standard ubuntu-latest, NOT ubuntu-latest-8-cores. The larger runners run
-    # on a RHEL-10-family host kernel (6.12.x.el10) on which Exasol's exaudfclient
-    # UDF sandbox is killed instantly ("VM crashed", 22002) for *every* language
-    # incl. built-in Python3 — the DB is healthy, only UDF execution dies. The
-    # standard runner uses an Azure-Ubuntu host kernel where the sandbox works
-    # (the platform Exasol docker-db / exarrow-rs CI are validated on). This job
-    # only boots the DB + runs pre-built binaries, so 2 vCPU / 7 GB is plenty
-    # once the DB is pinned to 4 GiB (see EXA_DB_MEM_SIZE below).
+    # Standard ubuntu-latest (2 vCPU / 7 GB) — enough since this job only boots
+    # the DB + runs pre-built binaries, and the DB is pinned to 4 GiB (see
+    # EXA_DB_MEM_SIZE below). The previous "VM crashed" failures were NOT about
+    # runner size or kernel: they were Ubuntu 24.04's AppArmor restriction on
+    # unprivileged user namespaces, which the "Allow unprivileged user
+    # namespaces" step below disables. See that step for the full explanation.
     runs-on: ubuntu-latest
     needs: [lint, licenses, unit-tests, build-slc]
     timeout-minutes: 45
@@ -356,6 +354,25 @@ jobs:
             echo "Using cached exapump."
           fi
           install -m 0755 "$CACHED" /usr/local/bin/exapump
+
+      # ROOT CAUSE of the persistent "VM crashed" (SQL state 22002) for every
+      # UDF, incl. built-in Python3 — confirmed from the host kernel audit log:
+      #   apparmor="DENIED" operation="capable" profile="unprivileged_userns"
+      #   comm="nschroot" capability=21 capname="sys_admin"
+      # To run a UDF, Exasol launches /opt/exasol/.../bin/udf/nschroot, which
+      # creates an unprivileged user namespace and needs CAP_SYS_ADMIN inside it
+      # to set up the sandbox. Ubuntu 24.04 ships
+      # kernel.apparmor_restrict_unprivileged_userns=1, which transitions that
+      # namespace into a restricted AppArmor profile that DENIES CAP_SYS_ADMIN —
+      # even though the container is --privileged. So nschroot dies instantly and
+      # silently (0-byte cored/exasql.* logs) and the DB reports "VM crashed".
+      # The DB itself is healthy; only UDF execution is affected. Runs fine on
+      # non-24.04 hosts (e.g. local Debian), which is why it's green locally.
+      # Disabling the restriction on the runner restores the sandbox.
+      - name: Allow unprivileged user namespaces (Exasol UDF sandbox)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sysctl kernel.apparmor_restrict_unprivileged_userns
 
       - name: Start Exasol ${{ matrix.exasol_version }}
         run: |
