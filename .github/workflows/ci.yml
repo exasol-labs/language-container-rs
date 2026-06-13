@@ -412,9 +412,14 @@ jobs:
           echo "=== container memory / host free ==="
           docker stats --no-stream exasol-db || true
           free -m || true
-          echo "=== kernel OOM evidence ==="
-          dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -40 || true
-          docker exec exasol-db sh -c 'dmesg 2>/dev/null | grep -iE "oom|killed process" | tail -40' || true
+          echo "=== HOST kernel ring buffer (sudo) — the exaudfclient kill signal lands here ==="
+          # The DB-side cored/exasql.* logs are 0 bytes: the script VM is killed
+          # before it can log. The reason (seccomp/SIGSYS, SIGILL/invalid opcode,
+          # segfault, OOM) is only in the host kernel log. Unprivileged dmesg is
+          # blocked on the runner, so use sudo.
+          sudo dmesg --ctime | grep -iE 'exaudf|seccomp|segfault|trap|invalid opcode|illegal|sig(sys|ill|segv|abrt)|signal [0-9]|killed process|oom|audit.*denied' | tail -60 || true
+          echo "--- last 40 kernel lines (fallback) ---"
+          sudo dmesg --ctime | tail -40 || true
           echo "=== exasql crash logs ==="
           docker exec exasol-db sh -c 'find /exa/logs/cored -name "exasql.*" -type f 2>/dev/null | sort | xargs -I{} sh -c "echo === {} ===; tail -40 {}"' || true
           echo "=== EXASolution DB log tail ==="
