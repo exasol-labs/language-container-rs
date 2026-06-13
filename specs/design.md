@@ -1,13 +1,13 @@
-# slc-rs — Technical Design: Rust-native Exasol Script Language Container
+# slc-rs — Technical Design: Rust-native Exasol Language Container
 
 ## Context
 
-Exasol Script Language Containers (SLCs) extend the database with additional language runtimes. Currently only Python, Java, and R are supported. This document describes the design for a production-quality Rust SLC that:
+Exasol Language Containers (SLCs) extend the database with additional language runtimes. Currently only Python, Java, and R are supported. This document describes the design for a production-quality Rust SLC that:
 
 - Allows users to write Exasol UDFs in Rust
 - Implements the identical `localzmq+protobuf` wire protocol used by existing SLCs
 - Offers all UDF capabilities: scalar, set/EMITS, import spec generation, export spec generation
-- Uses `exarrow-rs` (`~/code/exarrow-rs/`, v0.12.5) for connect-back to Exasol from within UDFs
+- Uses `exarrow-rs` (crates.io, v0.12.7) for connect-back to Exasol from within UDFs
 
 The existing C++ launcher (`script-languages-release/exaudfclient/exaudfclient.cc`) loads `libexaudflib_complete.so` via `dlmopen` to avoid symbol conflicts with the DB's protobuf. The Rust replacement implements the protocol directly in-process — no `libexaudflib` needed.
 
@@ -73,13 +73,13 @@ exasol-udf-sdk --> exasol-udf-macros (re-export), arrow, exarrow-rs (opt feature
 | Protobuf | `prost = "0.13"`, `prost-build` in build.rs | No runtime protoc |
 | Dynamic load | `libloading = "0.8"` | Load user `libudf.so` |
 | Arrow | `arrow = "58"` | Pinned to exarrow-rs version for zero-copy RecordBatch reuse |
-| DB connect-back | path dep `../../exarrow-rs` | Behind `connect-back` Cargo feature flag |
+| DB connect-back | crates.io dependency `exarrow-rs` v0.12.7 | Behind `connect-back` Cargo feature flag |
 | Async (connect-back only) | `tokio = "1"` | Dedicated current_thread runtime, never enters ZMQ loop |
 | Proc macro | `syn = "2"`, `quote = "1"`, `proc-macro2` | |
 | Errors | `thiserror`, `anyhow` (binary only) | |
 | Logging | `tracing`, `tracing-subscriber` | stderr only; Exasol captures stderr to UDF log |
 
-Workspace `Cargo.toml` must include a `[patch.crates-io]` entry pointing `exarrow-rs` at the local path to ensure the `arrow = "58"` version is shared without duplication.
+`exarrow-rs` is a crates.io dependency; `arrow = "58"` is pinned once in `[workspace.dependencies]` and shared by `exasol-udf-sdk` and `exarrow-rs` to avoid a duplicate Arrow copy.
 
 ---
 
@@ -592,7 +592,7 @@ No Bazel — pure Cargo. The build system's only requirement is that `/exaudf/ex
 | 5 | JIT image size (~1.4 GB) | On-disk compile cache at `/tmp/udf-cache/`; offer `slim` profile for latency-sensitive deployments; `sccache` inside container is an option |
 | 6 | Rust ABI instability across compiler versions | For Option C: same container toolchain guarantees match. For Option A: `sdk_fingerprint` check at dlopen — mismatch → clear error, not UB |
 | 7 | Panic safety: UDF runs in-process | `catch_unwind` in `run` shim; template crate sets `[profile.release] panic = "abort"`; document that panics surface as UDF errors |
-| 8 | Arrow version coupling | `arrow = "58"` pinned via workspace `[patch]`; bump must be coordinated between `exasol-udf-sdk` and `exarrow-rs` |
+| 8 | Arrow version coupling | `arrow = "58"` pinned via `[workspace.dependencies]`; bump must be coordinated between `exasol-udf-sdk` and `exarrow-rs` |
 
 ---
 
@@ -728,6 +728,6 @@ Authors add third-party crates to `[dependencies]` freely — they are staticall
 | `~/code/script-languages-release/flavors/standard-EXASOL-all-python-3.12/flavor_base/build_steps.py` | exaslct task DAG pattern for the Rust flavor |
 | `~/code/script-languages-release/flavors/standard-EXASOL-all-python-3.12/flavor_base/build_run/Dockerfile` | Build layer template (swap Bazel for Cargo) |
 | `~/code/script-languages-release/flavors/standard-EXASOL-all-python-3.12/flavor_base/language_definitions.json` | JSON schema to replicate for RUST |
-| `~/code/exarrow-rs/src/adbc/connection.rs` | `Connection::from_params`, `query`, `execute_update`, `blocking_import_*`, `blocking_export_*` |
-| `~/code/exarrow-rs/Cargo.toml` | `arrow = "58"` version pin to coordinate with SDK |
+| `exarrow-rs` crate (crates.io, v0.12.7) — `src/adbc/connection.rs` | `Connection::from_params`, `query`, `execute_update`, `blocking_import_*`, `blocking_export_*` |
+| `exarrow-rs` crate (crates.io, v0.12.7) — `Cargo.toml` | `arrow = "58"` version pin to coordinate with SDK |
 | `~/code/script-languages-release/exaudfclient/base/exaudflib/zmqcontainer.proto` | Canonical protocol definition (after `git submodule update --init`) |

@@ -215,12 +215,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout exarrow-rs
-        uses: actions/checkout@v4
-        with:
-          repository: exasol-labs/exarrow-rs
-          path: exarrow-rs
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -232,7 +226,6 @@ jobs:
         with:
           context: .
           file: Dockerfile.alpine
-          build-contexts: exarrow-rs=${{ github.workspace }}/exarrow-rs
           push: false
           load: true
           tags: slc-rs-slim:dev

@@ -90,3 +90,4 @@ The pre-existing non-connect-back scenarios in this feature — `sanity_select_o
 * *THEN* any failure or VM crash in the diagnostic MUST be caught and logged as non-fatal
 * *AND* it MUST NOT affect the shared connection or any subsequent asserted scenario (e.g. `scalar_double_returns_42`), which run on the untouched shared connection
 * *AND* the diagnostic's `CB_SELF_PY` connection MUST use `<container-eth0-ip>:8563` (never loopback), consistent with `connect_back_sql_address()`
+

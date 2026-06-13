@@ -1,6 +1,6 @@
 # Mission: slc-rs
 
-> A Rust-native Exasol Script Language Container (SLC) that lets users write Exasol UDFs in Rust by implementing the standard `localzmq+protobuf` wire protocol — with zero dependency on the existing C++ launcher or libexaudflib.
+> A Rust-native Exasol Language Container (SLC) that lets users write Exasol UDFs in Rust by implementing the standard `localzmq+protobuf` wire protocol — with zero dependency on the existing C++ launcher or libexaudflib.
 
 ## Problem Statement
 
@@ -44,7 +44,7 @@ Exasol UDFs are currently limited to Python, Java, and R. Teams with Rust codeba
 | ABI fingerprint | `"SDK_VERSION:RUSTC_HASH\0"` string baked into every compiled vtable; guards against toolchain-mismatch UB at load time |
 | `ExaConnection` | SDK trait (defined in `exasol-udf-sdk`) exposing `query_arrow`, `execute`, `import_arrow`, `export_arrow`. Host implements it via `exarrow-rs`. UDF code never links `exarrow-rs` directly. |
 | musl | `x86_64-unknown-linux-musl` target; all Rust deps statically linked; no glibc dependency in the `.so`. `cargo exaudf build` targets this automatically. |
-| exarrow-rs | Local Rust crate (`~/code/exarrow-rs`, v0.12.5) providing Arrow-based ADBC connectivity back to Exasol — used by the host runtime only; UDFs access it through the `ExaConnection` trait. |
+| exarrow-rs | crates.io crate (`exarrow-rs` v0.12.7, features = ["websocket"]) providing Arrow-based ADBC connectivity back to Exasol — used by the host runtime only; UDFs access it through the `ExaConnection` trait. |
 | exaslct | Exasol's SLC build-and-release toolchain; the CI pipeline that assembles, tests, and publishes SLC images |
 | `exaudfclient` | The binary the DB invokes per UDF call: `exaudfclient <ipc_socket_path> lang=rust` |
 | MT_* | `message_type` enum values in the protobuf protocol (e.g., `MT_RUN`, `MT_NEXT`, `MT_EMIT`) |
@@ -61,7 +61,7 @@ Exasol UDFs are currently limited to Python, Java, and R. Teams with Rust codeba
 | Protobuf | `prost = "0.13"`, `prost-build` | Code-gen from `zmqcontainer.proto`; no runtime `protoc` |
 | Dynamic loading | `libloading = "0.8"` | `dlopen` user `libudf.so` |
 | Arrow | `arrow = "58"` | Zero-copy batch I/O; pinned to match `exarrow-rs` |
-| DB connect-back | `exarrow-rs` (local path dep) | Arrow ADBC connection back to Exasol from UDF code |
+| DB connect-back | `exarrow-rs` (crates.io, v0.12.7) | Arrow ADBC connection back to Exasol from UDF code |
 | Async | `tokio = "1"` (current_thread) | Connect-back only; never enters the ZMQ loop |
 | Proc macro | `syn = "2"`, `quote = "1"`, `proc-macro2` | `#[exasol_udf]` attribute macro |
 | Errors | `thiserror`, `anyhow` (binary only) | Typed and ad-hoc error handling |
@@ -107,7 +107,7 @@ exapump udf deploy \
 
 ```
 slc-rs/
-├── Cargo.toml                    # workspace root; [patch] for exarrow-rs
+├── Cargo.toml                    # workspace root; exarrow-rs + arrow pinned in [workspace.dependencies]
 ├── rust-toolchain.toml           # pinned Rust channel — MUST match container
 ├── Cargo.lock
 ├── crates/
@@ -141,7 +141,7 @@ exaudfclient (binary)
 - `exa-zmq-protocol::Protocol` is a pure state machine (no I/O) that converts `ExascriptResponse` → `HostEvent` and `HostAction` → `ExascriptRequest`. The ZMQ socket lives only in the transport wrapper — this makes the protocol fully unit-testable with fixtures.
 - The only ABI crossing is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable`. Rich trait objects (`UdfRun`, `UdfContext`) never cross the boundary — they stay in the host process. For Option C, the same compiler guarantees this; for Option A, the `sdk_fingerprint` check enforces it.
 - Connect-back uses a dedicated `OnceLock<tokio::runtime::Runtime>` (current_thread) so async Exasol queries can be called from synchronous UDF code without runtime conflicts.
-- Arrow `= "58"` is pinned at the workspace level via `[patch.crates-io]` to ensure a single copy is shared between `exasol-udf-sdk` and `exarrow-rs`, enabling zero-copy `RecordBatch` pass-through.
+- Arrow `= "58"` is pinned at the workspace level in `[workspace.dependencies]` to ensure a single copy is shared between `exasol-udf-sdk` and `exarrow-rs`, enabling zero-copy `RecordBatch` pass-through.
 
 ## Constraints
 
@@ -155,7 +155,7 @@ exaudfclient (binary)
 | Service | Purpose | Failure Impact |
 |---------|---------|----------------|
 | Exasol DB (ZMQ ROUTER) | Drives the full protocol; sends input batches and receives output | No UDFs can run |
-| `exarrow-rs` (local `~/code/exarrow-rs`) | Arrow ADBC connect-back — used exclusively by the host runtime to implement `ExaConnection`; UDFs never link it directly | `ctx.exa()` / `ctx.exa_named()` / `ctx.exa_connect()` return errors; UDFs that call connect-back fail at runtime |
+| `exarrow-rs` (crates.io, v0.12.7) | Arrow ADBC connect-back — used exclusively by the host runtime to implement `ExaConnection`; UDFs never link it directly | `ctx.exa()` / `ctx.exa_named()` / `ctx.exa_connect()` return errors; UDFs that call connect-back fail at runtime |
 | BucketFS | Stores precompiled `.so` for Option A | Option A UDFs can't be loaded; JIT unaffected |
 | Vendored Cargo registry (`/opt/slc-rs/vendor/`) | Enables offline JIT builds inside the container | JIT compilation fails; Option A unaffected |
 | `zmqcontainer.proto` (GitHub / git submodule) | Canonical protocol definition for `exa-proto` build | Cannot build `exa-proto`; fetch via `git submodule update --init` in `script-languages-release` or from the raw GitHub URL |
