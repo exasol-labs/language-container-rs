@@ -275,6 +275,21 @@ jobs:
           echo "--- /etc/os-release ---"; cat /etc/os-release || true
           echo "--- cpus/mem ---"; nproc; free -m
 
+      # The standard runner has only ~21 GB free on / (where /var/lib/docker
+      # lives) — too little for the multi-GB Exasol image + its cached tarball +
+      # the SLC image + the DB's /exa data ("no space left on device" on docker
+      # load). The larger runners have more disk but run the el10 kernel that
+      # crashes the UDF sandbox, so we reclaim space instead: drop ~30 GB of
+      # preinstalled toolchains we never use.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell /usr/share/swift /usr/lib/jvm || true
+          sudo docker image prune -af || true
+          echo "--- after cleanup ---"; df -h /
+
       # No checkout or Rust install needed: the IT binary and UDF .so files are
       # pre-compiled in the build job and downloaded below.
       - name: Download UDF .so artifacts
