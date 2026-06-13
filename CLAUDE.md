@@ -4,6 +4,24 @@
 - Use `exapump` to interact with Exasol.
 - Do not verify SSL certificates (`validateservercertificate=0`).
 
+## Running Exasol UDFs in CI (Ubuntu 24.04 runners)
+
+**Rule:** before `docker run` of the Exasol DB on any Ubuntu 24.04 runner, set
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Why: Exasol runs every UDF inside a sandbox built by `nschroot`, which creates an
+**unprivileged user namespace** needing `CAP_SYS_ADMIN`. Ubuntu 24.04 ships
+`kernel.apparmor_restrict_unprivileged_userns=1`, which strips that capability via
+a restricted AppArmor profile **even under `--privileged`** → `nschroot` dies
+silently → the DB reports `Internal error: VM crashed` (SQL state 22002) for
+**every** UDF, built-in Python3 included. The DB itself stays healthy.
+
+If you see "VM crashed" in CI, it is this — **not** memory, disk, the host kernel,
+glibc, or the UDF code. It reproduces on Ubuntu 24.04 hosts only (local Debian has
+no such restriction), so it is green locally. Confirm via `sudo dmesg` on the
+runner (`apparmor="DENIED" ... comm="nschroot" capability=21 capname="sys_admin"`);
+unprivileged `dmesg` is blocked and the DB-side `cored/exasql.*` logs are 0 bytes.
+
 ## Three "connection" concepts — never confuse them
 
 | Concept | What it is | Representation in code |
