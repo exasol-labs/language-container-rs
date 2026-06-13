@@ -244,7 +244,15 @@ jobs:
   # ── viability gate: integration matrix over Exasol DB versions ───────────
   integration:
     name: IT (${{ matrix.exasol_version }})
-    runs-on: ubuntu-latest-8-cores
+    # Standard ubuntu-latest, NOT ubuntu-latest-8-cores. The larger runners run
+    # on a RHEL-10-family host kernel (6.12.x.el10) on which Exasol's exaudfclient
+    # UDF sandbox is killed instantly ("VM crashed", 22002) for *every* language
+    # incl. built-in Python3 — the DB is healthy, only UDF execution dies. The
+    # standard runner uses an Azure-Ubuntu host kernel where the sandbox works
+    # (the platform Exasol docker-db / exarrow-rs CI are validated on). This job
+    # only boots the DB + runs pre-built binaries, so 2 vCPU / 7 GB is plenty
+    # once the DB is pinned to 4 GiB (see EXA_DB_MEM_SIZE below).
+    runs-on: ubuntu-latest
     needs: [lint, licenses, unit-tests, build-slc]
     timeout-minutes: 45
     strategy:
@@ -258,6 +266,15 @@ jobs:
           - exasol_version: "2026.1.0"
             db_series: "2026-1"
     steps:
+      # Record the runner's host kernel/platform. The Exasol UDF sandbox crashes
+      # on the el10 larger-runner kernel but works on the Azure-Ubuntu kernel of
+      # the standard runner; this makes the platform visible in every run.
+      - name: Runner environment
+        run: |
+          uname -a
+          echo "--- /etc/os-release ---"; cat /etc/os-release || true
+          echo "--- cpus/mem ---"; nproc; free -m
+
       # No checkout or Rust install needed: the IT binary and UDF .so files are
       # pre-compiled in the build job and downloaded below.
       - name: Download UDF .so artifacts
@@ -327,24 +344,15 @@ jobs:
 
       - name: Start Exasol ${{ matrix.exasol_version }}
         run: |
-          # UDF execution ("VM crashed", SQL state 22002) fails only on the CI
-          # runner — it does NOT reproduce locally even with --memory=6g and swap
-          # disabled on a same-sized (32 GB, cgroup v2) host. So the cause is
-          # runner-environment-specific, not the docker mem flags alone.
-          # EXA_DB_MEM_SIZE: pin Exasol's DB RAM to 4 GiB (plenty for these tests)
-          # instead of letting docker-db auto-size from the cgroup. This removes
-          # reliance on auto-sizing, which may pick a pathological value on the
-          # runner; it mirrors the working strata-rs / exarrow-rs setups.
-          # --memory: generous ceiling on this ubuntu-latest-8-cores runner
-          # (32 GB) — fits DB(4) + shm(2) + sandbox + OS. Replaces the previous
-          # 6g cap (sized for a 7 GB runner); exarrow-rs sets no --memory at all.
+          # EXA_DB_MEM_SIZE: pin Exasol's DB RAM to 4 GiB so it fits comfortably
+          # on the standard 7 GB runner (more than enough for these tests). No
+          # --memory cgroup cap — exarrow-rs runs the DB uncapped on this same
+          # runner class; pinning DB RAM is what bounds the footprint.
           # --shm-size: the UDF script VM needs far more than Docker's 64 MB
           # default; 2g (exarrow-rs uses 1g but never spawns the UDF sandbox).
-          # The "Dump Exasol logs on failure" step below captures the real
-          # abort reason if this is still red.
+          # COSLWD_ENABLED mirrors exarrow-rs.
           docker run -d --name exasol-db --privileged \
             --shm-size=2g \
-            --memory=12g \
             -e EXA_DB_MEM_SIZE='4 GiB' \
             -e COSLWD_ENABLED=1 \
             -p 8563:8563 -p 2581:2581 \
