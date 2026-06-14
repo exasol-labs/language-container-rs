@@ -89,10 +89,18 @@ fn parse_schema(side: &str, json: &str) -> Result<Vec<AnnotatedField>, RuntimeEr
 fn exatype_name(typ: &ExaType) -> &'static str {
     match typ {
         ExaType::Int32 => "Int32",
-        ExaType::Int64 | ExaType::Numeric => "Int64",
+        ExaType::Int64 => "Int64",
+        ExaType::Numeric { .. } => "Numeric",
         ExaType::Double => "Double",
         ExaType::Boolean => "Boolean",
-        ExaType::String | ExaType::Timestamp | ExaType::Date => "String",
+        ExaType::Date => "Date",
+        ExaType::Timestamp | ExaType::TimestampTz => "Timestamp",
+        ExaType::String { .. }
+        | ExaType::Char { .. }
+        | ExaType::Geometry
+        | ExaType::HashType
+        | ExaType::IntervalYearToMonth
+        | ExaType::IntervalDayToSecond => "String",
         ExaType::Unsupported => "Unsupported",
     }
 }

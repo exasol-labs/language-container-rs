@@ -1,7 +1,7 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 /// SET UDF that inserts each input row's value into the pre-existing table
 /// `cb_sink.cb_result` via a connect-back session, then emits a row-count of 1
@@ -26,7 +26,8 @@ pub fn connect_back_insert(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
         let val = match ctx.get(0)? {
             Value::Int64(n) => *n,
-            Value::Numeric(s) => s.parse().map_err(|e| UdfError::Type(format!("{e}")))?,
+            Value::Numeric(d) if d.scale == 0 => i64::try_from(d.unscaled)
+                .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?,
             _ => return Err(UdfError::Type("expected integer".into())),
         };
         vals.push(val);
@@ -49,12 +50,15 @@ pub fn connect_back_insert(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         ))?;
     }
 
-    // Exasol represents BIGINT as PB_NUMERIC (decimal string) on the wire, so
-    // a BIGINT EMITS column must be emitted as Value::Numeric. Emitting
-    // Value::Int64 puts the data in the int64 block while the DB reads the
-    // (empty) string block for a NUMERIC column, segfaulting its emit handler.
+    // Exasol represents BIGINT as PB_NUMERIC on the wire, so a BIGINT EMITS
+    // column must be emitted as Value::Numeric. Emitting Value::Int64 puts the
+    // data in the int64 block while the DB reads the (empty) string block for a
+    // NUMERIC column, segfaulting its emit handler.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric("1".to_string())])?;
+        ctx.emit(&[Value::Numeric(Decimal {
+            unscaled: 1,
+            scale: 0,
+        })])?;
     }
     Ok(())
 }

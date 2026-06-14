@@ -1,7 +1,7 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 /// SET UDF that number-crunches each input value (squares it) and writes the
 /// pair `(v, v*v)` back into `it_rust.crunch_log` via a connect-back session,
@@ -28,7 +28,8 @@ pub fn crunch_writeback(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
         let val = match ctx.get(0)? {
             Value::Int64(n) => *n,
-            Value::Numeric(s) => s.parse().map_err(|e| UdfError::Type(format!("{e}")))?,
+            Value::Numeric(d) if d.scale == 0 => i64::try_from(d.unscaled)
+                .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?,
             _ => return Err(UdfError::Type("expected integer".into())),
         };
         vals.push(val);
@@ -50,10 +51,13 @@ pub fn crunch_writeback(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         ))?;
     }
 
-    // BIGINT EMITS columns travel as PB_NUMERIC (decimal string); emit Numeric,
-    // not Int64, or the DB's emit handler reads the empty string block and crashes.
+    // BIGINT EMITS columns travel as PB_NUMERIC (typed Decimal); emit Numeric,
+    // not Int64, or the DB's emit handler reads the wrong block and crashes.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric("1".to_string())])?;
+        ctx.emit(&[Value::Numeric(Decimal {
+            unscaled: 1,
+            scale: 0,
+        })])?;
     }
     Ok(())
 }

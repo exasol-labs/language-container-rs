@@ -1,8 +1,9 @@
+use chrono::{NaiveDate, NaiveDateTime};
 use exa_proto::ExascriptTableData;
 use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 /// Per-type column block width: each block holds exactly `n_rows` entries per
 /// column (placeholder slots for NULL cells), so cell `(col, row)` lives at
@@ -56,25 +57,29 @@ impl InputRowSet {
                     row.push(Value::Null);
                     continue;
                 }
-                let v = match col.typ {
-                    ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
+                let v = match &col.typ {
+                    ExaType::Numeric { .. }
+                    | ExaType::Date
+                    | ExaType::Timestamp
+                    | ExaType::TimestampTz
+                    | ExaType::String { .. }
+                    | ExaType::Char { .. }
+                    | ExaType::Geometry
+                    | ExaType::HashType
+                    | ExaType::IntervalYearToMonth
+                    | ExaType::IntervalDayToSecond => {
                         let s = table
                             .data_string
                             .get(string_idx)
                             .cloned()
                             .unwrap_or_default();
                         string_idx += 1;
-                        match col.typ {
-                            ExaType::Numeric => Value::Numeric(s),
-                            ExaType::Timestamp => Value::Timestamp(s),
-                            ExaType::Date => Value::Date(s),
-                            _ => Value::String(s),
-                        }
+                        decode_string_block(&col.typ, s)
                     }
                     ExaType::Boolean => {
                         let b = table.data_bool.get(bool_idx).copied().unwrap_or(false);
                         bool_idx += 1;
-                        Value::Boolean(b)
+                        Value::Bool(b)
                     }
                     ExaType::Int32 => {
                         let i = table.data_int32.get(int32_idx).copied().unwrap_or(0);
@@ -192,8 +197,17 @@ impl EmitBuffer {
                     data_nulls[null_index(r, c, n_cols)] = true;
                     continue;
                 }
-                match col.typ {
-                    ExaType::String | ExaType::Numeric | ExaType::Timestamp | ExaType::Date => {
+                match &col.typ {
+                    ExaType::Numeric { .. }
+                    | ExaType::Date
+                    | ExaType::Timestamp
+                    | ExaType::TimestampTz
+                    | ExaType::String { .. }
+                    | ExaType::Char { .. }
+                    | ExaType::Geometry
+                    | ExaType::HashType
+                    | ExaType::IntervalYearToMonth
+                    | ExaType::IntervalDayToSecond => {
                         data_string.push(value_to_block_string(v));
                     }
                     ExaType::Boolean => data_bool.push(value_to_bool(v)),
@@ -231,17 +245,56 @@ impl EmitBuffer {
     }
 }
 
+/// Wire formats for the string-block temporal types. The DB serialises DATE as
+/// `YYYY-MM-DD` and TIMESTAMP as `YYYY-MM-DD HH:MM:SS.ffffff` (space separator).
+const DATE_FORMAT: &str = "%Y-%m-%d";
+/// Parse format: `%.f` is optional fractional digits, tolerates both `HH:MM:SS` and `HH:MM:SS.ffffff`.
+const TIMESTAMP_PARSE: &str = "%Y-%m-%d %H:%M:%S%.f";
+/// Emit format: `%.6f` always emits exactly 6 microsecond digits, matching Exasol's `YYYY-MM-DD HH:MM:SS.ffffff`.
+const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.6f";
+/// ISO-8601 `T`-separated fallback some sources emit for timestamps.
+const TIMESTAMP_FORMAT_ISO: &str = "%Y-%m-%dT%H:%M:%S%.f";
+
+/// Decode one non-null `data_string` cell into its typed `Value` per the column
+/// type. NUMERIC/DATE/TIMESTAMP parse into their typed payloads; a parse failure
+/// yields `Value::Null` so corrupt wire data stays decodable rather than
+/// aborting the whole batch. Extended string-backed types pass through verbatim.
+fn decode_string_block(typ: &ExaType, s: String) -> Value {
+    match typ {
+        ExaType::Numeric { .. } => match Decimal::try_from(s.as_str()) {
+            Ok(d) => Value::Numeric(d),
+            Err(_) => Value::Null,
+        },
+        ExaType::Date => match NaiveDate::parse_from_str(&s, DATE_FORMAT) {
+            Ok(d) => Value::Date(d),
+            Err(_) => Value::Null,
+        },
+        ExaType::Timestamp | ExaType::TimestampTz => {
+            match NaiveDateTime::parse_from_str(&s, TIMESTAMP_PARSE)
+                .or_else(|_| NaiveDateTime::parse_from_str(&s, TIMESTAMP_FORMAT_ISO))
+            {
+                Ok(ts) => Value::Timestamp(ts),
+                Err(_) => Value::Null,
+            }
+        }
+        _ => Value::String(s),
+    }
+}
+
 /// Render a non-null `Value` as the text form for a string/numeric/temporal
-/// block. Numeric, string and temporal variants pass through; numeric integer
+/// block. Typed variants are serialised back to their wire form; numeric integer
 /// and double variants are stringified so a DECIMAL EMITS column receiving a
 /// `Value::Int64`/`Value::Double` from a connect-back SELECT still serialises.
 fn value_to_block_string(v: &Value) -> String {
     match v {
-        Value::String(s) | Value::Numeric(s) | Value::Timestamp(s) | Value::Date(s) => s.clone(),
+        Value::String(s) => s.clone(),
+        Value::Numeric(d) => d.to_string(),
+        Value::Date(d) => d.format(DATE_FORMAT).to_string(),
+        Value::Timestamp(ts) => ts.format(TIMESTAMP_EMIT).to_string(),
         Value::Int32(i) => i.to_string(),
         Value::Int64(i) => i.to_string(),
         Value::Double(f) => f.to_string(),
-        Value::Boolean(b) => b.to_string(),
+        Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
     }
 }
@@ -252,8 +305,12 @@ fn value_to_i64(v: &Value) -> i64 {
         Value::Int32(i) => *i as i64,
         Value::Int64(i) => *i,
         Value::Double(f) => *f as i64,
-        Value::Numeric(s) | Value::String(s) => s.parse().unwrap_or(0),
-        Value::Boolean(b) => *b as i64,
+        Value::Numeric(d) => {
+            let scaled = d.unscaled / 10i128.pow(d.scale as u32);
+            i64::try_from(scaled).unwrap_or(0)
+        }
+        Value::String(s) => s.parse().unwrap_or(0),
+        Value::Bool(b) => *b as i64,
         _ => 0,
     }
 }
@@ -264,7 +321,8 @@ fn value_to_f64(v: &Value) -> f64 {
         Value::Double(f) => *f,
         Value::Int32(i) => *i as f64,
         Value::Int64(i) => *i as f64,
-        Value::Numeric(s) | Value::String(s) => s.parse().unwrap_or(0.0),
+        Value::Numeric(d) => d.unscaled as f64 / 10f64.powi(d.scale as i32),
+        Value::String(s) => s.parse().unwrap_or(0.0),
         _ => 0.0,
     }
 }
@@ -272,10 +330,11 @@ fn value_to_f64(v: &Value) -> f64 {
 /// Coerce a non-null `Value` to `bool` for a BOOLEAN EMITS column.
 fn value_to_bool(v: &Value) -> bool {
     match v {
-        Value::Boolean(b) => *b,
+        Value::Bool(b) => *b,
         Value::Int32(i) => *i != 0,
         Value::Int64(i) => *i != 0,
-        Value::String(s) | Value::Numeric(s) => s == "true" || s == "TRUE" || s == "1",
+        Value::Numeric(d) => d.unscaled != 0,
+        Value::String(s) => s == "true" || s == "TRUE" || s == "1",
         _ => false,
     }
 }
@@ -654,7 +713,7 @@ mod tests {
         // Columns: [Int64, String, Double, Boolean]
         let meta = vec![
             col("a", ExaType::Int64),
-            col("b", ExaType::String),
+            col("b", ExaType::String { size: None }),
             col("c", ExaType::Double),
             col("d", ExaType::Boolean),
         ];
@@ -690,7 +749,7 @@ mod tests {
                 Value::Int64(10),
                 Value::String("x".into()),
                 Value::Double(1.5),
-                Value::Boolean(true),
+                Value::Bool(true),
             ]
         );
         assert_eq!(
@@ -699,7 +758,7 @@ mod tests {
                 Value::Int64(20),
                 Value::Null,
                 Value::Double(2.5),
-                Value::Boolean(false),
+                Value::Bool(false),
             ]
         );
     }
@@ -715,7 +774,7 @@ mod tests {
         assert_eq!(bridge.num_columns(), 4);
         assert_eq!(bridge.get(0).unwrap(), &Value::Int64(10));
         assert_eq!(bridge.get(1).unwrap(), &Value::String("x".into()));
-        assert_eq!(bridge.get(3).unwrap(), &Value::Boolean(true));
+        assert_eq!(bridge.get(3).unwrap(), &Value::Bool(true));
         assert!(matches!(bridge.get(99), Err(UdfError::Type(_))));
 
         assert!(bridge.next().unwrap());
@@ -729,7 +788,7 @@ mod tests {
     fn emit_buffer_roundtrips_through_proto() {
         let meta = vec![
             col("a", ExaType::Int64),
-            col("b", ExaType::String),
+            col("b", ExaType::String { size: None }),
             col("c", ExaType::Double),
             col("d", ExaType::Boolean),
         ];
@@ -738,13 +797,13 @@ mod tests {
             Value::Int64(10),
             Value::String("x".into()),
             Value::Double(1.5),
-            Value::Boolean(true),
+            Value::Bool(true),
         ]);
         emit.push(vec![
             Value::Int64(20),
             Value::Null,
             Value::Double(2.5),
-            Value::Boolean(false),
+            Value::Bool(false),
         ]);
 
         let table = emit.to_proto(&meta);
@@ -757,7 +816,7 @@ mod tests {
                 Value::Int64(10),
                 Value::String("x".into()),
                 Value::Double(1.5),
-                Value::Boolean(true),
+                Value::Bool(true),
             ]
         );
         assert_eq!(
@@ -766,7 +825,7 @@ mod tests {
                 Value::Int64(20),
                 Value::Null,
                 Value::Double(2.5),
-                Value::Boolean(false),
+                Value::Bool(false),
             ]
         );
     }
@@ -776,7 +835,16 @@ mod tests {
         // A connect-back SELECT can return a DECIMAL column as Value::Int64, but
         // the EMITS column is ExaType::Numeric (string block). to_proto must
         // place it in the string block so the DB reads it from the right block.
-        let meta = vec![col("region", ExaType::String), col("id", ExaType::Numeric)];
+        let meta = vec![
+            col("region", ExaType::String { size: None }),
+            col(
+                "id",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+        ];
         let mut emit = EmitBuffer::new();
         emit.push(vec![Value::String("EU".into()), Value::Int64(1)]);
         emit.push(vec![Value::String("EU".into()), Value::Int64(2)]);
@@ -790,11 +858,17 @@ mod tests {
         let rs = InputRowSet::from_proto(&table, &meta);
         assert_eq!(
             rs.row(0).unwrap(),
-            &[Value::String("EU".into()), Value::Numeric("1".into())]
+            &[
+                Value::String("EU".into()),
+                Value::Numeric(Decimal::try_from("1").unwrap()),
+            ]
         );
         assert_eq!(
             rs.row(1).unwrap(),
-            &[Value::String("EU".into()), Value::Numeric("2".into())]
+            &[
+                Value::String("EU".into()),
+                Value::Numeric(Decimal::try_from("2").unwrap()),
+            ]
         );
     }
 
@@ -803,14 +877,23 @@ mod tests {
         // Two same-type-block columns over two rows must interleave row-major in
         // data_string: row0(c0,c1) then row1(c0,c1). A column-major layout would
         // land row1's first cell where the DB expects row0's second column.
-        let meta = vec![col("a", ExaType::Numeric), col("b", ExaType::String)];
+        let meta = vec![
+            col(
+                "a",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+            col("b", ExaType::String { size: None }),
+        ];
         let mut emit = EmitBuffer::new();
         emit.push(vec![
-            Value::Numeric("100".into()),
+            Value::Numeric(Decimal::try_from("100").unwrap()),
             Value::String("AAA".into()),
         ]);
         emit.push(vec![
-            Value::Numeric("200".into()),
+            Value::Numeric(Decimal::try_from("200").unwrap()),
             Value::String("BBB".into()),
         ]);
 
@@ -820,11 +903,17 @@ mod tests {
         let rs = InputRowSet::from_proto(&table, &meta);
         assert_eq!(
             rs.row(0).unwrap(),
-            &[Value::Numeric("100".into()), Value::String("AAA".into())]
+            &[
+                Value::Numeric(Decimal::try_from("100").unwrap()),
+                Value::String("AAA".into()),
+            ]
         );
         assert_eq!(
             rs.row(1).unwrap(),
-            &[Value::Numeric("200".into()), Value::String("BBB".into())]
+            &[
+                Value::Numeric(Decimal::try_from("200").unwrap()),
+                Value::String("BBB".into()),
+            ]
         );
     }
 
@@ -833,11 +922,20 @@ mod tests {
         // A NULL numeric cell must not reserve a slot in the string block: the
         // bitmap marks it, and only the non-null "5" occupies the block. A
         // placeholder would shift "AAA"/"BBB" into the numeric column.
-        let meta = vec![col("id", ExaType::Numeric), col("note", ExaType::String)];
+        let meta = vec![
+            col(
+                "id",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+            col("note", ExaType::String { size: None }),
+        ];
         let mut emit = EmitBuffer::new();
         emit.push(vec![Value::Null, Value::String("AAA".into())]);
         emit.push(vec![
-            Value::Numeric("5".into()),
+            Value::Numeric(Decimal::try_from("5").unwrap()),
             Value::String("BBB".into()),
         ]);
 
@@ -853,8 +951,84 @@ mod tests {
         );
         assert_eq!(
             rs.row(1).unwrap(),
-            &[Value::Numeric("5".into()), Value::String("BBB".into())]
+            &[
+                Value::Numeric(Decimal::try_from("5").unwrap()),
+                Value::String("BBB".into()),
+            ]
         );
+    }
+
+    #[test]
+    fn bridge_typed_getters_return_typed_options() {
+        // A NUMERIC column must decode to Value::Numeric(Decimal) (carrying its
+        // scale), a DATE to Value::Date(NaiveDate) and a TIMESTAMP to
+        // Value::Timestamp(NaiveDateTime) — never a raw string. The fractional
+        // timestamp exercises the %.f wire format on both decode and encode.
+        let meta = vec![
+            col(
+                "amount",
+                ExaType::Numeric {
+                    precision: Some(10),
+                    scale: Some(2),
+                },
+            ),
+            col("d", ExaType::Date),
+            col("ts", ExaType::Timestamp),
+        ];
+        let table = ExascriptTableData {
+            rows: 1,
+            rows_in_group: 0,
+            data_string: vec![
+                "12.34".into(),
+                "2026-06-14".into(),
+                "2026-06-14 09:30:15.250000".into(),
+            ],
+            data_nulls: vec![false, false, false],
+            ..Default::default()
+        };
+
+        let rs = InputRowSet::from_proto(&table, &meta);
+        let expected_date = NaiveDate::from_ymd_opt(2026, 6, 14).unwrap();
+        let expected_ts = expected_date.and_hms_micro_opt(9, 30, 15, 250_000).unwrap();
+        let decoded = rs.row(0).unwrap();
+        assert_eq!(
+            decoded[0],
+            Value::Numeric(Decimal::try_from("12.34").unwrap())
+        );
+        assert_eq!(decoded[1], Value::Date(expected_date));
+        assert_eq!(decoded[2], Value::Timestamp(expected_ts));
+
+        // Round-trip: from_proto -> to_proto -> from_proto preserves typed values.
+        let mut emit = EmitBuffer::new();
+        emit.push(decoded.to_vec());
+        let reproto = emit.to_proto(&meta);
+        let reread = InputRowSet::from_proto(&reproto, &meta);
+        assert_eq!(reread.row(0).unwrap(), decoded);
+    }
+
+    #[test]
+    fn corrupt_string_block_value_decodes_to_null() {
+        // A non-parseable NUMERIC/DATE cell must degrade to Value::Null rather
+        // than aborting decode, so one corrupt cell cannot poison the batch.
+        let meta = vec![
+            col(
+                "amount",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+            col("d", ExaType::Date),
+        ];
+        let table = ExascriptTableData {
+            rows: 1,
+            rows_in_group: 0,
+            data_string: vec!["not-a-number".into(), "not-a-date".into()],
+            data_nulls: vec![false, false],
+            ..Default::default()
+        };
+        let rs = InputRowSet::from_proto(&table, &meta);
+        assert_eq!(rs.row(0).unwrap(), &[Value::Null, Value::Null]);
     }
 
     #[test]

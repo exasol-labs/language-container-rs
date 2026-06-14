@@ -1,11 +1,13 @@
 use crate::error::UdfError;
-use crate::value::Value;
+use crate::value::{Decimal, Value};
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, StringArray,
+    LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
+use chrono::NaiveDateTime;
 
 /// Credentials for a named Exasol CONNECTION object or any external system.
 #[cfg(feature = "connect-back")]
@@ -90,8 +92,8 @@ pub trait ExaConnection: Send {
 /// boundary safely.
 ///
 /// Type mapping mirrors the input-row convention: Exasol `DECIMAL`/`BIGINT`
-/// (arrow `Decimal128`) becomes [`Value::Numeric`] (decimal string), matching
-/// how BIGINT input columns are delivered.
+/// (arrow `Decimal128`) becomes a typed [`Value::Numeric`] carrying the unscaled
+/// integer plus scale, matching how NUMERIC input columns are delivered.
 pub fn record_batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<Vec<Value>>, UdfError> {
     let mut rows: Vec<Vec<Value>> = Vec::new();
     for batch in batches {
@@ -115,7 +117,7 @@ fn cell_to_value(col: &dyn Array, row: usize) -> Result<Value, UdfError> {
     }
     let unexpected = |dt: &DataType| UdfError::ConnectBack(format!("unexpected arrow type {dt:?}"));
     match col.data_type() {
-        DataType::Boolean => Ok(Value::Boolean(
+        DataType::Boolean => Ok(Value::Bool(
             col.as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| unexpected(col.data_type()))?
@@ -139,12 +141,19 @@ fn cell_to_value(col: &dyn Array, row: usize) -> Result<Value, UdfError> {
                 .ok_or_else(|| unexpected(col.data_type()))?
                 .value(row),
         )),
-        DataType::Decimal128(_, _) => Ok(Value::Numeric(
-            col.as_any()
+        DataType::Decimal128(_, _) => {
+            let arr = col
+                .as_any()
                 .downcast_ref::<Decimal128Array>()
-                .ok_or_else(|| unexpected(col.data_type()))?
-                .value_as_string(row),
-        )),
+                .ok_or_else(|| unexpected(col.data_type()))?;
+            // Exasol DECIMAL scale never exceeds 36, so the i8 arrow scale fits
+            // u8 without loss. Carrying the unscaled i128 + scale round-trips the
+            // value losslessly, unlike the previous decimal-string rendering.
+            Ok(Value::Numeric(Decimal {
+                unscaled: arr.value(row),
+                scale: arr.scale() as u8,
+            }))
+        }
         DataType::Utf8 => Ok(Value::String(
             col.as_any()
                 .downcast_ref::<StringArray>()
@@ -167,15 +176,55 @@ fn cell_to_value(col: &dyn Array, row: usize) -> Result<Value, UdfError> {
             let d = a
                 .value_as_date(row)
                 .ok_or_else(|| UdfError::ConnectBack("invalid date value".into()))?;
-            Ok(Value::Date(d.to_string()))
+            Ok(Value::Date(d))
         }
+        DataType::Timestamp(unit, _) => Ok(Value::Timestamp(timestamp_cell(col, row, *unit)?)),
         other => {
-            // Anything else (timestamps, intervals, geometry, …) is rendered to
-            // its textual form so the UDF still receives a usable value.
+            // Anything else (intervals, geometry, …) is rendered to its textual
+            // form so the UDF still receives a usable value.
             let opts = arrow::util::display::FormatOptions::default();
             let fmt = arrow::util::display::ArrayFormatter::try_new(col, &opts)
                 .map_err(|e| UdfError::ConnectBack(format!("formatting {other:?}: {e}")))?;
             Ok(Value::String(fmt.value(row).to_string()))
         }
     }
+}
+
+/// Decode one arrow timestamp cell into a `NaiveDateTime`.
+///
+/// Arrow timestamps are an `i64` count of `unit`s since the Unix epoch; we
+/// reinterpret them as wall-clock UTC (`naive_utc`) because Exasol's TIMESTAMP
+/// is timezone-naive. An out-of-range epoch value is a corrupt cell.
+fn timestamp_cell(col: &dyn Array, row: usize, unit: TimeUnit) -> Result<NaiveDateTime, UdfError> {
+    let unexpected = |dt: &DataType| UdfError::ConnectBack(format!("unexpected arrow type {dt:?}"));
+    let raw = match unit {
+        TimeUnit::Second => col
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .ok_or_else(|| unexpected(col.data_type()))?
+            .value(row),
+        TimeUnit::Millisecond => col
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .ok_or_else(|| unexpected(col.data_type()))?
+            .value(row),
+        TimeUnit::Microsecond => col
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .ok_or_else(|| unexpected(col.data_type()))?
+            .value(row),
+        TimeUnit::Nanosecond => col
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .ok_or_else(|| unexpected(col.data_type()))?
+            .value(row),
+    };
+    let dt = match unit {
+        TimeUnit::Second => chrono::DateTime::from_timestamp(raw, 0),
+        TimeUnit::Millisecond => chrono::DateTime::from_timestamp_millis(raw),
+        TimeUnit::Microsecond => chrono::DateTime::from_timestamp_micros(raw),
+        TimeUnit::Nanosecond => Some(chrono::DateTime::from_timestamp_nanos(raw)),
+    };
+    dt.map(|dt| dt.naive_utc())
+        .ok_or_else(|| UdfError::ConnectBack(format!("timestamp out of range: {raw} {unit:?}")))
 }

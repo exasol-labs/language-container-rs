@@ -1,19 +1,20 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
 pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let doubled = match ctx.get(0)? {
         Value::Int64(n) => Value::Int64(n * 2),
-        // Exasol sends BIGINT as PB_NUMERIC (decimal string); parse and re-emit
-        // as Numeric so the DB receives it in data_string (the correct block).
-        Value::Numeric(s) => {
-            let n: i64 = s
-                .parse()
-                .map_err(|e| UdfError::Type(format!("cannot parse '{}' as i64: {}", s, e)))?;
-            Value::Numeric((n * 2).to_string())
+        // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
+        Value::Numeric(d) if d.scale == 0 => {
+            let n = i64::try_from(d.unscaled)
+                .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?;
+            Value::Numeric(Decimal {
+                unscaled: (n * 2) as i128,
+                scale: 0,
+            })
         }
         Value::Null => Value::Null,
         _ => return Err(UdfError::Type("expected Int64 or Numeric".into())),

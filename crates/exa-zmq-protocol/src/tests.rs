@@ -88,10 +88,16 @@ fn meta_maps_all_pb_types() {
         (ColumnType::PbDouble, ExaType::Double),
         (ColumnType::PbInt32, ExaType::Int32),
         (ColumnType::PbInt64, ExaType::Int64),
-        (ColumnType::PbNumeric, ExaType::Numeric),
+        (
+            ColumnType::PbNumeric,
+            ExaType::Numeric {
+                precision: None,
+                scale: None,
+            },
+        ),
         (ColumnType::PbTimestamp, ExaType::Timestamp),
         (ColumnType::PbDate, ExaType::Date),
-        (ColumnType::PbString, ExaType::String),
+        (ColumnType::PbString, ExaType::String { size: None }),
         (ColumnType::PbBoolean, ExaType::Boolean),
     ];
     for (pb, expected) in cases {
