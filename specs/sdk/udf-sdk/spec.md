@@ -12,16 +12,27 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 
 * *GIVEN* the SDK `value` module
 * *WHEN* a UDF reads or emits a column
-* *THEN* `Value` MUST provide variants for `Null`, `Int32`, `Int64`, `Double`, `Numeric(i128, u8)`, `Bool`, `String`, `Date`, and `Timestamp`
-* *AND* `ExaType` MUST provide the matching type descriptors, including `Numeric { precision, scale }` and `String { size }`
+* *THEN* `Value` MUST provide strongly typed variants for `Null`, `Int32(i32)`, `Int64(i64)`, `Double(f64)`, `Numeric(Decimal)`, `Bool(bool)`, `String(String)`, `Date(NaiveDate)`, and `Timestamp(NaiveDateTime)`, where `Numeric` carries a `Decimal { unscaled: i128, scale: u8 }` newtype and `Date`/`Timestamp` carry `chrono::NaiveDate`/`NaiveDateTime` (NOT `String`)
+* *AND* the single canonical `ExaType` MUST live in the SDK `value` module and provide matching descriptors including `Numeric { precision, scale }` and `String { size }`
+* *AND* `exa-zmq-protocol` MUST re-use the SDK `ExaType` rather than defining its own duplicate enum
+
+### Scenario: Decimal is constructible from string and float without precision loss
+
+* *GIVEN* the SDK `Decimal` newtype
+* *WHEN* a UDF or the runtime constructs a decimal from the proto wire form
+* *THEN* `Decimal::try_from(&str)` MUST parse a signed decimal literal such as `"-1.000000000000000001"` into `unscaled` and `scale` with no precision loss for up to 38 significant digits
+* *AND* `Decimal::try_from(f64)` MUST be provided for callers holding a floating-point value, returning `UdfError::Type` (or a dedicated decimal error) for non-finite inputs
+* *AND* `Decimal::to_string` MUST round-trip back to the canonical decimal wire form so emit serialization is lossless
+* *AND* a value whose `scale` is `0` MUST render with no decimal point
 
 ### Scenario: UdfContext exposes typed accessors and row iteration
 
 * *GIVEN* the `UdfContext` trait
 * *WHEN* a UDF inspects and reads its input
-* *THEN* the trait MUST provide `next`, `reset`, and `emit`
-* *AND* it MUST provide column introspection (`column_count`, `column_name`, `column_type`, `column_index`)
-* *AND* it MUST provide typed accessors (`get_i64`, `get_f64`, `get_string`, `get_bool`, `get_decimal`, `get_date`, `get_timestamp`, `get_value`) where a SQL NULL maps to `None`
+* *THEN* the trait MUST provide `next`, `reset`, `emit`, and column introspection (`column_count`, `column_name`, `column_type`, `column_index`)
+* *AND* it MUST provide typed accessors `get_i64`, `get_f64`, `get_string`, `get_bool`, `get_decimal`, `get_date`, `get_timestamp`, and `get_value`, each returning `Result<Option<T>, UdfError>` where a SQL NULL maps to `Ok(None)` and a matching cell maps to `Ok(Some(value))`
+* *AND* `get_i64` MUST additionally accept an integral `Value::Numeric` cell (because Exasol delivers `BIGINT` as `PB_NUMERIC`), returning `UdfError::Type` only when the decimal has a non-zero fractional part
+* *AND* a typed accessor invoked on a column whose `Value` variant does not match the requested type (and is not the documented `Numeric`→`i64` case) MUST return `UdfError::Type` rather than silently coercing
 
 ### Scenario: UdfRun default single-call hooks return Unimplemented
 
@@ -44,35 +55,6 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 * *WHEN* the crate is compiled
 * *THEN* it MUST set an `EXA_SDK_FINGERPRINT` value of the form `"SDK_VERSION:RUSTC_HASH\0"`
 * *AND* the macro-generated vtable MUST embed that exact fingerprint string in its `sdk_fingerprint` field
-
-### Scenario: exasol_udf macro generates the entry point and vtable
-
-* *GIVEN* a struct annotated `#[exasol_udf]` that implements `UdfRun`
-* *WHEN* the crate is compiled as a cdylib
-* *THEN* the macro MUST generate `extern "C"` shims for `create`, `destroy`, and `run`
-* *AND* it MUST generate a `static` `ExaUdfVTable` with `abi_version = EXA_UDF_ABI_VERSION` and the baked `sdk_fingerprint`
-* *AND* it MUST generate `#[no_mangle] pub extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable`
-
-### Scenario: run shim catches panics and returns an error code
-
-* *GIVEN* a UDF whose `run` panics
-* *WHEN* the generated `run` shim invokes the user method
-* *THEN* the shim MUST wrap the call in `catch_unwind`
-* *AND* a caught panic MUST be converted to a non-zero error code rather than unwinding across the FFI boundary
-
-### Scenario: Two exasol_udf annotations in one crate fail to link
-
-* *GIVEN* a crate with two structs each annotated `#[exasol_udf]`
-* *WHEN* the crate is compiled as a cdylib
-* *THEN* the build MUST fail because of a duplicate `__exa_udf_entry` symbol
-* *AND* the failure MUST occur at link time rather than producing a silently-wrong artifact
-
-### Scenario: exasol_udf annotation with an unknown type fails to compile
-
-* *GIVEN* a struct annotated with an `input` or `emits` clause naming a type the macro cannot map to an `ExaType`
-* *WHEN* the crate is compiled
-* *THEN* the macro MUST emit a compile error naming the unsupported type
-* *AND* the error MUST point at the offending annotation span
 
 ### Scenario: vs_adapter annotation wires the virtual_schema_adapter_call slot
 

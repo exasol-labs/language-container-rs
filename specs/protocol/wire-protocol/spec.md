@@ -33,13 +33,6 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 * *AND* on the `MT_INFO` response it MUST emit a `HostEvent::Info` carrying the script source and connection id, then issue an `MT_META` request
 * *AND* on the `MT_META` response it MUST emit a `HostEvent::Meta` carrying the column definitions and `iter_type`
 
-### Scenario: Metadata maps proto column types to ColumnMeta
-
-* *GIVEN* an `MT_META` response containing the eight v1 column types (`PB_INT32`, `PB_INT64`, `PB_DOUBLE`, `PB_NUMERIC`, `PB_BOOLEAN`, `PB_STRING`, `PB_DATE`, `PB_TIMESTAMP`)
-* *WHEN* the protocol processes the metadata
-* *THEN* it MUST produce a `Vec<ColumnMeta>` preserving column order, name, and type for every column
-* *AND* it MUST resolve `iter_type` to `IterType::ExactlyOnce` for `PB_EXACTLY_ONCE` and `IterType::Multiple` for `PB_MULTIPLE`
-
 ### Scenario: Scalar run loop drives NEXT and EMIT to DONE
 
 * *GIVEN* a `Protocol` past the handshake with `iter_type = ExactlyOnce`
@@ -135,3 +128,4 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 * *WHEN* the DB sends `MT_RETURN` in the Run phase (acknowledging the container's `MT_RETURN` result)
 * *THEN* the state machine MUST emit `HostEvent::SingleCallAck` and MUST NOT treat this as a protocol error
 * *AND* in a non-single-call protocol, an `MT_RETURN` received in the Run phase MUST still be surfaced as a `ProtocolError::UnexpectedMessage`
+
