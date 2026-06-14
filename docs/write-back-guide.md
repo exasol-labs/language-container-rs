@@ -63,11 +63,8 @@ pub fn crunch_writeback(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // Drain input first, then open the session.
     let mut vals = Vec::new();
     while ctx.next()? {
-        vals.push(match ctx.get(0)? {
-            Value::Int64(n) => *n,
-            Value::Numeric(s) => s.parse().map_err(|e| UdfError::Type(format!("{e}")))?,
-            _ => return Err(UdfError::Type("expected integer".into())),
-        });
+        // get_i64 accepts Value::Int64 and a scale-0 Value::Numeric (BIGINT).
+        vals.push(ctx.get_i64(0)?.ok_or_else(|| UdfError::Type("expected integer".into()))?);
     }
 
     let c = ctx.connection("CB_SELF")?;
@@ -81,7 +78,8 @@ pub fn crunch_writeback(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     }
 
     // BIGINT EMITS columns travel as PB_NUMERIC — emit Numeric, not Int64.
-    for _ in &vals { ctx.emit(&[Value::Numeric("1".to_string())])?; }
+    // Decimal::from(i64) builds a scale-0 value.
+    for _ in &vals { ctx.emit(&[Value::Numeric(Decimal::from(1_i64))])?; }
     Ok(())
 }
 ```
@@ -111,7 +109,8 @@ To read in a UDF, prefer the FFI-safe `query()` over `query_arrow()`:
 ```rust
 let rows = conn.query("SELECT CAST(42 AS BIGINT)")?;   // Vec<Vec<Value>>
 let n = match rows.first().and_then(|r| r.first()) {
-    Some(Value::Numeric(s)) => s.parse::<i64>().unwrap_or(0),
+    // BIGINT/DECIMAL arrive as Value::Numeric (a scale-0 Decimal here).
+    Some(Value::Numeric(d)) => d.unscaled as i64,
     Some(Value::Int64(n))   => *n,
     _ => 0,
 };
@@ -127,7 +126,7 @@ Pitfalls for why downcasting those in UDF code silently fails.
 |---------|---------|-----|
 | DDL or write in the invoking query's schema, uncommitted before the query | SQL worker SIGABRT ~10 s after connect-back; `deadlock detector signalled` | Pre-create + commit target; no DDL in connect-back; write a table the query doesn't read |
 | Explicit `COMMIT` on an autocommit session | UDF fails *after* data already committed | Remove the `COMMIT`; rely on autocommit |
-| Emitting `Value::Int64` for a `BIGINT` column | DB SIGSEGV in `handle_emit_request` (reads empty string block) | Emit `Value::Numeric` — BIGINT is `PB_NUMERIC` on the wire |
+| Emitting `Value::Int64` for a `BIGINT` column | DB SIGSEGV in `handle_emit_request` (reads empty string block) | Emit `Value::Numeric(Decimal::from(n))` — BIGINT is `PB_NUMERIC` on the wire |
 | `query_arrow()` + `downcast_ref` in UDF code | Silent wrong value (e.g. `0` instead of `42`) | Use `query()` (returns `Value`s). The UDF `.so` links its own `arrow`; arrow `TypeId`s differ across the cdylib boundary, so `downcast_ref` returns `None` |
 | Bare `error code 1` from a failed UDF | No detail on what failed | Known limitation — see [`specs/backlog.md`](../specs/backlog.md). Until fixed, instrument the UDF (sentinel values / a file write) or read `/exa/logs/db/DB1/*SqlSession*` |
 

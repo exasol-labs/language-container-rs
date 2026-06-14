@@ -30,8 +30,8 @@ Or scaffold manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.3" }
-exasol-udf-macros = { version = "0.3" }
+exasol-udf-sdk    = { version = "0.7" }
+exasol-udf-macros = { version = "0.7" }
 ```
 
 ## 2. Implement the UDF
@@ -46,16 +46,11 @@ use exasol_udf_sdk::value::Value;
 
 #[exasol_udf]
 pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let doubled = match ctx.get(0)? {
-        Value::Int64(n)   => Value::Int64(n * 2),
-        Value::Numeric(s) => {
-            let n: i64 = s
-                .parse()
-                .map_err(|e| UdfError::Type(format!("cannot parse '{}': {}", s, e)))?;
-            Value::Numeric((n * 2).to_string())
-        }
-        Value::Null => Value::Null,
-        _           => return Err(UdfError::Type("expected Int64 or Numeric".into())),
+    // get_i64 accepts both Value::Int64 and a scale-0 Value::Numeric, so a
+    // column typed BIGINT (which arrives as Numeric, see below) just works.
+    let doubled = match ctx.get_i64(0)? {
+        Some(n) => Value::Int64(n * 2),
+        None    => Value::Null,
     };
     ctx.emit(&[doubled])
 }
@@ -73,10 +68,30 @@ The function name becomes the SQL script name (case-insensitive). Return `Ok(())
 | `Value::Float64(f64)` | DOUBLE |
 | `Value::String(String)` | VARCHAR / CHAR |
 | `Value::Bool(bool)` | BOOLEAN |
-| `Value::Numeric(String)` | DECIMAL |
+| `Value::Numeric(Decimal)` | DECIMAL |
+| `Value::Date(NaiveDate)` | DATE |
+| `Value::Timestamp(NaiveDateTime)` | TIMESTAMP |
 | `Value::Null` | NULL |
 
-> **Note:** Exasol sends `BIGINT` columns over the wire as `PB_NUMERIC` (a decimal string), so a column typed `BIGINT` arrives as `Value::Numeric`, not `Value::Int64`. Match both variants when accepting integer inputs.
+`Numeric`, `Date`, and `Timestamp` are now strongly typed rather than raw strings. `Decimal` is a `{ unscaled: i128, scale: u8 }` newtype with 38-digit precision and no allocation: build it with `Decimal::from_str("3.14")` or `Decimal::from_f64(3.14)`, do arithmetic via its `.unscaled` / `.scale` fields, and render it with `to_string()` (`"3.14"`). `Date` and `Timestamp` carry `chrono::NaiveDate` / `chrono::NaiveDateTime`.
+
+> **Note:** Exasol sends `BIGINT` columns over the wire as `PB_NUMERIC`, so a column typed `BIGINT` arrives as `Value::Numeric` (with `scale == 0`), not `Value::Int64`. Prefer the typed getter `ctx.get_i64()` below — it accepts both variants — over matching the enum by hand.
+
+### Typed getters
+
+In addition to `ctx.get(col) -> &Value`, `UdfContext` exposes per-type getters that unwrap the variant for you and return `Ok(None)` for SQL `NULL`:
+
+```rust
+fn get_i64(&self, col: usize)     -> Result<Option<i64>,           UdfError>;
+fn get_f64(&self, col: usize)     -> Result<Option<f64>,           UdfError>;
+fn get_str(&self, col: usize)     -> Result<Option<&str>,          UdfError>;
+fn get_bool(&self, col: usize)    -> Result<Option<bool>,          UdfError>;
+fn get_decimal(&self, col: usize) -> Result<Option<Decimal>,       UdfError>;
+fn get_date(&self, col: usize)    -> Result<Option<NaiveDate>,     UdfError>;
+fn get_datetime(&self, col: usize)-> Result<Option<NaiveDateTime>, UdfError>;
+```
+
+Each returns a type error if the column holds a different variant — except `get_i64`, which deliberately also accepts a `Value::Numeric` whose `scale == 0` (the BIGINT-as-`PB_NUMERIC` reality above). Reach for these instead of matching `Value` by hand whenever you want a single concrete type.
 
 ### Set UDFs
 
@@ -105,7 +120,7 @@ Connect-back lets a UDF open a new Exasol session and run SQL from inside `run()
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.3", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.7", features = ["connect-back"] }
 ```
 
 ### Operator setup
@@ -166,13 +181,14 @@ pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let c = ctx.connection("CB_SELF")?;
     let rows = ctx.connect_back(&c)?.query("SELECT CAST(42 AS BIGINT)")?;
     let n: i64 = match rows.first().and_then(|r| r.first()) {
-        // BIGINT/DECIMAL arrive as Value::Numeric (decimal string).
-        Some(Value::Numeric(s)) => s.parse().unwrap_or(0),
-        Some(Value::Int64(n)) => *n,
+        // BIGINT/DECIMAL arrive as Value::Numeric (a scale-0 Decimal here).
+        Some(Value::Numeric(d)) => d.unscaled as i64,
+        Some(Value::Int64(n))   => *n,
         _ => 0,
     };
     // Emit Numeric for a BIGINT output column (see Pitfalls in the write-back guide).
-    ctx.emit(&[Value::Numeric(n.to_string())])
+    // Decimal is re-exported from exasol_udf_sdk::value.
+    ctx.emit(&[Value::Numeric(Decimal::from(n))])
 }
 ```
 

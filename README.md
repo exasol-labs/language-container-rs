@@ -64,10 +64,11 @@ use exasol_udf_sdk::{
 
 #[exasol_udf]
 pub fn double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let out = match ctx.get(0)? {
-        Value::Int64(n) => Value::Int64(n * 2),
-        Value::Null     => Value::Null,
-        _               => return Err(UdfError::Type("expected BIGINT".into())),
+    // get_i64 transparently accepts BIGINT, which Exasol delivers as
+    // Value::Numeric on the wire — no manual variant matching needed.
+    let out = match ctx.get_i64(0)? {
+        Some(n) => Value::Int64(n * 2),
+        None    => Value::Null,
     };
     ctx.emit(&[out])
 }
