@@ -878,6 +878,145 @@ The single canonical `ExaType` lives in `exasol-udf-sdk::value`. `exa-zmq-protoc
 
 ---
 
+## ADR-033: Root cause of Alpine name-resolution failure is missing nsswitch.conf despite bundled NSS modules
+
+**Date:** 2026-06-15
+**Plan:** `add-name-resolution`
+**Status:** Accepted
+
+### Context
+
+The Alpine slim image bundled `libnss_files.so.2` and `libnss_dns.so.2` into `/glibc-rt/` and copied them wholesale into the runtime stage, but created no `/etc/nsswitch.conf`. Without a switch config (`hosts: files dns`), glibc's NSS dispatcher has no configuration telling it to consult the bundled `libnss_dns` module, so `getaddrinfo` fails for any hostname inside the UDF sandbox. UDFs and connect-back could therefore only use literal IPs.
+
+### Decision
+
+Diagnose the Alpine DNS failure as the absence of `/etc/nsswitch.conf`. The NSS modules being present but unconsulted points squarely at the missing switch config. The fix is to stage `nsswitch.conf` with `hosts: files dns` into the image.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Stage `/etc/nsswitch.conf` with `hosts: files dns` | ✓ Chosen — modules are present; the switch config is the only missing link; confirmed by inspection of the real shipped Python3 SLC |
+| Suspected musl resolution, missing resolv.conf alone, or a connect-back code defect | ✗ Rejected — `connect_back.rs build_dsn()` uses pre-resolved IPs; the binary is glibc-linked; modules are present but unconsulted |
+
+### Consequences
+
+Adding `nsswitch.conf` (and the full `/etc` file set mirroring the real SLC) enables hostname resolution at UDF runtime. Without it, every hostname lookup silently fails and UDF code is restricted to literal IP addresses.
+
+---
+
+## ADR-034: Fix uses glibc-NSS approach, not musl resolver config
+
+**Date:** 2026-06-15
+**Plan:** `add-name-resolution`
+**Status:** Accepted
+
+### Context
+
+Alpine is a musl-based distribution. When resolving the name-resolution failure in the Alpine slim image, a question arose about whether to configure musl's resolver or the glibc NSS stack.
+
+### Decision
+
+Fix via glibc `nsswitch.conf` plus the bundled glibc NSS modules (`libnss_files.so.2`, `libnss_dns.so.2`), not musl resolver config. The `exaudfclient` binary is glibc-linked and runs inside the Debian/glibc Exasol host's network namespace after BucketFS extraction. Alpine is only a packaging envelope; musl resolution is never exercised at UDF runtime.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| glibc-NSS + `nsswitch.conf` in the Alpine image | ✓ Chosen — `exaudfclient` is glibc-linked; the binary executes in the Debian glibc host namespace; musl is irrelevant at runtime |
+| Configure musl name resolution in the Alpine runtime | ✗ Rejected — musl resolution is never exercised; the binary is not musl-linked |
+
+### Consequences
+
+The name-resolution fix is confined to the glibc NSS stack. Musl resolver configuration would have no effect and is not added. Alpine remains the packaging envelope only.
+
+---
+
+## ADR-035: Official Exasol containers inherit name-resolution files from a full-distro base
+
+**Date:** 2026-06-15
+**Plan:** `add-name-resolution`
+**Status:** Accepted
+
+### Context
+
+Official Exasol script-languages flavors build on a full distro base and `COPY --from={{build_deps}} /etc /etc`, inheriting the distro's stock `/etc/nsswitch.conf`. A repo-wide grep of both official repos found no explicit nsswitch/resolv/hosts references — they get resolution "for free". Inspection of the real shipped built-in Python3 SLC (`exasol/docker-db:2025.1.11`, flavor `standard-EXASOL-all-python-3.10`, SLC v11.1.1) confirmed the SLC's own `/etc` carries `nsswitch.conf` (`hosts: files dns`), `host.conf`, `/etc/hosts` as a symlink to `/conf/hosts`, and `/etc/resolv.conf` as a symlink to `/conf/resolv.conf`. The DB populates `/conf/` at runtime.
+
+### Decision
+
+Record that official SLCs obtain their `/etc` name-resolution files implicitly from their full-distro base, and that the DB supplies runtime-variable data (`hosts`, `resolv.conf`) via `/conf/` injection. A slim-from-scratch Alpine image must recreate the static policy files explicitly and mirror the `/conf/` symlinks.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Mirror the real shipped SLC `/etc` file set explicitly | ✓ Chosen — primary, ground-truth evidence from the actually shipped SLC; no guessing |
+| Derive the file set from GitHub source of `exasol/script-languages` | ✗ Rejected — weaker evidence than inspecting the shipped artifact |
+
+### Consequences
+
+The Alpine image must explicitly stage `nsswitch.conf`, `host.conf`, and the two `/conf/` symlinks (`hosts`, `resolv.conf`). This is a one-time explicit recreation of what full-distro bases provide implicitly.
+
+---
+
+## ADR-036: resolv.conf is staged as a symlink to /conf/resolv.conf, not a static file
+
+**Date:** 2026-06-15
+**Plan:** `add-name-resolution`
+**Status:** Accepted
+
+### Context
+
+The Alpine image needed an `/etc/resolv.conf` for glibc name resolution to work. Options included hardcoding a nameserver, shipping an empty placeholder, or mirroring the real shipped Python3 SLC's approach. Direct inspection of the real SLC showed `/etc/resolv.conf` is a symlink to `/conf/resolv.conf`, and the DB injects the actual resolver config at `/conf/resolv.conf` inside the sandbox at runtime.
+
+### Decision
+
+Ship `/etc/resolv.conf` as a symlink to `/conf/resolv.conf` in the Alpine image (staged as `/glibc-rt/etc/resolv.conf -> /conf/resolv.conf`), mirroring the real shipped Python3 SLC. The DB injects the actual resolver config at `/conf/resolv.conf` inside the sandbox at runtime. The wholesale `COPY --from=builder /glibc-rt/ /` must preserve the symlink (not dereference it).
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Symlink `/etc/resolv.conf -> /conf/resolv.conf` | ✓ Chosen — proven mechanism from real SLC inspection; DB injects resolver at `/conf/resolv.conf` at runtime; symlink picks it up automatically |
+| Hardcode `nameserver 8.8.8.8` | ✗ Rejected — breaks DB-managed DNS; ignores the DB-injected resolver |
+| Ship an empty `resolv.conf` | ✗ Rejected — would not pick up the DB-injected resolver config |
+| Ship no `resolv.conf` | ✗ Rejected — relies on absent-file behavior; does not pick up the DB-injected config |
+
+### Consequences
+
+The Alpine image inherits the DB-injected nameserver at runtime via the symlink. No nameserver is hardcoded. The mechanism is confirmed by integration test: the UDF resolves `www.exasol.com` and emits a valid IP.
+
+---
+
+## ADR-037: Required /etc file set verified against the real shipped Python3 SLC
+
+**Date:** 2026-06-15
+**Plan:** `add-name-resolution`
+**Status:** Accepted
+
+### Context
+
+The Alpine image needed to recreate the glibc name-resolution `/etc` file set that full-distro SLCs inherit implicitly. The correct file set was determined by directly inspecting the real shipped built-in Python3 SLC (`exasol/docker-db:2025.1.11`, flavor `standard-EXASOL-all-python-3.10`, SLC v11.1.1) via `docker run --rm --entrypoint /bin/bash`. The SLC is glibc-based and ships `libnss_files.so.2` + `libnss_dns.so.2`.
+
+### Decision
+
+Mirror the exact name-resolution `/etc` file set from the real shipped Python3 SLC: `/etc/nsswitch.conf` with `hosts: files dns` (regular file), `/etc/host.conf` (`order hosts,bind` / `multi on`, regular file), `/etc/hosts` as a symlink to `/conf/hosts`, and `/etc/resolv.conf` as a symlink to `/conf/resolv.conf`. Static resolver policy ships as regular files; runtime-variable data symlinks into `/conf/`.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Mirror the exactly-inspected real SLC `/etc` file set | ✓ Chosen — primary, ground-truth evidence; collapses open risks into decided facts |
+| Derive from GitHub source of `exasol/script-languages` | ✗ Rejected — weaker than inspecting the shipped artifact |
+| Ship `/etc/hosts` as an empty regular file | ✗ Rejected — re-inspection with `ls -la` / `readlink` showed it is a symlink to `/conf/hosts`, not an empty file |
+| Spike-driven discovery of the file set | ✗ Rejected — direct SLC inspection is stronger evidence and removes the spike dependency |
+
+### Consequences
+
+The staged file set matches the reference SLC exactly. The sole working mechanism at runtime is `patch_resolver_symlinks()` in `crates/it/src/lib.rs`, which post-processes the tarball after `docker export` to insert the symlinks before BucketFS upload. A bare packaging workflow (without the harness post-processing) would produce a broken DNS configuration; the correct fix is to extract this step into a shared packaging tool.
+
+---
+
 ## ADR-032: Extended Exasol types are String-backed Value payloads but distinct ExaType variants
 
 **Date:** 2026-06-14
