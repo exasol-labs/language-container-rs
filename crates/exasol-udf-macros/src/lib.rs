@@ -83,6 +83,9 @@ fn rust_type_to_exatype(ty: &Type) -> syn::Result<&'static str> {
         "bool" => "Boolean",
         "String" => "String",
         "&str" | "str" => "String",
+        "Decimal" => "Numeric",
+        "NaiveDate" => "Date",
+        "NaiveDateTime" => "Timestamp",
         _ => {
             return Err(syn::Error::new_spanned(
                 ty,

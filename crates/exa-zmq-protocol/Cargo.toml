@@ -6,7 +6,9 @@ edition = "2021"
 
 [dependencies]
 exa-proto = { path = "../exa-proto" }
+exasol-udf-sdk = { path = "../exasol-udf-sdk" }
 prost = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zmq = { workspace = true }
+chrono = { workspace = true }

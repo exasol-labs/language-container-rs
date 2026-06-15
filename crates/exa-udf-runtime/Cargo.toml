@@ -8,6 +8,7 @@ edition = "2021"
 exa-proto = { path = "../exa-proto" }
 exa-zmq-protocol = { path = "../exa-zmq-protocol" }
 exasol-udf-sdk = { path = "../exasol-udf-sdk" }
+chrono = { workspace = true }
 libloading = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

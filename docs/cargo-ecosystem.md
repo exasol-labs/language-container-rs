@@ -30,8 +30,10 @@ The pinned workspace toolchain (`rust-toolchain.toml`) is 1.84; these crates are
 
 UDF authors add this to `[dependencies]`. It provides:
 
-- **`UdfContext` trait** — `get`, `emit`, `next`, `cluster_ip`, `connection`, `connect_back`
-- **`Value` enum** — `Int64`, `Float64`, `String`, `Bool`, `Numeric`, `Null`, and the rest
+- **`UdfContext` trait** — `get`, `emit`, `next`, `cluster_ip`, `connection`, `connect_back`, plus the typed getters `get_i64` / `get_f64` / `get_str` / `get_bool` / `get_decimal` / `get_date` / `get_datetime` (each returns `Option<_>`, `None` for SQL NULL; `get_i64` also accepts a scale-0 `Numeric`)
+- **`Value` enum** — `Int64`, `Float64`, `String`, `Bool`, `Null`, and the now strongly-typed `Numeric(Decimal)`, `Date(NaiveDate)`, `Timestamp(NaiveDateTime)`
+- **`Decimal`** — `{ unscaled: i128, scale: u8 }` newtype (38-digit, no allocation) backing `Value::Numeric`
+- **`ExaType`** — the canonical Exasol-type enum, now living in `exasol_udf_sdk::value` (re-exported by `exa-zmq-protocol`); covers the extended SQL types (`Char`, `TimestampWithLocalTimeZone`, intervals, `Geometry`, `Hashtype`, …)
 - **`UdfError`** — typed error variants (`Type`, `User`, `Unimplemented`, …)
 - **`ConnectionObject`** — credentials fetched from a named `CONNECTION` object
 
@@ -55,7 +57,7 @@ UDF authors do **not** depend on `exa-udf-runtime` directly. Operators who build
 
 ```toml
 [dependencies]
-exa-udf-runtime = { version = "0.3" }
+exa-udf-runtime = { version = "0.7" }
 ```
 
 Feature `connect-back` adds an embedded Tokio runtime and the ADBC/exarrow-rs connect-back implementation.

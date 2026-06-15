@@ -4,6 +4,52 @@
 - Use `exapump` to interact with Exasol.
 - Do not verify SSL certificates (`validateservercertificate=0`).
 
+## Exasol data type mapping
+
+The DB delivers every column over the wire as one of **8 proto column types**
+(`exa-proto::ColumnType`). Several SQL types collapse onto the same proto type and
+are disambiguated at `ColumnMeta::from_pb` time by inspecting `type_name`. The SDK
+surfaces the refined type as `exasol_udf_sdk::value::ExaType` (the single canonical
+enum; `exa-zmq-protocol` re-exports it).
+
+| Proto column type | Exasol SQL type(s) | `type_name` disambiguation | SDK `ExaType` | `Value` payload |
+|-------------------|--------------------|----------------------------|---------------|-----------------|
+| `PB_DOUBLE` | `DOUBLE PRECISION` (`FLOAT`, `REAL`) | none | `Double` | `Double(f64)` |
+| `PB_INT32` | `DECIMAL(p,0)` small enough to fit `i32` | none | `Int32` | `Int32(i32)` |
+| `PB_INT64` | `DECIMAL(p,0)` fitting `i64` | none | `Int64` | `Int64(i64)` |
+| `PB_NUMERIC` | `DECIMAL(p,s)`, `BIGINT`, `NUMBER` | none | `Numeric { precision, scale }` | `Numeric(Decimal)` |
+| `PB_DATE` | `DATE` | none | `Date` | `Date(NaiveDate)` |
+| `PB_TIMESTAMP` | `TIMESTAMP`, `TIMESTAMP WITH LOCAL TIME ZONE` | `WITH LOCAL TIME ZONE` → `TimestampTz`, else `Timestamp` | `Timestamp` / `TimestampTz` | `Timestamp(NaiveDateTime)` / `String` (TZ) |
+| `PB_STRING` | `VARCHAR`, `CHAR`, `GEOMETRY`, `HASHTYPE`, `INTERVAL YEAR TO MONTH`, `INTERVAL DAY TO SECOND` | `CHAR…` → `Char`; `VARCHAR…` → `String`; `GEOMETRY` → `Geometry`; `HASHTYPE` → `HashType`; `INTERVAL…YEAR…MONTH` → `IntervalYearToMonth`; `INTERVAL…DAY…SECOND` → `IntervalDayToSecond` | `String { size }` / `Char { size }` / `Geometry` / `HashType` / `IntervalYearToMonth` / `IntervalDayToSecond` | `String` |
+| `PB_BOOLEAN` | `BOOLEAN` | none | `Boolean` | `Bool(bool)` |
+
+Rules:
+- **`BIGINT` arrives as `PB_NUMERIC`**, not `PB_INT64`. `get_i64` therefore accepts an
+  integral `Value::Numeric`; it errors only on a non-zero fractional part.
+- **Only ambiguous proto types consult `type_name`** (`PB_STRING`, `PB_TIMESTAMP`).
+  Unambiguous types map directly and MUST NOT read `type_name`.
+- **Extended types keep a `String` wire payload** (the proto block does not change);
+  the `ExaType` variant — not the `Value` payload — carries the SQL distinction.
+- Reference: <https://docs.exasol.com/db/latest/sql_references/data_types/datatypesoverview.htm>
+
+## Running Exasol UDFs in CI (Ubuntu 24.04 runners)
+
+**Rule:** before `docker run` of the Exasol DB on any Ubuntu 24.04 runner, set
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Why: Exasol runs every UDF inside a sandbox built by `nschroot`, which creates an
+**unprivileged user namespace** needing `CAP_SYS_ADMIN`. Ubuntu 24.04 ships
+`kernel.apparmor_restrict_unprivileged_userns=1`, which strips that capability via
+a restricted AppArmor profile **even under `--privileged`** → `nschroot` dies
+silently → the DB reports `Internal error: VM crashed` (SQL state 22002) for
+**every** UDF, built-in Python3 included. The DB itself stays healthy.
+
+If you see "VM crashed" in CI, it is this — **not** memory, disk, the host kernel,
+glibc, or the UDF code. It reproduces on Ubuntu 24.04 hosts only (local Debian has
+no such restriction), so it is green locally. Confirm via `sudo dmesg` on the
+runner (`apparmor="DENIED" ... comm="nschroot" capability=21 capname="sys_admin"`);
+unprivileged `dmesg` is blocked and the DB-side `cored/exasql.*` logs are 0 bytes.
+
 ## Three "connection" concepts — never confuse them
 
 | Concept | What it is | Representation in code |

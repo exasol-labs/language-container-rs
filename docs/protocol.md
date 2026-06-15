@@ -104,4 +104,10 @@ Input/output batches are columnar (`ExascriptTableData`): per-type blocks
 (`data_int64`, `data_double`, `data_string`, `data_bool`, …) plus a `data_nulls`
 bitmap. The runtime maps these to the SDK `Value` enum. **Exasol `BIGINT` and
 `DECIMAL` travel in the *string* block as `PB_NUMERIC`** — emit them as
-`Value::Numeric`, not `Value::Int64` (see the write-back guide's Pitfalls).
+`Value::Numeric` (now carrying a `Decimal`), not `Value::Int64` (see the
+write-back guide's Pitfalls).
+
+The wire delivers each column as one of eight proto column types.
+`ColumnMeta::from_pb` refines those using the SQL-level `type_name` field into
+the canonical `ExaType` enum, which now lives in `exasol_udf_sdk::value` and is
+re-exported by `exa-zmq-protocol`.

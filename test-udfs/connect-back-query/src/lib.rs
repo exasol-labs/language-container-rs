@@ -1,7 +1,7 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 /// SET UDF that issues a connect-back query (`SELECT CAST(42 AS BIGINT)`) and
 /// emits the first cell of the first result row.
@@ -25,11 +25,13 @@ pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let val: i64 = match cell {
         Value::Int64(n) => *n,
         Value::Int32(n) => *n as i64,
-        Value::Numeric(s) => s
-            .parse()
-            .map_err(|e| UdfError::Type(format!("cannot parse '{s}' as i64: {e}")))?,
+        Value::Numeric(d) if d.scale == 0 => i64::try_from(d.unscaled)
+            .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?,
         other => return Err(UdfError::Type(format!("unexpected value {other:?}"))),
     };
-    // BIGINT EMITS columns travel as PB_NUMERIC (decimal string).
-    ctx.emit(&[Value::Numeric(val.to_string())])
+    // BIGINT EMITS columns travel as PB_NUMERIC (typed Decimal).
+    ctx.emit(&[Value::Numeric(Decimal {
+        unscaled: val as i128,
+        scale: 0,
+    })])
 }

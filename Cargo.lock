@@ -950,6 +950,7 @@ version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow",
+ "chrono",
  "exa-proto",
  "exa-zmq-protocol",
  "exarrow-rs",
@@ -969,7 +970,9 @@ dependencies = [
 name = "exa-zmq-protocol"
 version = "0.6.1"
 dependencies = [
+ "chrono",
  "exa-proto",
+ "exasol-udf-sdk",
  "prost",
  "thiserror",
  "tracing",
@@ -1025,6 +1028,7 @@ name = "exasol-udf-sdk"
 version = "0.6.1"
 dependencies = [
  "arrow",
+ "chrono",
  "thiserror",
 ]
 

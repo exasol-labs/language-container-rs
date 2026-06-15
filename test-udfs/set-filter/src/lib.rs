@@ -1,20 +1,22 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
 pub fn set_filter(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
         match ctx.get(0)? {
             Value::Int64(n) if *n > 0 => ctx.emit(&[Value::Int64(*n)])?,
-            // Exasol sends BIGINT as PB_NUMERIC (decimal string).
-            Value::Numeric(s) => {
-                let n: i64 = s
-                    .parse()
-                    .map_err(|e| UdfError::Type(format!("cannot parse '{}' as i64: {}", s, e)))?;
+            // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
+            Value::Numeric(d) if d.scale == 0 => {
+                let n = i64::try_from(d.unscaled)
+                    .map_err(|_| UdfError::Type(format!("cannot convert {} to i64", d)))?;
                 if n > 0 {
-                    ctx.emit(&[Value::Numeric(n.to_string())])?;
+                    ctx.emit(&[Value::Numeric(Decimal {
+                        unscaled: n as i128,
+                        scale: 0,
+                    })])?;
                 }
             }
             _ => {}

@@ -1,16 +1,20 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 /// Scalar UDF that doubles its i64 input, with annotated schema metadata.
-#[exasol_udf(input(x: i64), emits(result: i64))]
+#[exasol_udf(input(x: Decimal), emits(result: Decimal))]
 pub fn annotated_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let v = match ctx.get(0)? {
         Value::Int64(n) => Value::Int64(n * 2),
-        Value::Numeric(s) => {
-            let n: i64 = s.parse().map_err(|e| UdfError::Type(format!("{e}")))?;
-            Value::Numeric((n * 2).to_string())
+        Value::Numeric(d) if d.scale == 0 => {
+            let n = i64::try_from(d.unscaled)
+                .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?;
+            Value::Numeric(Decimal {
+                unscaled: (n * 2) as i128,
+                scale: 0,
+            })
         }
         _ => return Err(UdfError::Type("expected i64".into())),
     };
