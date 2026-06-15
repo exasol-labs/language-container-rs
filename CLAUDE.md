@@ -4,6 +4,23 @@
 - Use `exapump` to interact with Exasol.
 - Do not verify SSL certificates (`validateservercertificate=0`).
 
+## Alpine SLC name resolution
+
+The Alpine slim image (`Dockerfile.alpine`) ships `/etc/nsswitch.conf` (`hosts: files dns`),
+`/etc/host.conf`, and two symlinks `/etc/hosts → /conf/hosts` and
+`/etc/resolv.conf → /conf/resolv.conf` (the DB injects both at runtime). Hostnames resolve
+correctly at UDF runtime via the bundled `libnss_files` + `libnss_dns` modules. Never
+hardcode a nameserver or host entries in the image — the DB manages `/conf/` per deployment.
+
+Docker's image layer system cannot place symlinks at `/etc/hosts` and `/etc/resolv.conf`
+(COPY dereferences broken symlinks; `RUN ln` hits Docker's bind-mount of those paths).
+The SLC tarball is therefore post-processed by `patch_resolver_symlinks()` in the
+integration-test harness (`crates/it/src/lib.rs`) after `docker export`: a Python3
+`tarfile` script removes the 0-byte placeholder entries and appends proper symlink
+entries (`etc/hosts -> /conf/hosts`, `etc/resolv.conf -> /conf/resolv.conf`). The
+Exasol sandbox extracts the patched tarball, so the symlinks are present at UDF runtime
+and point at the DB-injected `/conf/` files.
+
 ## Exasol data type mapping
 
 The DB delivers every column over the wire as one of **8 proto column types**

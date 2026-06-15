@@ -19,6 +19,7 @@ members = [
     "test-udfs/connect-back-insert",
     "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
+    "test-udfs/name-resolution",
     "test-udfs/spike-connect",
 ]
 # `it` is excluded from default builds: its integration deps (arrow 58,

@@ -99,7 +99,7 @@ echo "==> Exporting container filesystem …"
 TMP_TAR=$(mktemp /tmp/slc-XXXXXX.tar.gz)
 trap 'rm -f "$TMP_TAR"' EXIT
 CID=$(docker create slc-rs-slim:dev)
-docker export "$CID" | gzip > "$TMP_TAR"
+docker export "$CID" | python3 "$SCRIPT_DIR/patch-slc-symlinks.py" > "$TMP_TAR"
 docker rm "$CID" > /dev/null
 echo "==> Exported to $TMP_TAR ($(du -sh "$TMP_TAR" | cut -f1))."
 

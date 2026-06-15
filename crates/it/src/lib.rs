@@ -474,12 +474,13 @@ fn decode_base64(input: &str) -> Result<String> {
     Ok(String::from_utf8(out)?)
 }
 
-/// `docker export` a fresh container of `image` into a gzipped flat-fs tarball.
+/// `docker export` a fresh container of `image` and post-process it into a
+/// gzipped flat-fs tarball suitable for BucketFS upload.
 ///
-/// The `export | gzip` pipeline runs inside a single shell so the OS streams
-/// the multi-hundred-megabyte tar between the two processes. Doing the gzip
-/// in-process would require concurrently writing stdin and draining stdout to
-/// avoid a pipe-buffer deadlock; delegating to the shell sidesteps that.
+/// The raw export (an uncompressed tar) is collected in memory and piped
+/// through `scripts/patch-slc-symlinks.py`, which replaces the placeholder
+/// empty-file entries at `etc/hosts` and `etc/resolv.conf` with symlinks into
+/// `/conf/` and gzip-compresses the result.
 fn export_image_filesystem(image: &str) -> Result<Vec<u8>> {
     let create = Command::new("docker")
         .args(["create", image])
@@ -494,23 +495,67 @@ fn export_image_filesystem(image: &str) -> Result<Vec<u8>> {
     let cid = String::from_utf8(create.stdout)?.trim().to_string();
 
     let result = (|| -> Result<Vec<u8>> {
-        let out = Command::new("bash")
-            .arg("-c")
-            .arg(format!("set -o pipefail; docker export {cid} | gzip -c"))
+        let out = Command::new("docker")
+            .args(["export", &cid])
             .output()
-            .context("docker export | gzip")?;
+            .context("docker export")?;
         if !out.status.success() {
             bail!(
-                "docker export {cid} | gzip failed: {}",
+                "docker export {cid} failed: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        Ok(out.stdout)
+        // Docker's layer system converts symlinks whose targets don't exist
+        // in the builder (e.g. /etc/resolv.conf -> /conf/resolv.conf, where
+        // /conf/ is injected at Exasol runtime) into empty 0-byte regular
+        // files. The real Python3 SLC uses exaslct (not docker export) and
+        // carries the actual symlinks. Post-process the tarball here to
+        // replace those two placeholder files with proper symlinks so the
+        // Exasol sandbox picks up the DB-injected /conf/ data.
+        patch_resolver_symlinks(out.stdout)
     })();
 
     // Always clean up the throwaway container, regardless of export outcome.
     let _ = Command::new("docker").args(["rm", "-f", &cid]).output();
     result
+}
+
+/// Post-process the raw `docker export` tarball into a gzip SLC archive.
+///
+/// Delegates to `scripts/patch-slc-symlinks.py` (workspace root), which
+/// replaces the placeholder empty-file entries at `etc/hosts` and
+/// `etc/resolv.conf` with symlinks into `/conf/`. Both the IT harness and
+/// any production packaging workflow call the same script.
+fn patch_resolver_symlinks(raw_tarball: Vec<u8>) -> Result<Vec<u8>> {
+    use std::io::Write;
+
+    let script = format!("{}/scripts/patch-slc-symlinks.py", workspace_root());
+
+    let mut child = Command::new("python3")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawning python3 {script}"))?;
+
+    child
+        .stdin
+        .take()
+        .context("child stdin was not captured")?
+        .write_all(&raw_tarball)
+        .context("writing tarball to python3 stdin")?;
+
+    let output = child
+        .wait_with_output()
+        .context("waiting for python3 to finish")?;
+    if !output.status.success() {
+        bail!(
+            "patch-slc-symlinks.py failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output.stdout)
 }
 
 #[cfg(test)]

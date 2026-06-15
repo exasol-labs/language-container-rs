@@ -22,6 +22,7 @@ const CB_CLUSTER_IP_LIB: &str = "libconnect_back_cluster_ip.so";
 const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
+const NAME_RESOLUTION_LIB: &str = "libname_resolution.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -97,6 +98,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_cluster_ip_path = harness
         .upload_udf(CB_CLUSTER_IP_LIB, read_udf_artifact(CB_CLUSTER_IP_LIB)?)
         .await?;
+    let name_resolution_path = harness
+        .upload_udf(NAME_RESOLUTION_LIB, read_udf_artifact(NAME_RESOLUTION_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -138,6 +142,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario connect_back_writeback_same_schema ok");
+
+    name_resolution_resolves_external_hostname(&mut conn, &name_resolution_path).await?;
+    eprintln!("[it] scenario name_resolution ok");
 
     conn.close().await?;
     Ok(())
@@ -502,5 +509,55 @@ async fn connect_back_writeback_same_schema(
             );
         }
     }
+    Ok(())
+}
+
+/// Standalone gate test for DNS resolution. Starts its own container so it can be
+/// run directly: `cargo test -p it --features integration -- name_resolution_resolves_external_hostname`
+#[tokio::test(flavor = "multi_thread")]
+async fn name_resolution_resolves_external_hostname_gate() -> Result<()> {
+    let harness = Harness::start().await?;
+    let mut conn = harness.connect().await?;
+    conn.execute("CREATE SCHEMA IF NOT EXISTS it_nsr").await?;
+    conn.execute("OPEN SCHEMA it_nsr").await?;
+    let slc = harness.load_slc().await?;
+    register_slc(&mut conn, &slc).await?;
+    let nr_path = harness
+        .upload_udf(NAME_RESOLUTION_LIB, read_udf_artifact(NAME_RESOLUTION_LIB)?)
+        .await?;
+    if let Err(e) = name_resolution_resolves_external_hostname(&mut conn, &nr_path).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after name_resolution failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] standalone gate: name_resolution ok");
+    conn.close().await?;
+    Ok(())
+}
+
+/// Scenario: DNS-only name resolution — the UDF resolves the external hostname
+/// `www.exasol.com` via `getaddrinfo`/`ToSocketAddrs` and emits the first returned
+/// IP. Proves that `libnss_dns` + the DB-injected `/etc/resolv.conf` symlink work
+/// at UDF runtime inside the Alpine SLC sandbox. No connect-back session is opened.
+async fn name_resolution_resolves_external_hostname(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT name_resolution(dummy BOOLEAN) EMITS (resolved_addr VARCHAR(64)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(
+        conn,
+        "SELECT resolved_addr FROM (SELECT name_resolution(TRUE) FROM DUAL)",
+    )
+    .await?;
+    let addr = got.ok_or_else(|| anyhow!("name_resolution: resolved_addr is NULL"))?;
+    if addr.is_empty() {
+        bail!("name_resolution: resolved_addr is empty");
+    }
+    addr.parse::<std::net::IpAddr>()
+        .map_err(|e| anyhow!("name_resolution: resolved_addr {addr:?} is not a valid IP: {e}"))?;
     Ok(())
 }
