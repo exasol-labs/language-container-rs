@@ -20,6 +20,7 @@ members = [
     "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
     "test-udfs/spike-connect",
+    "test-udfs/resolv-udf",
 ]
 # `it` requires a live Exasol container; build/test it explicitly:
 # `cargo test -p it --features integration`
@@ -42,10 +43,11 @@ default-members = [
     "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
     "test-udfs/spike-connect",
+    "test-udfs/resolv-udf",
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 license = "MIT"
 
 [workspace.dependencies]

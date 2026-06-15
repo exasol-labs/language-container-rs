@@ -22,6 +22,7 @@ const CB_CLUSTER_IP_LIB: &str = "libconnect_back_cluster_ip.so";
 const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
+const RESOLV_LIB: &str = "libresolv_udf.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -99,6 +100,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_cluster_ip_path = harness
         .upload_udf(CB_CLUSTER_IP_LIB, read_udf_artifact(CB_CLUSTER_IP_LIB)?)
         .await?;
+    let resolv_path = harness
+        .upload_udf(RESOLV_LIB, read_udf_artifact(RESOLV_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -140,6 +144,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario connect_back_writeback_same_schema ok");
+
+    resolv_udf_resolves_external_host(&mut conn, &resolv_path).await?;
+    eprintln!("[it] scenario resolv_udf_resolves_external_host ok");
+    if let Err(e) = resolv_udf_errors_on_unresolvable_host(&mut conn, &resolv_path).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after resolv_udf_errors_on_unresolvable_host failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario resolv_udf_errors_on_unresolvable_host ok");
 
     conn.close().await?;
     Ok(())
@@ -505,4 +518,38 @@ async fn connect_back_writeback_same_schema(
         }
     }
     Ok(())
+}
+
+/// Scenario: resolv_udf resolves an external hostname to a valid IP address.
+async fn resolv_udf_resolves_external_host(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT resolv_udf(host VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(conn, "SELECT resolv_udf('www.exasol.com')").await?;
+    let ip = got.ok_or_else(|| anyhow!("resolv_udf returned NULL"))?;
+    ip.parse::<std::net::IpAddr>()
+        .map_err(|_| anyhow!("resolv_udf('www.exasol.com') returned non-IP: {ip:?}"))?;
+    Ok(())
+}
+
+/// Scenario: resolv_udf surfaces an error for an unresolvable hostname.
+async fn resolv_udf_errors_on_unresolvable_host(
+    conn: &mut Connection,
+    _udf_object: &str,
+) -> Result<()> {
+    let result = conn
+        .query("SELECT resolv_udf('this-host-definitely-does-not-exist.invalid')")
+        .await;
+    match result {
+        Ok(_) => bail!("expected DNS error, query succeeded"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("F-UDF-CL-RUST-") {
+                bail!("error did not contain F-UDF-CL-RUST- prefix: {msg}");
+            }
+            Ok(())
+        }
+    }
 }

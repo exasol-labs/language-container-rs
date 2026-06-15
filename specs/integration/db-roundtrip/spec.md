@@ -4,7 +4,7 @@ Exercises the full Rust SLC against a live Exasol container across the supported
 
 ## Background
 
-The integration harness starts an `exasol/docker-db:<version>` container, registers the slim SLC, and uploads UDF `.so` artifacts to BucketFS with SSL verification disabled per project rules. The database version is selected at runtime by the `EXASOL_DB_SERIES` env var (`2025-1`, `2025-2`, `2026-1`); when unset it falls back to the series the binary was compiled with (default `2026-1`). A single `it-runner` binary, compiled once, drives every version in the matrix.
+The integration harness starts an `exasol/docker-db:<version>` container, registers the slim SLC, and uploads UDF `.so` artifacts to BucketFS with SSL verification disabled per project rules. The database version is selected at runtime by the `EXASOL_DB_SERIES` env var (`2025-1`, `2025-2`, `2026-1`); when unset it falls back to the series the binary was compiled with (default `2026-1`). A single `it-runner` binary, compiled once, drives every version in the matrix. The DNS-gate scenario requires outbound network access from the runner so the external hostname resolves.
 
 Before registering the Rust SLC, the harness runs an optional non-fatal Python3 built-in connect-back diagnostic. This diagnostic creates its own `CONNECTION`/`SCRIPT` objects (which are DB-global and persist regardless of session) and exercises connect-back via `connect_back_sql_address()`. Critically, the diagnostic runs on a DEDICATED throwaway connection, distinct from the shared connection that drives the asserted scenarios. If the diagnostic triggers a UDF VM crash (e.g. via a bad address), that crash is caught and logged as non-fatal; it MUST NOT affect the shared connection. The `CONNECTION` and `SCRIPT` objects created by the diagnostic are global and remain available for the asserted scenarios, even though the throwaway connection is closed immediately after.
 
@@ -90,3 +90,11 @@ The pre-existing non-connect-back scenarios in this feature — `sanity_select_o
 * *THEN* any failure or VM crash in the diagnostic MUST be caught and logged as non-fatal
 * *AND* it MUST NOT affect the shared connection or any subsequent asserted scenario (e.g. `scalar_double_returns_42`), which run on the untouched shared connection
 * *AND* the diagnostic's `CB_SELF_PY` connection MUST use `<container-eth0-ip>:8563` (never loopback), consistent with `connect_back_sql_address()`
+
+### Scenario: DNS gate resolves an external hostname end-to-end
+
+* *GIVEN* a running Exasol container with the slim Alpine SLC registered for the session
+* *AND* the `resolv-udf` UDF uploaded and a SCALAR `RUST` script `resolv_udf` referencing its BucketFS `.so` path
+* *WHEN* the harness runs `SELECT resolv_udf('www.exasol.com')` as part of the roundtrip suite
+* *THEN* the query MUST return a single non-null VARCHAR value
+* *AND* the returned string MUST parse as a valid `IpAddr`

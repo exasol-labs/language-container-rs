@@ -23,7 +23,7 @@
 #   DB_MEM          EXA_DB_MEM_SIZE           (default: unset → docker-db auto-sizes)
 #   EXASOL_VERSION  docker-db image tag       (default: 2026.1.0)
 #   DB_SERIES       it crate feature          (default: db-2026-1)
-#   SKIP_SLC_BUILD  reuse existing slc image  (default: build it)
+#   SKIP_SLC_BUILD  reuse existing SLC tarball (requires SLC_TARBALL)
 #
 # NOTE: a dev box with lots of swap will NOT reproduce the CI "VM crashed" with
 # the default Docker swap allowance (2x --memory) — the container spills to swap
@@ -46,17 +46,25 @@ IMAGE="exasol/docker-db:${EXASOL_VERSION}"
 log() { printf '\n\033[1;36m=== %s ===\033[0m\n' "$*"; }
 
 cleanup() { docker stop "$CONTAINER" >/dev/null 2>&1 || true; docker rm "$CONTAINER" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+on_exit() { cleanup; rm -rf "${SLC_DIR:-}" 2>/dev/null || true; }
+trap on_exit EXIT
 
 log "Config: MEM=$MEM MEMSWAP=$MEMSWAP SHM=$SHM DB_MEM='${DB_MEM:-<auto>}' IMAGE=$IMAGE"
 
-# 1. Build the SLC image the harness exports (slc-rs-slim:dev) ----------------
+# 1. Build the SLC tarball via the artifact stage ----------------------------
+SLC_DIR="${SLC_DIR:-/tmp/slc-rs-$$}"
 if [ -z "${SKIP_SLC_BUILD:-}" ]; then
-  log "Build SLC image (Dockerfile.alpine -> slc-rs-slim:dev)"
-  docker build -f Dockerfile.alpine -t slc-rs-slim:dev .
+  log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/slc-rs.tar.gz)"
+  mkdir -p "$SLC_DIR"
+  docker build -f Dockerfile.alpine --target artifact \
+    --output "type=local,dest=$SLC_DIR" .
 else
-  log "Reusing existing slc-rs-slim:dev (SKIP_SLC_BUILD set)"
+  log "Reusing existing SLC tarball (SKIP_SLC_BUILD set): ${SLC_TARBALL:-<SLC_TARBALL unset>}"
+  if [ -z "${SLC_TARBALL:-}" ]; then
+    echo "ERROR: SKIP_SLC_BUILD set but SLC_TARBALL is not set"; exit 1
+  fi
 fi
+export SLC_TARBALL="${SLC_TARBALL:-$SLC_DIR/slc-rs.tar.gz}"
 
 # 2. Build the UDF .so artifacts (release) — same set as the build job --------
 log "Build UDF .so artifacts (cargo build --release)"
@@ -68,7 +76,8 @@ cargo build --release \
   -p connect-back-cluster-ip \
   -p connect-back-query \
   -p connect-back-insert \
-  -p connect-back-crunch
+  -p connect-back-crunch \
+  -p resolv-udf
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
@@ -120,6 +129,7 @@ set +e
 EXASOL_VERSION="$EXASOL_VERSION" \
 EXASOL_HOST=localhost EXASOL_PORT=8563 BUCKETFS_PORT=2581 \
 BUCKETFS_PASSWORD="$BFSPASS" \
+SLC_TARBALL="$SLC_TARBALL" \
 ./it-runner --nocapture
 rc=$?
 set -e
