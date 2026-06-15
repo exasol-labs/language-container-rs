@@ -17,14 +17,15 @@
 | `exaudfclient` | Thin ZMQ client used by the container entrypoint | yes |
 | `it` | Integration tests (Docker, Exasol 2026.latest) | **no** |
 
-`connect-back-query`, `connect-back-insert`, and `it` depend on `arrow 58` (edition 2024 transitive deps) and require Rust ≥ 1.85. Build them explicitly:
+`connect-back-query`, `connect-back-insert`, `connect-back-crunch`, `connect-back-cluster-ip`, and `spike-connect` are in `default-members` and build with plain `cargo build` under the unified 1.92 / edition-2024 toolchain.
+
+`it` is excluded from `default-members` because it requires a live Exasol Docker container, not for any toolchain reason. Build and test it with:
 
 ```bash
-cargo +1.91 build -p connect-back-query
-cargo +1.91 test  -p it --features integration
+cargo test -p it --features integration
 ```
 
-The pinned workspace toolchain (`rust-toolchain.toml`) is 1.84; these crates are excluded from `default-members` to keep `cargo build` fast and toolchain-clean.
+The pinned workspace toolchain (`rust-toolchain.toml`) is 1.92.
 
 ## exasol-udf-sdk — author-facing crate
 
@@ -91,8 +92,8 @@ UDF authors never touch either crate. They are implementation details of `exa-ud
 `crates/it` holds end-to-end tests that spin up `exasol/docker-db:2026.latest` via `testcontainers`, compile test UDFs, upload them, and run SQL assertions.
 
 ```bash
-# Requires Rust >= 1.85 and Docker
-cargo +1.91 test -p it --features integration
+# Requires Docker
+cargo test -p it --features integration
 ```
 
 Tests run against `2026.latest` with `validateservercertificate=0`. Each test scenario maps to a UDF in `test-udfs/`.
