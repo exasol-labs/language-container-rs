@@ -18,7 +18,7 @@ The existing C++ launcher (`script-languages-release/exaudfclient/exaudfclient.c
 ```
 slc-rs/
   Cargo.toml                        # [workspace], members = all crates below
-  rust-toolchain.toml               # pinned channel (e.g. stable 1.84) — MUST match container
+  rust-toolchain.toml               # pinned channel (e.g. stable 1.92) — MUST match container
   Cargo.lock
   crates/
     exa-proto/                      # prost-generated protobuf bindings
@@ -453,7 +453,7 @@ fn main() -> ExitCode {
 
 ```dockerfile
 # ---- Stage: builder ----
-FROM rust:1.84-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 RUN apt-get update && apt-get install -y libzmq3-dev protobuf-compiler pkg-config
 WORKDIR /src
 COPY . .
@@ -470,8 +470,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=en_US.UTF-8
 
 # JIT profile only
-COPY --from=rust:1.84-bookworm /usr/local/cargo  /usr/local/cargo
-COPY --from=rust:1.84-bookworm /usr/local/rustup /usr/local/rustup
+COPY --from=rust:1.92-bookworm /usr/local/cargo  /usr/local/cargo
+COPY --from=rust:1.92-bookworm /usr/local/rustup /usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:$PATH \
     CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup
@@ -689,7 +689,7 @@ exapump udf deploy \
 # Cargo.toml
 [package]
 name = "my-udf"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
