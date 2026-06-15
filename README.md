@@ -111,7 +111,7 @@ RETURNS BIGINT AS
 | | |
 |---|---|
 | [Writing a Rust UDF](docs/writing-a-udf.md) | Implement, test, build and deploy a UDF from scratch |
-| [Connect-back](docs/writing-a-udf.md#4-connect-back) | Query or write to the database from inside a UDF |
+| [Exasol UDF protocol](docs/protocol.md) | The ZMQ REQ/REP + Protobuf SLC wire protocol |
 | [Cargo ecosystem](docs/cargo-ecosystem.md) | Workspace layout, feature flags, build tooling |
 
 Full index → [docs/index.md](docs/index.md)
