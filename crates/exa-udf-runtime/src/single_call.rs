@@ -3,7 +3,7 @@ use crate::loader::LoadedUdf;
 use exa_proto::SingleCallFunctionId;
 use exa_zmq_protocol::{HostAction, HostEvent, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 
 /// Drive a single-call session.
 ///

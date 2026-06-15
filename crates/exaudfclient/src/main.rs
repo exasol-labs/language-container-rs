@@ -3,7 +3,8 @@ use tracing::error;
 
 fn main() {
     // Must happen before any library code that might read HOME.
-    std::env::set_var("HOME", "/tmp");
+    // SAFETY: main() runs single-threaded before any other threads are spawned.
+    unsafe { std::env::set_var("HOME", "/tmp") };
 
     // Debug tracing: write to /tmp so it survives even when BucketFS is read-only.
     // This file is read by the integration test harness via dump_udf_logs().
@@ -182,7 +183,9 @@ mod tests {
     #[test]
     fn resolve_parser_version_precedence() {
         // Ensure env var is absent for the non-env cases.
-        std::env::remove_var("EXAUDF_PARSER_VERSION");
+        // SAFETY: this test is intentionally single-threaded (see comment above);
+        // no other threads read EXAUDF_PARSER_VERSION concurrently.
+        unsafe { std::env::remove_var("EXAUDF_PARSER_VERSION") };
 
         // Default fallback.
         let v = resolve_parser_version(&args(&["exaudfclient", "tcp://x:1", "lang=rust"]));
@@ -198,7 +201,7 @@ mod tests {
         assert_eq!(v, "7");
 
         // Env var takes precedence over CLI arg.
-        std::env::set_var("EXAUDF_PARSER_VERSION", "42");
+        unsafe { std::env::set_var("EXAUDF_PARSER_VERSION", "42") };
         let v = resolve_parser_version(&args(&[
             "exaudfclient",
             "tcp://x:1",
@@ -206,6 +209,6 @@ mod tests {
             "parser_version=7",
         ]));
         assert_eq!(v, "42");
-        std::env::remove_var("EXAUDF_PARSER_VERSION");
+        unsafe { std::env::remove_var("EXAUDF_PARSER_VERSION") };
     }
 }

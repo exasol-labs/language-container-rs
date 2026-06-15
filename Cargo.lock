@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exaudf"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "exasol-udf-sdk",
  "libloading",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "exa-proto",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "exa-udf-runtime",
@@ -1750,7 +1750,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.6.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow",

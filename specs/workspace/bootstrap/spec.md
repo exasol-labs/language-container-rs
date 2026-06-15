@@ -15,15 +15,8 @@ The `exarrow-rs` crate lives at `/home/talos/code/exarrow-rs` (not on crates.io)
 * *GIVEN* an empty repository with no Cargo files
 * *WHEN* `Cargo.toml` is created at the workspace root
 * *THEN* it MUST declare `[workspace]` with `resolver = "2"` and list all seven crate members under `members`
-* *AND* it MUST include a `[workspace.dependencies]` table pinning all shared dependencies to the versions in the design document (`zmq = "0.10"`, `prost = "0.13"`, `libloading = "0.8"`, `arrow = "58"`, `syn = "2"`, `quote = "1"`, `thiserror`, `tracing`)
+* *AND* it MUST include a `[workspace.dependencies]` table centralizing all shared dependencies (`zmq`, `prost`, `libloading`, `arrow`, `syn`, `quote`, `thiserror`, `tracing`)
 * *AND* it MUST include `[patch.crates-io]` pointing `exarrow-rs` to the local path `/home/talos/code/exarrow-rs`
-
-### Scenario: Rust toolchain is pinned
-
-* *GIVEN* a workspace root with no `rust-toolchain.toml`
-* *WHEN* `rust-toolchain.toml` is created
-* *THEN* it MUST declare `channel = "1.84"` under `[toolchain]`
-* *AND* `rustup show` MUST report the active toolchain as `stable-1.84`
 
 ### Scenario: All seven crate stubs exist and compile
 

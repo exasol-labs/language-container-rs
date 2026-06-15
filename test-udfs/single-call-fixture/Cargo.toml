@@ -2,7 +2,7 @@
 name = "single-call-fixture"
 version = "0.1.1"
 license.workspace = true
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]

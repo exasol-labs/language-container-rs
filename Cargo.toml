@@ -21,10 +21,8 @@ members = [
     "test-udfs/connect-back-cluster-ip",
     "test-udfs/spike-connect",
 ]
-# `it` is excluded from default builds: its integration deps (arrow 58,
-# testcontainers, reqwest) require Rust >= 1.85 and pull edition2024 crates the
-# pinned 1.84 toolchain cannot parse. Build/test it explicitly with a newer
-# toolchain: `cargo +1.91 test -p it --features integration`.
+# `it` requires a live Exasol container; build/test it explicitly:
+# `cargo test -p it --features integration`
 default-members = [
     "crates/exa-proto",
     "crates/exa-zmq-protocol",
@@ -39,12 +37,15 @@ default-members = [
     "test-udfs/single-call-fixture",
     "test-udfs/annotated-fixture",
     "test-udfs/annotated-double",
-    # connect-back-query and connect-back-insert depend on arrow 58 (edition2024)
-    # and must be built with Rust >= 1.85: cargo +1.91 build -p connect-back-query
+    "test-udfs/connect-back-query",
+    "test-udfs/connect-back-insert",
+    "test-udfs/connect-back-crunch",
+    "test-udfs/connect-back-cluster-ip",
+    "test-udfs/spike-connect",
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 license = "MIT"
 
 [workspace.dependencies]

@@ -45,10 +45,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!("{}", so_path.display());
 
     // Try to emit schema sidecar if annotated schemas are present
-    if so_path.exists() {
-        if let Err(e) = maybe_emit_sidecar(&so_path, &crate_name) {
-            eprintln!("warning: could not emit schema sidecar: {}", e);
-        }
+    if so_path.exists()
+        && let Err(e) = maybe_emit_sidecar(&so_path, &crate_name)
+    {
+        eprintln!("warning: could not emit schema sidecar: {}", e);
     }
 
     Ok(())
@@ -70,13 +70,13 @@ fn parse_crate_name(cargo_toml: &Path) -> Result<String, String> {
             // Left the [package] section
             break;
         }
-        if in_package && trimmed.starts_with("name") {
-            if let Some(value) = trimmed
+        if in_package
+            && trimmed.starts_with("name")
+            && let Some(value) = trimmed
                 .split_once('=')
                 .map(|x| x.1.trim().trim_matches('"'))
-            {
-                return Ok(value.to_string());
-            }
+        {
+            return Ok(value.to_string());
         }
     }
 

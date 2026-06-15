@@ -30,18 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # arrow 58 requires Cargo ≥ 1.85 to parse its edition2024 manifest.
-      # The workspace pin (1.84) is for the artifact build; CI uses 1.91.
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91
+      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.92.
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
         with:
           components: clippy, rustfmt
 
-      # Explicitly bind components to the +1.91 slot so they are visible when
-      # rust-toolchain.toml (pinned to 1.84 for the artifact build) would
-      # otherwise redirect bare `cargo` to the wrong toolchain.
-      - name: Ensure rustfmt/clippy available on 1.91
-        run: rustup component add rustfmt clippy --toolchain 1.91
+      - name: Ensure rustfmt/clippy available on 1.92
+        run: rustup component add rustfmt clippy --toolchain 1.92
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -59,15 +55,13 @@ jobs:
       # that exa-udf-runtime's dispatch/single_call tests load at runtime.
       - name: Build workspace (debug, warm cache)
         run: |
-          cargo +1.91 build \
-            --exclude connect-back-query \
-            --exclude connect-back-insert \
+          cargo build \
             --exclude it \
             --workspace
 
       - name: Build UDF .so artifacts (release)
         run: |
-          cargo +1.91 build --release \
+          cargo build --release \
             -p scalar-double \
             -p set-filter \
             -p json-parse \
@@ -79,7 +73,7 @@ jobs:
 
       - name: Build IT test binary (compile once)
         run: |
-          BIN=$(cargo +1.91 test --no-run -p it --features integration,db-2026-1 \
+          BIN=$(cargo test --no-run -p it --features integration,db-2026-1 \
               --message-format=json 2>/dev/null \
             | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
             | grep -v '^null$' | head -1)
@@ -105,13 +99,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
         with:
           components: clippy, rustfmt
 
-      - name: Ensure rustfmt/clippy available on 1.91
-        run: rustup component add rustfmt clippy --toolchain 1.91
+      - name: Ensure rustfmt/clippy available on 1.92
+        run: rustup component add rustfmt clippy --toolchain 1.92
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -125,16 +119,12 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        run: cargo +1.91 fmt --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        # connect-back-query, connect-back-insert, and it require separate
-        # handling (arrow 58 / testcontainers); they are checked in the
-        # integration job.
+        # it requires a live Exasol container; it is checked in the integration job.
         run: |
-          cargo +1.91 clippy \
-            --exclude connect-back-query \
-            --exclude connect-back-insert \
+          cargo clippy \
             --exclude it \
             --workspace -- -D warnings
 
@@ -145,8 +135,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -162,13 +152,11 @@ jobs:
       # dispatch/single_call tests in exa-udf-runtime dlopen these .so fixtures
       # (cache hit after the build job).
       - name: Build test fixture cdylibs
-        run: cargo +1.91 build -p scalar-double -p annotated-fixture -p single-call-fixture
+        run: cargo build -p scalar-double -p annotated-fixture -p single-call-fixture
 
       - name: Run unit tests
         run: |
-          cargo +1.91 test \
-            --exclude connect-back-query \
-            --exclude connect-back-insert \
+          cargo test \
             --exclude it \
             --workspace
 
@@ -179,11 +167,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # cargo-deny shells out to `cargo metadata`; arrow 58's edition2024
-      # manifests need Cargo ≥ 1.85, so run deny under +1.91 (the 1.84 pin
-      # in rust-toolchain.toml cannot parse them).
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@1.91
+      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.92.
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -203,10 +189,10 @@ jobs:
       # allow-list in deny.toml (MIT + permissive-compatible). advisories check
       # enforces the RustSec DB with the documented, justified ignores.
       - name: Check licenses
-        run: cargo +1.91 deny check licenses
+        run: cargo deny check licenses
 
       - name: Check advisories
-        run: cargo +1.91 deny check advisories
+        run: cargo deny check advisories
 
   build-slc:
     name: Build SLC image

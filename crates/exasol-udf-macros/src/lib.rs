@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Ident, ItemFn, Path, Token, Type};
+use syn::{Ident, ItemFn, Path, Token, Type, parse_macro_input};
 
 /// A single `name: Type` field inside an `input(...)` or `emits(...)` list.
 struct SchemaField {
@@ -51,9 +51,9 @@ impl Parse for Annotations {
                     return Err(syn::Error::new(
                         section.span(),
                         format!(
-                        "unknown annotation `{other}`, expected `input`, `emits`, or `vs_adapter`"
-                    ),
-                    ))
+                            "unknown annotation `{other}`, expected `input`, `emits`, or `vs_adapter`"
+                        ),
+                    ));
                 }
             }
             // Allow a trailing comma between sections.
@@ -90,7 +90,7 @@ fn rust_type_to_exatype(ty: &Type) -> syn::Result<&'static str> {
             return Err(syn::Error::new_spanned(
                 ty,
                 format!("unknown ExaType for {name}"),
-            ))
+            ));
         }
     };
     Ok(mapped)
@@ -192,7 +192,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             annotated_output_schema: #output_schema_ptr,
         };
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn __exa_udf_entry() -> *const ::exasol_udf_sdk::abi::ExaUdfVTable {
             &__EXA_VTABLE as *const _
         }
@@ -219,7 +219,7 @@ fn build_vs_adapter_tokens(path: Option<&Path>) -> (TokenStream2, TokenStream2) 
                     // buffer; the runtime frees it with `free`, so allocation
                     // crosses the boundary entirely through the C allocator.
                     unsafe fn __exa_write_result(value: &str, out: *mut *mut ::std::ffi::c_char) {
-                        extern "C" {
+                        unsafe extern "C" {
                             fn malloc(size: usize) -> *mut ::std::ffi::c_void;
                         }
                         // Replace interior NULs so the C string stays intact.

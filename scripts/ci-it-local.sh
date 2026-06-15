@@ -59,8 +59,8 @@ else
 fi
 
 # 2. Build the UDF .so artifacts (release) — same set as the build job --------
-log "Build UDF .so artifacts (cargo +1.91 build --release)"
-cargo +1.91 build --release \
+log "Build UDF .so artifacts (cargo build --release)"
+cargo build --release \
   -p scalar-double \
   -p set-filter \
   -p json-parse \
@@ -72,7 +72,7 @@ cargo +1.91 build --release \
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
-BIN=$(cargo +1.91 test --no-run -p it --features "integration,${DB_SERIES}" \
+BIN=$(cargo test --no-run -p it --features "integration,${DB_SERIES}" \
     --message-format=json 2>/dev/null \
   | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
   | grep -v '^null$' | head -1)

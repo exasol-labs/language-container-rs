@@ -1,5 +1,5 @@
 # Stage 1: Builder (Debian/glibc — binary runs on Debian Exasol host after BucketFS extraction)
-FROM rust:1.91-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -16,8 +16,8 @@ COPY crates/ ./crates/
 COPY test-udfs/ ./test-udfs/
 COPY targets/ ./targets/
 
-# arrow v58 (edition2024) requires Cargo >= 1.85; drop the workspace toolchain
-# pin so the image's own toolchain is used.
+# The workspace toolchain pin and the image toolchain are both 1.92; drop the
+# pin so the image's own 1.92 toolchain is used (no version split).
 RUN rm rust-toolchain.toml
 
 RUN cargo build --release -p exaudfclient

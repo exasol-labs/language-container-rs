@@ -6,7 +6,7 @@
 //! dispatcher can be tested against a real `.so` boundary. The other two hooks
 //! are left `None` to verify the runtime replies `MT_UNDEFINED_CALL` for them.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 
 /// Hand a Rust string to the runtime through a `libc::malloc`-backed buffer.
 ///
@@ -14,11 +14,13 @@ use std::ffi::{c_char, CStr, CString};
 /// crosses the boundary entirely through the C allocator (never mixing Rust's
 /// global allocator with the runtime's).
 unsafe fn write_result(value: &str, out: *mut *mut c_char) {
-    let c = CString::new(value).expect("no interior NUL in fixture output");
-    let bytes = c.as_bytes_with_nul();
-    let buf = libc::malloc(bytes.len()) as *mut c_char;
-    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, bytes.len());
-    *out = buf;
+    unsafe {
+        let c = CString::new(value).expect("no interior NUL in fixture output");
+        let bytes = c.as_bytes_with_nul();
+        let buf = libc::malloc(bytes.len()) as *mut c_char;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, bytes.len());
+        *out = buf;
+    }
 }
 
 unsafe extern "C" fn run_shim(_ctx: *mut std::ffi::c_void) -> i32 {
@@ -28,8 +30,10 @@ unsafe extern "C" fn run_shim(_ctx: *mut std::ffi::c_void) -> i32 {
 unsafe extern "C" fn destroy_shim() {}
 
 unsafe extern "C" fn default_output_columns(result: *mut *mut c_char) -> i32 {
-    write_result(r#"[{"name":"c0","type":"Int64"}]"#, result);
-    0
+    unsafe {
+        write_result(r#"[{"name":"c0","type":"Int64"}]"#, result);
+        0
+    }
 }
 
 unsafe extern "C" fn virtual_schema_adapter_call(
@@ -37,13 +41,15 @@ unsafe extern "C" fn virtual_schema_adapter_call(
     json_arg: *const c_char,
     result: *mut *mut c_char,
 ) -> i32 {
-    let arg = if json_arg.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(json_arg).to_string_lossy().into_owned()
-    };
-    write_result(&format!(r#"{{"echo":{arg}}}"#), result);
-    0
+    unsafe {
+        let arg = if json_arg.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(json_arg).to_string_lossy().into_owned()
+        };
+        write_result(&format!(r#"{{"echo":{arg}}}"#), result);
+        0
+    }
 }
 
 #[used]
@@ -60,7 +66,7 @@ static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVT
     annotated_output_schema: std::ptr::null(),
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn __exa_udf_entry() -> *const exasol_udf_sdk::abi::ExaUdfVTable {
     &VTABLE as *const _
 }

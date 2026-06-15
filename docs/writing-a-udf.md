@@ -6,7 +6,7 @@
 
 ## Prerequisites
 
-- Rust 1.84+ with the musl target:
+- Rust 1.92+ with the musl target:
   ```bash
   rustup target add x86_64-unknown-linux-musl
   ```
@@ -30,8 +30,8 @@ Or create the crate manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.7" }
-exasol-udf-macros = { version = "0.7" }
+exasol-udf-sdk    = { version = "0.8" }
+exasol-udf-macros = { version = "0.8" }
 ```
 
 ## 2. The `#[exasol_udf]` macro
@@ -212,7 +212,7 @@ Connect-back lets a UDF open a regular Exasol connection from inside `run()` and
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.7", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.8", features = ["connect-back"] }
 ```
 
 ### Create a CONNECTION object

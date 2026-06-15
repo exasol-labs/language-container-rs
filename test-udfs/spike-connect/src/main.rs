@@ -7,7 +7,7 @@
 //!   password   — defaults to "exasol"
 //!
 //! Exit 0 on success, 1 on any failure. Prints the result row to stdout.
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arrow::array::Int64Array;
 use exarrow_rs::adbc::{Connection, Driver};
 
