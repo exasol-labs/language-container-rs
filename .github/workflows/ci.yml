@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -445,29 +444,42 @@ jobs:
           docker stop exasol-db || true
           docker rm   exasol-db || true
 
-  # ── release: tag-only, gated on the full pipeline succeeding ─────────────
+  # ── release: on merge to main, gated on the full pipeline succeeding ─────
+  # Auto-tags and releases when Cargo.toml's version was bumped (i.e. the
+  # vX.Y.Z tag does not yet exist). Mirrors exasol-labs/exarrow-rs: the version
+  # is the single source of truth — bump it in a PR, and merging cuts the tag +
+  # GitHub Release. Already-released versions are a no-op (the tag-exists guard).
   release:
     name: Release
     runs-on: ubuntu-latest-8-cores
     needs: [integration]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: write   # GitHub Release + asset upload
+      contents: write   # create tag + GitHub Release + asset upload
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify tag matches Cargo.toml version
+      - name: Derive version and tag from Cargo.toml
+        id: version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          CRATE=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          if [ "$TAG" != "$CRATE" ]; then
-            echo "tag $TAG != Cargo.toml version $CRATE"
-            exit 1
+          VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag already exists
+        id: check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.version.outputs.version }} already released — skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download SLC image
+        if: steps.check.outputs.exists == 'false'
         uses: actions/download-artifact@v4
         with:
           name: slc-image
@@ -477,17 +489,26 @@ jobs:
       # builds it — `docker export` of a container, NOT `docker save` (which
       # yields OCI layers BucketFS cannot use).
       - name: Export SLC filesystem tarball
+        if: steps.check.outputs.exists == 'false'
         run: |
           docker load -i slc-image.tar
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${{ steps.version.outputs.version }}"
           cid=$(docker create slc-rs-slim:dev)
           docker export "$cid" | gzip -c > "slc-rust-${VER}.tar.gz"
           docker rm "$cid"
           ls -la "slc-rust-${VER}.tar.gz"
 
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
       - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
-          name: ${{ github.ref_name }}
           files: slc-rust-*.tar.gz
