@@ -1,5 +1,5 @@
 use crate::error::RuntimeError;
-use exasol_udf_sdk::abi::{ExaUdfVTable, EXA_SDK_FINGERPRINT, EXA_UDF_ABI_VERSION};
+use exasol_udf_sdk::abi::{EXA_SDK_FINGERPRINT, EXA_UDF_ABI_VERSION, ExaUdfVTable};
 use libloading::{Library, Symbol};
 
 /// A loaded UDF shared object plus its validated vtable.

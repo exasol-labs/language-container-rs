@@ -117,7 +117,7 @@ mod tests {
         // from single-call mode. This test pins the 3-arg ABI: (ctx, json, result).
         // Declared locally so the test does not pull the `libc` crate, which
         // would perturb dev-dependency resolution.
-        extern "C" {
+        unsafe extern "C" {
             fn free(ptr: *mut std::ffi::c_void);
         }
         unsafe extern "C" fn vsa(
@@ -125,7 +125,7 @@ mod tests {
             _json: *const c_char,
             result: *mut *mut c_char,
         ) -> i32 {
-            extern "C" {
+            unsafe extern "C" {
                 fn malloc(size: usize) -> *mut std::ffi::c_void;
             }
             // Echo whether a non-null context pointer was threaded through.

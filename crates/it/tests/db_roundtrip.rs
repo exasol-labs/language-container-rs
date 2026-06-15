@@ -10,9 +10,9 @@
 //! (its own schema-scoped script names).
 #![cfg(feature = "integration")]
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use exarrow_rs::adbc::Connection;
-use it::{query_single_string, read_udf_artifact, register_slc, Harness};
+use it::{Harness, query_single_string, read_udf_artifact, register_slc};
 
 const SCALAR_LIB: &str = "libscalar_double.so";
 const SET_LIB: &str = "libset_filter.so";
@@ -61,7 +61,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
             let _ = diag_conn.close().await;
         }
         Err(e) => {
-            eprintln!("[it] scenario python3_connect_back SKIPPED: could not open diagnostic connection: {e:#}");
+            eprintln!(
+                "[it] scenario python3_connect_back SKIPPED: could not open diagnostic connection: {e:#}"
+            );
         }
     }
 

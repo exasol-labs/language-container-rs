@@ -2,7 +2,7 @@
 name = "exaudfclient"
 version.workspace = true
 license.workspace = true
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 exa-udf-runtime = { path = "../exa-udf-runtime", features = ["connect-back"] }

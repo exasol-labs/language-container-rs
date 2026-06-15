@@ -8,9 +8,9 @@ use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::Value;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 
-extern "C" {
+unsafe extern "C" {
     fn free(ptr: *mut std::ffi::c_void);
 }
 

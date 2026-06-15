@@ -9,7 +9,7 @@
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use exarrow_rs::adbc::{Connection, Driver};
 use testcontainers::core::{ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -532,16 +532,16 @@ mod tests {
     #[test]
     fn db_series_returns_env_var_when_recognised() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("EXASOL_DB_SERIES", "2025-1");
+        unsafe { std::env::set_var("EXASOL_DB_SERIES", "2025-1") };
         let result = db_series();
-        std::env::remove_var("EXASOL_DB_SERIES");
+        unsafe { std::env::remove_var("EXASOL_DB_SERIES") };
         assert_eq!(result, "2025-1");
     }
 
     #[test]
     fn db_series_fallback_matches_enabled_feature() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("EXASOL_DB_SERIES");
+        unsafe { std::env::remove_var("EXASOL_DB_SERIES") };
         let series = db_series();
         assert!(
             ["2025-1", "2025-2", "2026-1"].contains(&series.as_str()),
@@ -552,26 +552,26 @@ mod tests {
     #[test]
     fn db_tag_uses_exasol_version_override() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("EXASOL_DB_SERIES");
-        std::env::set_var("EXASOL_VERSION", "2025.1.99");
+        unsafe { std::env::remove_var("EXASOL_DB_SERIES") };
+        unsafe { std::env::set_var("EXASOL_VERSION", "2025.1.99") };
         let tag = db_tag();
-        std::env::remove_var("EXASOL_VERSION");
+        unsafe { std::env::remove_var("EXASOL_VERSION") };
         assert_eq!(tag, "2025.1.99");
     }
 
     #[test]
     fn db_tag_maps_series_to_known_image_tags() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("EXASOL_VERSION");
+        unsafe { std::env::remove_var("EXASOL_VERSION") };
         let series_to_tag = [
             ("2025-1", "2025.1.11"),
             ("2025-2", "2025.2.1"),
             ("2026-1", "2026.1.0"),
         ];
         for (series, expected_tag) in series_to_tag {
-            std::env::set_var("EXASOL_DB_SERIES", series);
+            unsafe { std::env::set_var("EXASOL_DB_SERIES", series) };
             let tag = db_tag();
-            std::env::remove_var("EXASOL_DB_SERIES");
+            unsafe { std::env::remove_var("EXASOL_DB_SERIES") };
             assert_eq!(
                 tag, expected_tag,
                 "series {series:?} should map to {expected_tag:?}"

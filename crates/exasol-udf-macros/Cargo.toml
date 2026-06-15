@@ -2,7 +2,7 @@
 name = "exasol-udf-macros"
 version.workspace = true
 license.workspace = true
-edition = "2021"
+edition = "2024"
 
 [lib]
 proc-macro = true
@@ -14,7 +14,4 @@ syn = { workspace = true }
 exasol-udf-sdk = { path = "../exasol-udf-sdk" }
 
 [dev-dependencies]
-# Pinned: trybuild >= 1.0.100 pulls toml/serde_spanned crates that require the
-# unstable edition2024 Cargo feature, which the pinned Rust 1.84 toolchain
-# cannot parse. 1.0.99 is the last release with a 1.84-compatible dep tree.
-trybuild = "=1.0.99"
+trybuild = "1"

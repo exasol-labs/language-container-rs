@@ -2,7 +2,7 @@
 name = "spike-connect"
 version = "0.1.0"
 license.workspace = true
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "spike-connect"
