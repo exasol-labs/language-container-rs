@@ -12,7 +12,7 @@ the message definitions live in
 > **Connect-back is NOT part of this protocol.** The control channel below only
 > drives UDF execution. When a UDF "connects back" to the database it opens a
 > *separate, ordinary SQL login* (via exarrow-rs) — see the
-> [write-back guide](write-back-guide.md). Don't conflate the two.
+> [connect-back guide](writing-a-udf.md#8-connect-back). Don't conflate the two.
 
 ## Transport: one ZMQ REQ/REP socket
 

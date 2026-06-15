@@ -58,7 +58,7 @@ UDF authors do **not** depend on `exa-udf-runtime` directly. Operators who build
 
 ```toml
 [dependencies]
-exa-udf-runtime = { version = "0.7" }
+exa-udf-runtime = { version = "0.8" }
 ```
 
 Feature `connect-back` adds an embedded Tokio runtime and the ADBC/exarrow-rs connect-back implementation.
