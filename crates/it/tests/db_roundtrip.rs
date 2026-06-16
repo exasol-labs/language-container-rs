@@ -112,6 +112,8 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario json_parse ok");
     udf_error_surfaces_prefix(&mut conn).await?;
     eprintln!("[it] scenario udf_error ok");
+    udf_error_message_reaches_db(&mut conn).await?;
+    eprintln!("[it] scenario udf_error_message ok");
 
     // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
@@ -286,6 +288,27 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
             let msg = e.to_string();
             if !msg.contains("F-UDF-CL-RUST-") {
                 bail!("error did not contain F-UDF-CL-RUST- prefix: {msg}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Scenario 8.8: the UDF-supplied error text propagates all the way to the SQL
+/// error message, not just the `F-UDF-CL-RUST-` prefix. `json_field` is already
+/// registered by `json_parse_extracts_name`; calling it with invalid JSON should
+/// produce a SQL error that contains "JSON parse error" — the distinctive text
+/// returned by `UdfError::User(format!("JSON parse error: ..."))` inside the UDF.
+/// This proves the runtime threads the error string from the ABI `error_out`
+/// parameter through the protobuf error-close path to the client.
+async fn udf_error_message_reaches_db(conn: &mut Connection) -> Result<()> {
+    let result = conn.query("SELECT json_field('not valid json')").await;
+    match result {
+        Ok(_) => bail!("expected UDF error, query succeeded"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("JSON parse error") {
+                bail!("error did not contain 'JSON parse error': {msg}");
             }
             Ok(())
         }

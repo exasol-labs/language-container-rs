@@ -71,3 +71,12 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 * *WHEN* the crate is compiled as a cdylib
 * *THEN* the `virtual_schema_adapter_call` vtable slot MUST be `None`
 * *AND* the runtime MUST reply `MT_UNDEFINED_CALL` when the DB invokes `SC_FN_VIRTUAL_SCHEMA_ADAPTER_CALL`, preserving backward compatibility with UDFs compiled before this change
+
+### Scenario: Run shim surfaces UDF error text via an out-pointer parameter
+
+* *GIVEN* the `ExaUdfVTable.run` slot and the `#[exasol_udf]` generated run shim
+* *WHEN* a UDF function returns `Err(UdfError)` from `run`
+* *THEN* the `ExaUdfVTable.run` function pointer signature MUST take a second parameter `error_out: *mut *mut c_char` in addition to the existing `ctx: *mut c_void`
+* *AND* `EXA_UDF_ABI_VERSION` MUST be bumped because the vtable `run` layout changed, so the host rejects `.so` files built against the previous ABI
+* *AND* the generated run shim MUST, on the `Err(e)` arm and when `error_out` is non-null, write a heap-allocated, caller-freed C string holding the error's display text to `*error_out` before returning the non-zero error code; ownership of the allocation follows the `malloc`/`libc::free` C-allocator convention used by all other vtable result strings
+* *AND* the `UdfContext` trait MUST NOT gain any new method for this purpose, so existing host bridge `UdfContext` implementations and their connect-back `last_error` plumbing are unchanged

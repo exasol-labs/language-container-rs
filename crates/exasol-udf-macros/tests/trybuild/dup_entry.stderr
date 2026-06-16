@@ -1,3 +1,15 @@
+error[E0428]: the name `__exa_write_c_string` is defined multiple times
+ --> tests/trybuild/dup_entry.rs:11:1
+  |
+ 6 | #[exasol_udf]
+   | ------------- previous definition of the value `__exa_write_c_string` here
+...
+11 | #[exasol_udf]
+   | ^^^^^^^^^^^^^ `__exa_write_c_string` redefined here
+   |
+   = note: `__exa_write_c_string` must be defined only once in the value namespace of this module
+   = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0428]: the name `__exa_run_shim` is defined multiple times
  --> tests/trybuild/dup_entry.rs:11:1
   |

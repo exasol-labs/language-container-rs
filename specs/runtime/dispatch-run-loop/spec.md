@@ -1,10 +1,10 @@
-# Feature: host-dispatch
+# Feature: dispatch-run-loop
 
-Orchestrates loading a UDF `.so`, building the host-side `UdfContext` bridge, and dispatching the database execution model — scalar/set run loops and single-call functions — over the wire protocol. The connect-back host implementation is specified separately in `runtime/connect-back`.
+Orchestrates loading a UDF `.so` and driving the scalar/set run loop over the wire protocol — covering loader validation, artifact resolution, bridge row materialisation, emit buffering, and UDF error propagation. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
 
 ## Background
 
-The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks and load-time validation of typed `#[exasol_udf(input(...), emits(...))]` schemas against the database metadata. ABI v3 changes the `virtual_schema_adapter_call` dispatch to pass a `SingleCallContext` through the double-indirected `*mut c_void` ABI, so VS adapters can resolve CONNECTION credentials and open connect-back sessions mid single-call. The rowset codec (`InputRowSet`/`EmitBuffer`) switches from column-major packing with NULL placeholders to row-major packing where NULL cells occupy no slot in their type block, and output values are packed by declared column `ExaType` rather than by runtime `Value` variant.
+The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). The rowset codec (`InputRowSet`/`EmitBuffer`) switches from column-major packing with NULL placeholders to row-major packing where NULL cells occupy no slot in their type block, and output values are packed by declared column `ExaType` rather than by runtime `Value` variant.
 
 ## Scenarios
 
@@ -73,42 +73,6 @@ The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK 
 * *THEN* it MUST serialize the error message into the protocol close path with the `F-UDF-CL-RUST-` prefix
 * *AND* it MUST call the vtable `destroy` and drop the `Library` before returning failure
 
-### Scenario: Single-call mode routes to the single-call dispatcher
-
-* *GIVEN* an `MT_META` whose `single_call_mode` is true and whose `single_call_function_id` is `SC_FN_DEFAULT_OUTPUT_COLUMNS`
-* *WHEN* the runtime begins dispatch after loading the `.so`
-* *THEN* the runtime MUST route to the single-call dispatcher rather than the scalar/set run loop
-* *AND* it MUST NOT send `MT_RUN` for that session
-
-### Scenario: Single-call dispatch invokes the matching vtable hook and returns
-
-* *GIVEN* a loaded UDF whose vtable implements `default_output_columns`
-* *WHEN* the single-call dispatcher receives a `HostEvent::SingleCall` with `Sc_Fn_Default_Output_Columns`
-* *THEN* it MUST invoke the `default_output_columns` vtable hook with the call payload
-* *AND* it MUST reply with `HostAction::SingleCallReturn` carrying the hook result
-
-### Scenario: Unimplemented single-call hook replies MT_UNDEFINED_CALL
-
-* *GIVEN* a loaded UDF whose vtable leaves `generate_sql_for_export_spec` unimplemented
-* *WHEN* the single-call dispatcher receives a `HostEvent::SingleCall` with `Sc_Fn_Generate_Sql_For_Export_Spec`
-* *THEN* the hook MUST return `UdfError::Unimplemented`
-* *AND* the dispatcher MUST reply with `HostAction::UndefinedCall`
-
-### Scenario: Virtual-schema adapter call is dispatched to the adapter hook
-
-* *GIVEN* a loaded UDF whose vtable implements `virtual_schema_adapter_call`
-* *WHEN* the single-call dispatcher receives a `HostEvent::SingleCall` with `Sc_Fn_Virtual_Schema_Adapter_Call` carrying a request string
-* *THEN* the dispatcher MUST construct a `SingleCallContext` and pass a double-indirected `*mut c_void` context pointer to the hook
-* *AND* it MUST invoke the `virtual_schema_adapter_call` hook with `(ctx_ptr, json_payload, result)` via `call_ctx_arg_hook`
-* *AND* on success it MUST reply with `HostAction::SingleCallReturn` carrying the adapter response string
-
-### Scenario: Annotated schema is validated against the database metadata at load
-
-* *GIVEN* a UDF annotated `#[exasol_udf(input(x: i64), emits(result: i64))]`
-* *WHEN* the runtime loads the UDF and compares the annotated schema to the `exascript_metadata` column definitions
-* *THEN* a mismatch in column count or `ExaType` MUST close the session with a prefixed `F-UDF-CL-RUST-####` error describing the expected and actual schema
-* *AND* a matching schema MUST allow dispatch to proceed
-
 ### Scenario: EmitBuffer packs output values row-major by declared column type
 
 * *GIVEN* an `EmitBuffer` holding rows where a column's declared `ExaType` differs from the runtime `Value` variant (e.g. `ExaType::Numeric` with `Value::Int64`)
@@ -123,3 +87,11 @@ The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK 
 * *WHEN* `InputRowSet::from_proto` decodes the table
 * *THEN* it MUST reconstruct the original row/column values by advancing per-type cursors only for non-null cells
 * *AND* the decoded rows MUST match the values that were emitted, preserving column types according to the declared metadata
+
+### Scenario: Dispatch reads UDF error text from the run out-pointer
+
+* *GIVEN* `run_batch` calling the vtable `run` with the context pointer and an `error_out` out-pointer initialized to null
+* *WHEN* the UDF run shim returns a non-zero code and has written a heap-allocated C string to `*error_out`
+* *THEN* dispatch MUST read the C string from the out-pointer when it is non-null and take ownership so the allocation is freed exactly once, using `libc::free` consistent with the `malloc`/`libc::free` C-allocator convention
+* *AND* dispatch MUST incorporate the recovered text into the `RuntimeError::Udf` message it returns, so the DB error-close path surfaces the UDF-supplied error text rather than only the generic error code
+* *AND* dispatch MUST NOT rely on `take_last_error` for this path, leaving the connect-back `last_error` channel unchanged

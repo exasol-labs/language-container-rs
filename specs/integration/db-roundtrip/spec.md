@@ -1,10 +1,10 @@
 # Feature: db-roundtrip
 
-Exercises the full Rust SLC against a live Exasol container across the supported version matrix — registering the slim SLC, uploading the UDF artifact to BucketFS, and invoking UDFs end-to-end to prove the wire protocol, dispatch, and SDK behave correctly against a real database. Connect-back end-to-end scenarios are specified separately in `integration/connect-back`.
+Exercises the full Rust SLC against a live Exasol container across the supported version matrix — registering the slim SLC, uploading the UDF artifact to BucketFS, and invoking UDFs end-to-end to prove the wire protocol, dispatch, and SDK behave correctly against a real database. Error and failure scenarios are specified separately in `integration/db-roundtrip-error-handling`. Connect-back end-to-end scenarios are specified separately in `integration/connect-back`.
 
 ## Background
 
-The integration harness starts an `exasol/docker-db:<version>` container, registers the slim SLC, and uploads UDF `.so` artifacts to BucketFS with SSL verification disabled per project rules. The database version is selected at runtime by the `EXASOL_DB_SERIES` env var (`2025-1`, `2025-2`, `2026-1`); when unset it falls back to the series the binary was compiled with (default `2026-1`). A single `it-runner` binary, compiled once, drives every version in the matrix. The DNS-gate scenario requires outbound network access from the runner so the external hostname resolves.
+The integration harness starts an `exasol/docker-db:<version>` container, registers the slim SLC, and uploads UDF `.so` artifacts to BucketFS with SSL verification disabled per project rules. The database version is selected at runtime by the `EXASOL_DB_SERIES` env var (`2025-1`, `2025-2`, `2026-1`); when unset it falls back to the series the binary was compiled with (default `2026-1`). A single `it-runner` binary, compiled once, drives every version in the matrix. The DNS-gate scenario requires outbound network access from the runner so the external hostname resolves. Error and failure scenarios — including error-prefix verification and UDF error message content — are specified separately in `integration/db-roundtrip-error-handling`.
 
 Before registering the Rust SLC, the harness runs an optional non-fatal Python3 built-in connect-back diagnostic. This diagnostic creates its own `CONNECTION`/`SCRIPT` objects (which are DB-global and persist regardless of session) and exercises connect-back via `connect_back_sql_address()`. Critically, the diagnostic runs on a DEDICATED throwaway connection, distinct from the shared connection that drives the asserted scenarios. If the diagnostic triggers a UDF VM crash (e.g. via a bad address), that crash is caught and logged as non-fatal; it MUST NOT affect the shared connection. The `CONNECTION` and `SCRIPT` objects created by the diagnostic are global and remain available for the asserted scenarios, even though the throwaway connection is closed immediately after.
 
@@ -54,12 +54,6 @@ The pre-existing non-connect-back scenarios in this feature — `sanity_select_o
 * *WHEN* the harness runs `json_field('{"name":"exa"}')`
 * *THEN* the query MUST return `exa`
 * *AND* the UDF MUST execute without any system-level `serde_json` library present in the slim image
-
-### Scenario: UDF runtime error surfaces a prefixed message
-
-* *GIVEN* a registered Rust UDF whose body returns an error for a given input
-* *WHEN* the harness runs a query that triggers the error
-* *THEN* the query MUST fail with an error message containing the `F-UDF-CL-RUST-` prefix
 
 ### Scenario: Single-call default-output-columns roundtrip returns a schema
 

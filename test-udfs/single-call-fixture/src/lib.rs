@@ -23,7 +23,7 @@ unsafe fn write_result(value: &str, out: *mut *mut c_char) {
     }
 }
 
-unsafe extern "C" fn run_shim(_ctx: *mut std::ffi::c_void) -> i32 {
+unsafe extern "C" fn run_shim(_ctx: *mut std::ffi::c_void, _error_out: *mut *mut c_char) -> i32 {
     0
 }
 

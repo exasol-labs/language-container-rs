@@ -178,9 +178,14 @@ fn run_batch(
         // `&mut *(ctx as *mut &mut dyn UdfContext)`.
         let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
         let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-        let rc = unsafe { udf.run(ctx_ptr) };
+        let mut error_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
+        let rc = unsafe { udf.run(ctx_ptr, &mut error_ptr as *mut *mut std::ffi::c_char) };
         if rc != 0 {
-            let extra = bridge.take_last_error();
+            let extra = if !error_ptr.is_null() {
+                Some(unsafe { crate::single_call::take_c_string(error_ptr) })
+            } else {
+                None
+            };
             let msg = match extra {
                 Some(e) => format!("UDF run returned error code {rc}: {e}"),
                 None => format!("UDF run returned error code {rc}"),

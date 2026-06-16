@@ -70,9 +70,20 @@ impl LoadedUdf {
     ///
     /// `ctx_ptr` must be a pointer to a live `&mut dyn UdfContext` (double
     /// indirection) per the ABI contract in `exasol_udf_sdk::abi`.
-    pub unsafe fn run(&self, ctx_ptr: *mut std::ffi::c_void) -> i32 {
+    ///
+    /// `error_out` is a host-owned out-pointer to a `*mut c_char` initialised to
+    /// null. On the user-error path the shim may write a `malloc`-allocated,
+    /// NUL-terminated C string into it; the caller then owns and frees that
+    /// string via `libc::free` (the C-allocator convention shared with the
+    /// other single-call result strings). On the success and panic paths it is
+    /// left untouched.
+    pub unsafe fn run(
+        &self,
+        ctx_ptr: *mut std::ffi::c_void,
+        error_out: *mut *mut std::ffi::c_char,
+    ) -> i32 {
         let vtable = unsafe { &*self.vtable };
-        unsafe { (vtable.run)(ctx_ptr) }
+        unsafe { (vtable.run)(ctx_ptr, error_out) }
     }
 
     /// Invoke the UDF's `destroy`. Idempotency is the UDF's responsibility.

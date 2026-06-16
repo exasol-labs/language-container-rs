@@ -1,7 +1,7 @@
 use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout changes
-pub const EXA_UDF_ABI_VERSION: u32 = 3;
+pub const EXA_UDF_ABI_VERSION: u32 = 4;
 
 /// The fingerprint string baked in at SDK build time; injected by build.rs.
 /// Format: "SDK_VERSION:RUSTC_HASH\0". The build script supplies the
@@ -24,7 +24,16 @@ pub struct ExaUdfVTable {
     /// `&mut r as *mut _ as *mut c_void`. The run shim restores it via
     /// `&mut *(ctx as *mut &mut dyn UdfContext)`. The UDF must not store the
     /// pointer beyond this call. Returns 0 = ok, 1 = user error, 2 = panic.
-    pub run: unsafe extern "C" fn(ctx: *mut std::ffi::c_void) -> i32,
+    ///
+    /// `error_out` is a pointer to a caller-provided `*mut c_char` initialised
+    /// to null. On the error-return path (`1`) the shim MAY write a
+    /// `malloc`-allocated, NUL-terminated C string into `*error_out`; the host
+    /// then takes ownership of that string and frees it with `libc::free` — the
+    /// same C-allocator convention as the other single-call result strings, so
+    /// the `.so`'s and host's separately-linked Rust allocators are never
+    /// mixed. On the `0` and `2` return paths the shim leaves `*error_out`
+    /// untouched (null).
+    pub run: unsafe extern "C" fn(ctx: *mut std::ffi::c_void, error_out: *mut *mut c_char) -> i32,
     /// Destroy the UDF instance (called after run). No-op for v1 stateless UDFs.
     pub destroy: unsafe extern "C" fn(),
     /// Single-call hook: emit the default output columns as a JSON string.
@@ -70,7 +79,7 @@ mod tests {
 
     #[test]
     fn abi_version_and_vtable_layout() {
-        assert_eq!(EXA_UDF_ABI_VERSION, 3);
+        assert_eq!(EXA_UDF_ABI_VERSION, 4);
         assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
         let _ = EXA_SDK_FINGERPRINT;
     }
@@ -79,7 +88,10 @@ mod tests {
     fn vtable_layout_includes_vs_adapter() {
         // A vtable with all single-call hooks absent and no annotated schema
         // must still be constructible — the new fields are all nullable.
-        unsafe extern "C" fn run_stub(_ctx: *mut std::ffi::c_void) -> i32 {
+        unsafe extern "C" fn run_stub(
+            _ctx: *mut std::ffi::c_void,
+            _error_out: *mut *mut c_char,
+        ) -> i32 {
             0
         }
         unsafe extern "C" fn destroy_stub() {}
@@ -137,7 +149,10 @@ mod tests {
             unsafe { *result = buf };
             0
         }
-        unsafe extern "C" fn run_stub(_ctx: *mut std::ffi::c_void) -> i32 {
+        unsafe extern "C" fn run_stub(
+            _ctx: *mut std::ffi::c_void,
+            _error_out: *mut *mut c_char,
+        ) -> i32 {
             0
         }
         unsafe extern "C" fn destroy_stub() {}
@@ -171,6 +186,6 @@ mod tests {
     #[test]
     fn connect_back_feature_compiles() {
         // Verifies the crate compiles with the connect-back feature enabled.
-        assert_eq!(EXA_UDF_ABI_VERSION, 3);
+        assert_eq!(EXA_UDF_ABI_VERSION, 4);
     }
 }
