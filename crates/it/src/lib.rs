@@ -21,9 +21,6 @@ pub const DB_PORT: u16 = 8563;
 pub const BUCKETFS_PORT: u16 = 2581;
 /// Image holding the database under test. Pinned per project rules.
 pub const DB_IMAGE: &str = "exasol/docker-db";
-/// Slim Rust SLC image built earlier in the pipeline.
-pub const SLC_IMAGE: &str = "slc-rs-slim:dev";
-
 /// The database version series currently under test.
 ///
 /// Reads `EXASOL_DB_SERIES`; if unset, falls back to the compiled default feature.
@@ -204,19 +201,21 @@ impl Harness {
         .context("BucketFS upload task panicked")?
     }
 
-    /// Export the locally built slim SLC image as a flat-filesystem `.tar.gz`
-    /// and push it into BucketFS under `slc/<name>.tar.gz`.
-    ///
-    /// Exasol extracts archives uploaded to BucketFS, so the container-name in
-    /// the language URL is the file name *without* the `.tar.gz` suffix. An SLC
-    /// must be a flattened root filesystem (`/exaudf/exaudfclient`), which is
-    /// what `docker export` produces — `docker save` would yield OCI layers
-    /// that BucketFS cannot use.
+    /// Read the prebuilt SLC tarball from `SLC_TARBALL` and push it into
+    /// BucketFS under `slc/<name>.tar.gz`.
     pub async fn load_slc(&self) -> Result<SlcRef> {
         let name = "rustslc";
-        let tarball = tokio::task::spawn_blocking(|| export_image_filesystem(SLC_IMAGE))
-            .await
-            .context("image-export task panicked")??;
+        let path = std::env::var("SLC_TARBALL").map_err(|_| {
+            anyhow!(
+                "SLC_TARBALL is not set; build the tarball first:\n  \
+                 docker build -f Dockerfile.alpine --target artifact \
+                 --output type=local,dest=<dir> .\n  \
+                 then: export SLC_TARBALL=<dir>/slc-rs.tar.gz\n  \
+                 or run: scripts/ci-it-local.sh"
+            )
+        })?;
+        let tarball =
+            std::fs::read(&path).with_context(|| format!("reading SLC_TARBALL at {path:?}"))?;
         self.upload_to_bucketfs(&format!("slc/{name}.tar.gz"), tarball)
             .await?;
         Ok(SlcRef {
@@ -472,45 +471,6 @@ fn decode_base64(input: &str) -> Result<String> {
         }
     }
     Ok(String::from_utf8(out)?)
-}
-
-/// `docker export` a fresh container of `image` into a gzipped flat-fs tarball.
-///
-/// The `export | gzip` pipeline runs inside a single shell so the OS streams
-/// the multi-hundred-megabyte tar between the two processes. Doing the gzip
-/// in-process would require concurrently writing stdin and draining stdout to
-/// avoid a pipe-buffer deadlock; delegating to the shell sidesteps that.
-fn export_image_filesystem(image: &str) -> Result<Vec<u8>> {
-    let create = Command::new("docker")
-        .args(["create", image])
-        .output()
-        .context("docker create")?;
-    if !create.status.success() {
-        bail!(
-            "docker create {image} failed: {}",
-            String::from_utf8_lossy(&create.stderr)
-        );
-    }
-    let cid = String::from_utf8(create.stdout)?.trim().to_string();
-
-    let result = (|| -> Result<Vec<u8>> {
-        let out = Command::new("bash")
-            .arg("-c")
-            .arg(format!("set -o pipefail; docker export {cid} | gzip -c"))
-            .output()
-            .context("docker export | gzip")?;
-        if !out.status.success() {
-            bail!(
-                "docker export {cid} | gzip failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Ok(out.stdout)
-    })();
-
-    // Always clean up the throwaway container, regardless of export outcome.
-    let _ = Command::new("docker").args(["rm", "-f", &cid]).output();
-    result
 }
 
 #[cfg(test)]

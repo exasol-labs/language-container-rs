@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the SLC Docker image, export it to BucketFS, and register the RUST
+# Build the SLC tarball, upload it to BucketFS, and register the RUST
 # script language in an Exasol instance.
 set -euo pipefail
 
@@ -37,7 +37,7 @@ Options:
       --bfs-service NAME     BucketFS service name   (default: bfsdefault)
       --slc-name NAME        SLC name in BucketFS    (default: rustslc)
       --scope SESSION|SYSTEM ALTER scope             (default: SESSION)
-      --skip-build           Skip docker build; use existing slc-rs-slim:dev
+      --skip-build           Skip docker build; use SLC_TARBALL if set
   -h, --help                 Show this help
 
 Examples:
@@ -84,24 +84,26 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── step 1: build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "==> Building slc-rs-slim:dev …"
+  echo "==> Building SLC tarball (--target artifact) …"
+  TMP_DIR=$(mktemp -d /tmp/slc-XXXXXX)
+  trap 'rm -rf "$TMP_DIR"' EXIT
   docker build \
     -f "$REPO_ROOT/Dockerfile.alpine" \
-    -t slc-rs-slim:dev \
+    --target artifact \
+    --output "type=local,dest=$TMP_DIR" \
     "$REPO_ROOT"
+  TMP_TAR="$TMP_DIR/slc-rs.tar.gz"
   echo "==> Build complete."
 else
-  echo "==> Skipping build (--skip-build); using existing slc-rs-slim:dev."
+  echo "==> Skipping build (--skip-build); using SLC_TARBALL=${SLC_TARBALL:-<unset>}."
+  if [[ -z "${SLC_TARBALL:-}" ]]; then
+    echo "error: --skip-build requires SLC_TARBALL to be set" >&2; exit 1
+  fi
+  TMP_TAR="$SLC_TARBALL"
 fi
 
-# ── step 2: export container filesystem ───────────────────────────────────────
-echo "==> Exporting container filesystem …"
-TMP_TAR=$(mktemp /tmp/slc-XXXXXX.tar.gz)
-trap 'rm -f "$TMP_TAR"' EXIT
-CID=$(docker create slc-rs-slim:dev)
-docker export "$CID" | gzip > "$TMP_TAR"
-docker rm "$CID" > /dev/null
-echo "==> Exported to $TMP_TAR ($(du -sh "$TMP_TAR" | cut -f1))."
+# ── step 2: report tarball ─────────────────────────────────────────────────────
+echo "==> Tarball ready: $TMP_TAR ($(du -sh "$TMP_TAR" | cut -f1))."
 
 # ── step 3: upload to BucketFS ────────────────────────────────────────────────
 BFS_PATH="slc/${SLC_NAME}.tar.gz"

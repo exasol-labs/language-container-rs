@@ -68,7 +68,8 @@ jobs:
             -p connect-back-cluster-ip \
             -p connect-back-query \
             -p connect-back-insert \
-            -p connect-back-crunch
+            -p connect-back-crunch \
+            -p resolv-udf
 
       - name: Build IT test binary (compile once)
         run: |
@@ -203,28 +204,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build the SLC image but DO NOT push it to any registry. Load it into the
-      # local daemon and hand it to downstream jobs as a GitHub Actions artifact.
-      # (cache-to: type=gha is the Actions *build cache*, not a registry push.)
-      - name: Build SLC image (no registry push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.alpine
-          push: false
-          load: true
-          tags: slc-rs-slim:dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Build the SLC artifact tarball (packager stage bakes the /conf resolver
+      # symlinks; artifact stage exposes slc-rs.tar.gz for --output extraction).
+      - name: Build SLC tarball (--target artifact)
+        run: |
+          mkdir -p /tmp/slc-out
+          docker build -f Dockerfile.alpine --target artifact \
+            --output type=local,dest=/tmp/slc-out .
 
-      - name: Save SLC image as artifact
-        run: docker save slc-rs-slim:dev -o slc-image.tar
-
-      - name: Upload SLC image
+      - name: Upload SLC tarball
         uses: actions/upload-artifact@v4
         with:
-          name: slc-image
-          path: slc-image.tar
+          name: slc-tarball
+          path: /tmp/slc-out/slc-rs.tar.gz
 
   # ── viability gate: integration matrix over Exasol DB versions ───────────
   integration:
@@ -286,13 +278,10 @@ jobs:
         with:
           name: it-test
 
-      - name: Download SLC image
+      - name: Download SLC tarball
         uses: actions/download-artifact@v4
         with:
-          name: slc-image
-
-      - name: Load SLC image
-        run: docker load -i slc-image.tar
+          name: slc-tarball
 
       # Cache the (multi-GB) Exasol DB image per matrix version so each leg
       # loads it from a tarball instead of re-pulling from Docker Hub every run.
@@ -396,6 +385,7 @@ jobs:
 
       - name: Run integration tests
         env:
+          SLC_TARBALL: slc-rs.tar.gz
           EXASOL_VERSION: ${{ matrix.exasol_version }}
           EXASOL_DB_SERIES: ${{ matrix.db_series }}
           EXASOL_HOST: localhost
@@ -478,24 +468,17 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download SLC image
+      - name: Download SLC tarball
         if: steps.check.outputs.exists == 'false'
         uses: actions/download-artifact@v4
         with:
-          name: slc-image
+          name: slc-tarball
 
-      # Produce the BucketFS-ready SLC: a flattened root filesystem (what Exasol
-      # extracts and runs as /exaudf/exaudfclient), exactly as scripts/install.sh
-      # builds it — `docker export` of a container, NOT `docker save` (which
-      # yields OCI layers BucketFS cannot use).
-      - name: Export SLC filesystem tarball
+      - name: Rename SLC tarball for release
         if: steps.check.outputs.exists == 'false'
         run: |
-          docker load -i slc-image.tar
           VER="${{ steps.version.outputs.version }}"
-          cid=$(docker create slc-rs-slim:dev)
-          docker export "$cid" | gzip -c > "slc-rust-${VER}.tar.gz"
-          docker rm "$cid"
+          cp slc-rs.tar.gz "slc-rust-${VER}.tar.gz"
           ls -la "slc-rust-${VER}.tar.gz"
 
       - name: Create and push tag

@@ -6,6 +6,8 @@ Packages the `exaudfclient` binary into a slim Alpine-based SLC Docker image (Op
 
 The slim image is a multi-stage build: a `rust:1.91-bookworm` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`), then copies the glibc runtime libs (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libstdc++.so.6`, `ld-linux-x86-64.so.2`, NSS modules) with `cp -L` into an `alpine:3` runtime stage. The runtime stage ships only `ca-certificates` and the bundled glibc, placing the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The `exaudfclient` binary is glibc-linked — it runs on the Debian/glibc Exasol host after BucketFS extraction; Alpine serves as the packaging layer only.
 
+The SLC is distributed as a flattened root-filesystem tarball that Exasol extracts after BucketFS upload, with the executable at `/exaudf/exaudfclient`. For DNS to work inside the UDF sandbox, the tarball must present `/etc/hosts` and `/etc/resolv.conf` as symlinks into `/conf/`, which the database populates at runtime. These symlinks cannot be baked as live symlinks in the image layers (`COPY` dereferences a dangling symlink into a 0-byte file; `RUN ln -sf` hits Docker's build-time bind-mount of those two paths), so they are created in a staging directory and tarred inside the Docker build itself.
+
 ## Scenarios
 
 ### Scenario: docker build produces a tagged slim image
@@ -75,3 +77,11 @@ The slim image is a multi-stage build: a `rust:1.91-bookworm` builder compiles `
 * *WHEN* the compressed and on-disk sizes of both images are measured with `docker image inspect`
 * *THEN* the Alpine image on-disk size MUST be smaller than the Debian slim image
 * *AND* the measured size delta MUST be recorded in the plan's spike notes
+
+### Scenario: SLC tarball ships the /conf resolver symlinks
+
+* *GIVEN* the SLC distribution tarball produced from `Dockerfile.alpine` by the Docker build alone, without any host-side post-processing step
+* *WHEN* the entries for `etc/hosts` and `etc/resolv.conf` are inspected
+* *THEN* `etc/hosts` MUST be a symbolic-link entry pointing to `/conf/hosts`
+* *AND* `etc/resolv.conf` MUST be a symbolic-link entry pointing to `/conf/resolv.conf`
+* *AND* producing the tarball MUST NOT require any interpreter or tool outside the Docker build environment (no host `python3`)

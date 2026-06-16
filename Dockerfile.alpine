@@ -66,3 +66,23 @@ RUN chmod +x /exaudf/exaudfclient
 COPY build_info/ /build_info/
 
 ENTRYPOINT ["/exaudf/exaudfclient"]
+
+# Stage 3: Packager — bake resolver symlinks into the SLC tarball
+FROM runtime AS packager
+
+RUN mkdir -p /slc && \
+    tar -C / --exclude='./slc' \
+              --exclude='./etc/hosts' \
+              --exclude='./etc/resolv.conf' \
+              --exclude='./proc' \
+              --exclude='./sys' \
+              --exclude='./dev' \
+              -cf - . | tar -C /slc -xf - && \
+    ln -sf /conf/hosts /slc/etc/hosts && \
+    ln -sf /conf/resolv.conf /slc/etc/resolv.conf && \
+    tar -C /slc -czf /slc-rs.tar.gz .
+
+# Stage 4: Artifact — expose the SLC tarball for docker build --output
+FROM scratch AS artifact
+
+COPY --from=packager /slc-rs.tar.gz /
