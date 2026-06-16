@@ -7,20 +7,15 @@
 ![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
 
-A pure-Rust Exasol Language Container that executes precompiled `.so` UDFs from BucketFS via the native ZMQ+Protobuf SLC protocol.
+A pure-Rust Exasol Language Container that executes precompiled `.so` UDFs from BucketFS.
 
 </div>
 
 ## What it is
 
-[Exasol](https://www.exasol.com) is a high-performance analytic database built for speed and scalability. You can try it immediately with the [SaaS free trial](https://cloud.exasol.com) or spin up a local instance using the [Docker image](https://hub.docker.com/r/exasol/docker-db).
+[Exasol](https://www.exasol.com) is a high-performance analytic database built for speed and scalability. You can try it immediately with [Exasol Personal](https://github.com/exasol/exasol-personal), the [SaaS free trial](https://cloud.exasol.com) or spin up a local [Docker image](https://hub.docker.com/r/exasol/docker-db).
 
 `language-container-rs` is the Rust Language Container for Exasol. It lets data engineers write UDFs in Rust — compiled to `.so` shared libraries, uploaded to BucketFS once, and loaded at query time. Third-party crates are statically linked into the `.so`, so adding a dependency never requires redeploying the language container.
-
-Two further capabilities ship out of the box:
-
-- **Connect-back** — a UDF can open an ADBC session back to Exasol mid-execution and stream Apache Arrow record batches to or from the database.
-- **Cluster distribution** — Exasol executes SET UDFs on every node in parallel. Grouping by [`IPROC()`](https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/iproc.htm) pins each group to the node that owns the data, saturating the full cluster with a single query.
 
 The workspace ships three crates for UDF authors, container operators, and build tooling — plus the protocol layer that wires them together.
 
@@ -29,7 +24,7 @@ The workspace ships three crates for UDF authors, container operators, and build
 - **Docker** — to build the language container image
 - **[exapump](https://github.com/exasol-labs/exapump)** — to upload to BucketFS and run SQL
 - **Rust 1.92+** with `cargo` — to compile UDFs
-- An Exasol instance: [SaaS free trial](https://cloud.exasol.com), [Docker image](https://hub.docker.com/r/exasol/docker-db), or enterprise
+- An Exasol instance: [Exasol Personal](https://github.com/exasol/exasol-personal), [SaaS free trial](https://cloud.exasol.com), or [Docker image](https://hub.docker.com/r/exasol/docker-db)
 
 ## Install the language container
 
