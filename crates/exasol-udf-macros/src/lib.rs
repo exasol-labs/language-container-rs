@@ -149,7 +149,35 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         #input_schema_static
         #output_schema_static
 
-        unsafe extern "C" fn __exa_run_shim(ctx_ptr: *mut ::std::ffi::c_void) -> i32 {
+        // Hand a Rust string to the host through a `malloc`-backed buffer; the
+        // host frees it with `libc::free`, so allocation and deallocation cross
+        // the FFI boundary entirely through the C allocator — never mixing the
+        // `.so`'s and host's separately-linked Rust global allocators (which
+        // would be heap corruption for statically-linked musl `.so`s). Shared
+        // by both `__exa_run_shim` and the optional vs_adapter shim.
+        unsafe fn __exa_write_c_string(value: &str, out: *mut *mut ::std::ffi::c_char) {
+            unsafe extern "C" {
+                fn malloc(size: usize) -> *mut ::std::ffi::c_void;
+            }
+            // Replace interior NULs so the C string stays intact.
+            let sanitized = value.replace('\0', "\u{fffd}");
+            let len = sanitized.len() + 1;
+            let buf = unsafe { malloc(len) } as *mut u8;
+            if buf.is_null() {
+                unsafe { *out = ::std::ptr::null_mut() };
+                return;
+            }
+            unsafe {
+                ::std::ptr::copy_nonoverlapping(sanitized.as_ptr(), buf, sanitized.len());
+                *buf.add(sanitized.len()) = 0;
+                *out = buf as *mut ::std::ffi::c_char;
+            }
+        }
+
+        unsafe extern "C" fn __exa_run_shim(
+            ctx_ptr: *mut ::std::ffi::c_void,
+            error_out: *mut *mut ::std::ffi::c_char,
+        ) -> i32 {
             // The closure captures `ctx_ptr` (a raw pointer), which is not
             // UnwindSafe. AssertUnwindSafe is sound here: nothing observable
             // is left in a broken state after a panic — the shim simply maps
@@ -169,7 +197,17 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             }));
             match result {
                 ::std::result::Result::Ok(::std::result::Result::Ok(())) => 0,
-                ::std::result::Result::Ok(::std::result::Result::Err(_)) => 1,
+                ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
+                    if !error_out.is_null() {
+                        unsafe {
+                            __exa_write_c_string(
+                                &::std::string::ToString::to_string(&e),
+                                error_out,
+                            );
+                        }
+                    }
+                    1
+                }
                 ::std::result::Result::Err(_) => 2,
             }
         }
@@ -215,28 +253,6 @@ fn build_vs_adapter_tokens(path: Option<&Path>) -> (TokenStream2, TokenStream2) 
                     json_arg: *const ::std::ffi::c_char,
                     result: *mut *mut ::std::ffi::c_char,
                 ) -> i32 {
-                    // Hand a Rust string to the runtime through a `malloc`-backed
-                    // buffer; the runtime frees it with `free`, so allocation
-                    // crosses the boundary entirely through the C allocator.
-                    unsafe fn __exa_write_result(value: &str, out: *mut *mut ::std::ffi::c_char) {
-                        unsafe extern "C" {
-                            fn malloc(size: usize) -> *mut ::std::ffi::c_void;
-                        }
-                        // Replace interior NULs so the C string stays intact.
-                        let sanitized = value.replace('\0', "\u{fffd}");
-                        let len = sanitized.len() + 1;
-                        let buf = unsafe { malloc(len) } as *mut u8;
-                        if buf.is_null() {
-                            unsafe { *out = ::std::ptr::null_mut() };
-                            return;
-                        }
-                        unsafe {
-                            ::std::ptr::copy_nonoverlapping(sanitized.as_ptr(), buf, sanitized.len());
-                            *buf.add(sanitized.len()) = 0;
-                            *out = buf as *mut ::std::ffi::c_char;
-                        }
-                    }
-
                     let outcome = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                         // SAFETY: double-indirection ABI, identical to __exa_run_shim:
                         // the host passes `&mut (&mut dyn UdfContext)` erased to
@@ -256,15 +272,15 @@ fn build_vs_adapter_tokens(path: Option<&Path>) -> (TokenStream2, TokenStream2) 
 
                     match outcome {
                         ::std::result::Result::Ok(::std::result::Result::Ok(s)) => {
-                            unsafe { __exa_write_result(&s, result) };
+                            unsafe { __exa_write_c_string(&s, result) };
                             0
                         }
                         ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
-                            unsafe { __exa_write_result(&::std::string::ToString::to_string(&e), result) };
+                            unsafe { __exa_write_c_string(&::std::string::ToString::to_string(&e), result) };
                             1
                         }
                         ::std::result::Result::Err(_) => {
-                            unsafe { __exa_write_result("virtual_schema_adapter_call panicked", result) };
+                            unsafe { __exa_write_c_string("virtual_schema_adapter_call panicked", result) };
                             2
                         }
                     }

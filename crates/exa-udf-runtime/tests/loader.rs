@@ -38,13 +38,13 @@ use std::os::raw::c_char;
 pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
-    pub run: unsafe extern "C" fn(*mut c_void) -> i32,
+    pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
     pub destroy: unsafe extern "C" fn(),
 }}
 
 unsafe impl Sync for ExaUdfVTable {{}}
 
-unsafe extern "C" fn run(_ctx: *mut c_void) -> i32 {{ 0 }}
+unsafe extern "C" fn run(_ctx: *mut c_void, _error_out: *mut *mut c_char) -> i32 {{ 0 }}
 unsafe extern "C" fn destroy() {{}}
 
 static FINGERPRINT: &str = "{fingerprint_with_nul}";
