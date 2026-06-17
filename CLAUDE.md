@@ -17,7 +17,7 @@ Project mission in: @specs/mission.md
 
 ## Connect-back
 
-- Use `SET SCRIPT ... EMITS (...)` for any connect-back UDF; **never** `SCALAR` (SCALAR → SIGABRT mid-execution).
+- Both `SCALAR` and `SET` scripts support connect-back; choose whichever UDF type fits the logic.
 - Address must be `<container-eth0-ip>:8563` via `ctx.cluster_ip()`; never `127.0.0.1` or the Docker host gateway (both → SIGABRT). `cluster_ip()` reads the first non-loopback IPv4 via `getifaddrs`; tests get it from `container_inner_ip()`.
 - Connect-back is a plain SQL login using CONNECTION-object credentials, running in its own independent transaction. Read-only is always safe; write-back must not write-write/schema-conflict with the invoking query (else WAIT FOR COMMIT → deadlock abort, Part:40 SIGABRT ~T+11s).
 - Transport (native binary vs WebSocket) is irrelevant — UDF type is the differentiator.

@@ -75,6 +75,7 @@ cargo build --release \
   -p single-call-fixture \
   -p connect-back-cluster-ip \
   -p connect-back-query \
+  -p connect-back-scalar \
   -p connect-back-insert \
   -p connect-back-crunch \
   -p resolv-udf
