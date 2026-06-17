@@ -1,12 +1,48 @@
 # Feature: dispatch-run-loop
 
-Orchestrates driving the scalar/set run loop over the wire protocol — covering bridge row materialisation, emit buffering, UDF error propagation, and connect-back availability. Loader validation and artifact resolution are specified separately in `runtime/dispatch-loader`. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
+Orchestrates loading a UDF `.so` and driving the scalar/set run loop over the wire protocol — covering loader validation, artifact resolution, bridge row materialisation, emit buffering, and UDF error propagation. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
 
 ## Background
 
-The runtime drives dispatch via the pure protocol state machine after a `.so` has been loaded. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). The rowset codec (`InputRowSet`/`EmitBuffer`) switches from column-major packing with NULL placeholders to row-major packing where NULL cells occupy no slot in their type block, and output values are packed by declared column `ExaType` rather than by runtime `Value` variant.
+The runtime loads a precompiled `.so` (Option A), gating on ABI version and SDK fingerprint, then drives dispatch via the pure protocol state machine. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). The rowset codec (`InputRowSet`/`EmitBuffer`) switches from column-major packing with NULL placeholders to row-major packing where NULL cells occupy no slot in their type block, and output values are packed by declared column `ExaType` rather than by runtime `Value` variant.
 
 ## Scenarios
+
+### Scenario: Loader accepts a matching .so and calls create
+
+* *GIVEN* a UDF `.so` built against the host's SDK fingerprint and `abi_version = 1`
+* *WHEN* the loader opens it and resolves `__exa_udf_entry`
+* *THEN* it MUST verify `abi_version` equals `EXA_UDF_ABI_VERSION`
+* *AND* it MUST verify the vtable `sdk_fingerprint` matches the host fingerprint
+* *AND* it MUST call `create` and return a handle holding the `Library` alive
+
+### Scenario: Loader rejects an ABI version mismatch
+
+* *GIVEN* a UDF `.so` whose vtable reports an `abi_version` other than `1`
+* *WHEN* the loader validates the vtable
+* *THEN* it MUST return a clear error identifying the version mismatch
+* *AND* it MUST NOT call `create` or dereference any function pointers
+
+### Scenario: Loader rejects a fingerprint mismatch
+
+* *GIVEN* a UDF `.so` whose vtable `sdk_fingerprint` does not match the host fingerprint
+* *WHEN* the loader validates the vtable
+* *THEN* it MUST return a clear error identifying the fingerprint mismatch rather than producing undefined behavior
+* *AND* it MUST NOT call `create`
+
+### Scenario: Artifact path is parsed from the udf_object option
+
+* *GIVEN* a script source containing `%udf_object /buckets/bfsdefault/default/udfs/libudf.so`
+* *WHEN* the runtime resolves the artifact
+* *THEN* it MUST extract the `.so` path from the `%udf_object` option
+* *AND* it MUST load that path via the loader without invoking the JIT compiler
+
+### Scenario: JIT compilation is unsupported in v1
+
+* *GIVEN* a script source with no `%udf_object` option (JIT path)
+* *WHEN* the runtime attempts to resolve the artifact
+* *THEN* the compiler entry point MUST return an unsupported-feature error
+* *AND* the error MUST be surfaced through the protocol close path with the `F-UDF-CL-RUST-` prefix
 
 ### Scenario: Bridge materializes input rows into typed accessors
 
@@ -60,6 +96,7 @@ The runtime drives dispatch via the pure protocol state machine after a `.so` ha
 * *AND* dispatch MUST incorporate the recovered text into the `RuntimeError::Udf` message it returns, so the DB error-close path surfaces the UDF-supplied error text rather than only the generic error code
 * *AND* dispatch MUST NOT rely on `take_last_error` for this path, leaving the connect-back `last_error` channel unchanged
 
+<!-- DELTA:NEW -->
 ### Scenario: Connect-back is available identically in scalar and set dispatch
 
 * *GIVEN* a runtime driving either a scalar UDF (`iter_type = ExactlyOnce`) or a set UDF (`iter_type = Multiple`) with the connect-back feature enabled
@@ -67,3 +104,4 @@ The runtime drives dispatch via the pure protocol state machine after a `.so` ha
 * *THEN* the runtime MUST handle the connect-back MT_IMPORT exchange and session open identically for both `iter_type` values — there MUST be no scalar-specific restriction, guard, or branch that prevents connect-back in the scalar path
 * *AND* the ZMQ socket MUST be idle during `run` in both cases (blocked awaiting UDF function return), making the MT_IMPORT exchange safe in both scalar and set dispatch
 * *AND* `std::process::exit(0)` in `main()` MUST flush the connect-back Tokio runtime in both scalar and set execution paths, preventing the 10 s join delay and the resulting Part:40 SIGABRT
+<!-- /DELTA:NEW -->

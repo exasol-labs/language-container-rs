@@ -15,6 +15,7 @@ members = [
     "test-udfs/single-call-fixture",
     "test-udfs/annotated-fixture",
     "test-udfs/connect-back-query",
+    "test-udfs/connect-back-scalar",
     "test-udfs/annotated-double",
     "test-udfs/connect-back-insert",
     "test-udfs/connect-back-crunch",
@@ -47,7 +48,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 license = "MIT"
 
 [workspace.dependencies]

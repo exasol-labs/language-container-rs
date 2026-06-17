@@ -204,6 +204,8 @@ EMITS (result BIGINT) AS
 SELECT my_schema.set_sum(v) EMITS (result BIGINT) FROM my_table;
 ```
 
+**Cluster distribution** — Exasol executes SET UDFs on every node in parallel. Grouping by [`IPROC()`](https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/iproc.htm) pins each group to the node that owns the data, saturating the full cluster with a single query.
+
 ## 8. Connect-back
 
 Connect-back lets a UDF open a regular Exasol connection from inside `run()` and execute SQL. The connect-back session is an ordinary independent SQL login — Exasol treats it exactly like a connection from PyExasol, JDBC, or any other external client. It has its own session and its own transaction; it cannot access the invoking query's transaction.
@@ -240,7 +242,7 @@ EMITS (...) AS
 /
 ```
 
-> **Always use `SET SCRIPT ... EMITS (...)` for connect-back UDFs.** A `SCALAR SCRIPT ... RETURNS ...` UDF crashes the SQL worker process when it opens a connect-back session.
+> Connect-back works from both `SCALAR` and `SET` scripts. Use whichever UDF type fits your logic. The address rules (`cluster_ip()`, never loopback) and transaction-conflict rules below apply equally to both.
 
 ### Three methods on `UdfContext`
 
@@ -293,7 +295,7 @@ use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
 pub fn db_version(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    while ctx.next()? {}  // drain input before opening the connection
+    while ctx.next()? {}  // SET only: drain remaining input rows before opening the session
 
     let cred = ctx.connection("CB_SELF")?;
     let mut conn = ctx.connect_back(&cred)?;
@@ -307,7 +309,7 @@ pub fn db_version(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 }
 ```
 
-Drain all input rows before opening the connect-back session. The ZMQ control channel and the TCP session share the same thread; interleaving them causes a deadlock.
+For SET UDFs, drain all remaining input rows before opening the connect-back session. For SCALAR UDFs the single input row is pre-loaded and there is nothing to drain. In both cases, do not interleave ZMQ control traffic with the connect-back TCP session — they share the same thread and interleaving causes a deadlock.
 
 ### Example: write data
 

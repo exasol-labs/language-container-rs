@@ -18,6 +18,7 @@ const SCALAR_LIB: &str = "libscalar_double.so";
 const SET_LIB: &str = "libset_filter.so";
 const JSON_LIB: &str = "libjson_parse.so";
 const CB_QUERY_LIB: &str = "libconnect_back_query.so";
+const CB_SCALAR_LIB: &str = "libconnect_back_scalar.so";
 const CB_CLUSTER_IP_LIB: &str = "libconnect_back_cluster_ip.so";
 const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
@@ -91,6 +92,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_query_path = harness
         .upload_udf(CB_QUERY_LIB, read_udf_artifact(CB_QUERY_LIB)?)
         .await?;
+    let cb_scalar_path = harness
+        .upload_udf(CB_SCALAR_LIB, read_udf_artifact(CB_SCALAR_LIB)?)
+        .await?;
     let cb_insert_path = harness
         .upload_udf(CB_INSERT_LIB, read_udf_artifact(CB_INSERT_LIB)?)
         .await?;
@@ -139,6 +143,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario connect_back_query ok");
+
+    if let Err(e) =
+        connect_back_scalar_queries_and_returns(&mut conn, &cb_scalar_path, &harness).await
+    {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_scalar failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario connect_back_scalar ok");
 
     if let Err(e) = connect_back_writeback_same_schema(&mut conn, &cb_crunch_path, &harness).await {
         let logs = harness.dump_udf_logs().await;
@@ -367,6 +380,33 @@ async fn connect_back_udf_queries_and_emits(
     let got = result?;
     if got.as_deref() != Some("42") {
         bail!("connect_back_query val returned {got:?}, expected 42");
+    }
+    Ok(())
+}
+
+/// Scenario: connect-back from a SCALAR script — the UDF issues `SELECT 42` via
+/// connect-back and RETURNS it. Proves connect-back is not SET-only; a SCALAR
+/// `RETURNS` script connects back without the historical SIGABRT.
+async fn connect_back_scalar_queries_and_returns(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+) -> Result<()> {
+    let cb_addr = harness.connect_back_sql_address().await?;
+    eprintln!("[it] connect_back_scalar: CB_SELF address = {cb_addr}");
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT connect_back_scalar() RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(conn, "SELECT TO_CHAR(connect_back_scalar())").await?;
+    if got.as_deref() != Some("42") {
+        bail!("connect_back_scalar returned {got:?}, expected 42");
     }
     Ok(())
 }
