@@ -190,12 +190,12 @@ unsafe fn call_noarg_hook(
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(&mut out) };
     if rc != 0 {
-        if !out.is_null() {
-            unsafe { libc::free(out as *mut libc::c_void) };
-        }
-        return Err(RuntimeError::Udf(format!(
-            "single-call hook {name} returned error code {rc}"
-        )));
+        let msg = unsafe { crate::single_call::take_c_string(out) };
+        return Err(RuntimeError::Udf(if msg.is_empty() {
+            format!("single-call hook {name} returned error code {rc}")
+        } else {
+            msg
+        }));
     }
     Ok(unsafe { crate::single_call::take_c_string(out) })
 }
@@ -211,12 +211,12 @@ unsafe fn call_arg_hook(
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(c_arg.as_ptr(), &mut out) };
     if rc != 0 {
-        if !out.is_null() {
-            unsafe { libc::free(out as *mut libc::c_void) };
-        }
-        return Err(RuntimeError::Udf(format!(
-            "single-call hook {name} returned error code {rc}"
-        )));
+        let msg = unsafe { crate::single_call::take_c_string(out) };
+        return Err(RuntimeError::Udf(if msg.is_empty() {
+            format!("single-call hook {name} returned error code {rc}")
+        } else {
+            msg
+        }));
     }
     Ok(unsafe { crate::single_call::take_c_string(out) })
 }
@@ -240,12 +240,68 @@ unsafe fn call_ctx_arg_hook(
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(ctx, c_arg.as_ptr(), &mut out) };
     if rc != 0 {
-        if !out.is_null() {
-            unsafe { libc::free(out as *mut libc::c_void) };
-        }
-        return Err(RuntimeError::Udf(format!(
-            "single-call hook {name} returned error code {rc}"
-        )));
+        let msg = unsafe { crate::single_call::take_c_string(out) };
+        return Err(RuntimeError::Udf(if msg.is_empty() {
+            format!("single-call hook {name} returned error code {rc}")
+        } else {
+            msg
+        }));
     }
     Ok(unsafe { crate::single_call::take_c_string(out) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hook that writes a C-allocated error message into `*out` and returns 1.
+    unsafe extern "C" fn hook_error_with_msg(out: *mut *mut std::ffi::c_char) -> i32 {
+        unsafe {
+            *out = libc::strdup(c"hook returned this error".as_ptr());
+        }
+        1
+    }
+
+    /// Hook that leaves `*out` null and returns 1 (no message available).
+    unsafe extern "C" fn hook_error_null_out(out: *mut *mut std::ffi::c_char) -> i32 {
+        let _ = out;
+        1
+    }
+
+    /// Hook that writes a C-allocated result string into `*out` and returns 0.
+    unsafe extern "C" fn hook_success(out: *mut *mut std::ffi::c_char) -> i32 {
+        unsafe {
+            *out = libc::strdup(c"the value".as_ptr());
+        }
+        0
+    }
+
+    #[test]
+    fn error_text_surfaced_when_rc_nonzero() {
+        let result = unsafe { call_noarg_hook("my_hook", hook_error_with_msg) };
+        match result {
+            Err(RuntimeError::Udf(msg)) => assert_eq!(msg, "hook returned this error"),
+            other => panic!("expected Udf error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_message_when_error_text_empty() {
+        let result = unsafe { call_noarg_hook("my_hook", hook_error_null_out) };
+        match result {
+            Err(RuntimeError::Udf(msg)) => {
+                assert!(
+                    msg.contains("returned error code"),
+                    "expected generic fallback message, got: {msg}"
+                );
+            }
+            other => panic!("expected Udf error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_path_returns_written_string() {
+        let result = unsafe { call_noarg_hook("my_hook", hook_success) };
+        assert_eq!(result.unwrap(), "the value");
+    }
 }
