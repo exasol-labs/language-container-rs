@@ -57,6 +57,7 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 * *THEN* the generated vtable MUST embed the input column `x: Int64` and emit column `result: Int64`
 * *AND* the example MUST double its input as in `scalar-double`
 
+<!-- DELTA:NEW -->
 ### Scenario: connect-back-scalar returns a value fetched over connect-back from a SCALAR script
 
 * *GIVEN* the `connect-back-scalar` crate built against `exasol-udf-sdk` with the `connect-back` feature, registered as `RUST SCALAR SCRIPT connect_back_scalar() RETURNS BIGINT`
@@ -64,3 +65,4 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 * *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting `__exa_udf_entry`
 * *AND* `SELECT TO_CHAR(connect_back_scalar())` MUST return `42`
 * *AND* the implementation MUST be structurally identical to the `connect-back-query` SET UDF — connect-back logic is not conditional on `SCALAR` vs `SET` registration
+<!-- /DELTA:NEW -->

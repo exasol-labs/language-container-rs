@@ -55,6 +55,7 @@ UDFs are registered with a generic `%connection CB_SELF` directive. The connect-
 * *THEN* `exapump` MUST be able to `SELECT v_squared FROM it_rust.crunch_log ORDER BY v` and return the seeded row, the three UDF-written squares, and the post-UDF row (`1, 4, 9, 16, 25`)
 * *AND* same-schema write-back MUST succeed without a transaction-conflict abort, demonstrating that Serializable isolation is satisfied when the target is pre-committed, the UDF performs no DDL and no explicit `COMMIT` (autocommit), and the invoking query reads a different object than the UDF writes
 
+<!-- DELTA:NEW -->
 ### Scenario: Connect-back SCALAR UDF queries the database and returns the result
 
 * *GIVEN* a registered slim SLC session and a deployed `connect-back-scalar` UDF compiled as `RUST SCALAR SCRIPT connect_back_scalar() RETURNS BIGINT`
@@ -64,3 +65,4 @@ UDFs are registered with a generic `%connection CB_SELF` directive. The connect-
 * *AND* the result MUST be emitted as `Value::Numeric` (Exasol delivers/expects `BIGINT` as `PB_NUMERIC`), identical to how the SET connect-back UDF emits its value
 * *AND* the connect-back session MUST be a new session and a new transaction, and no SIGABRT MUST occur — connect-back from a `SCALAR` script shares the same runtime dispatch path as `SET/EMITS` and carries no scalar-specific restriction
 * *AND* the harness MUST assert this as a hard assertion on every version in the matrix (`2025.1`, `2025.2`, `2026.1`) — there is NO severity branch and NO unconditional skip
+<!-- /DELTA:NEW -->
