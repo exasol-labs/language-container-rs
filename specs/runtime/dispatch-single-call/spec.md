@@ -43,3 +43,12 @@ v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks and load-time val
 * *WHEN* the runtime loads the UDF and compares the annotated schema to the `exascript_metadata` column definitions
 * *THEN* a mismatch in column count or `ExaType` MUST close the session with a prefixed `F-UDF-CL-RUST-####` error describing the expected and actual schema
 * *AND* a matching schema MUST allow dispatch to proceed
+
+### Scenario: Single-call hook error text is surfaced when rc != 0
+
+* *GIVEN* a loaded UDF whose single-call hook returns a non-zero error code and writes its `UdfError` message into the result out-pointer
+* *WHEN* the single-call dispatcher invokes the hook via `call_noarg_hook`, `call_arg_hook`, or `call_ctx_arg_hook`
+* *THEN* the helper MUST read the out-pointer text before freeing it and surface that text in the returned `RuntimeError::Udf`
+* *AND* when the out-pointer text is non-empty the surfaced message MUST be that hook-supplied text rather than the generic `single-call hook <name> returned error code <rc>` string
+* *AND* when the out-pointer is null or empty the helper MUST fall back to the generic `single-call hook <name> returned error code <rc>` message
+* *AND* the helper MUST NOT leak the out-pointer buffer on the error path
