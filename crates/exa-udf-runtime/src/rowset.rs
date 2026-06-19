@@ -144,10 +144,37 @@ impl InputRowSet {
     }
 }
 
+/// Byte threshold at which the emit buffer requests a flush. Keeps the
+/// serialised `MT_EMIT` payload well under the DB's per-message limits while
+/// amortising the per-flush round-trip across many rows.
+const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
+
+/// Conservative O(1) byte cost for one cell, approximating the width its
+/// non-null value occupies in `to_proto`'s type block. NULL cells cost 0
+/// because they take no type-block slot; the estimate slightly over-counts
+/// (fixed widths for Numeric/Date/Timestamp) so the buffer flushes early rather
+/// than late.
+fn value_byte_cost(v: &Value) -> usize {
+    match v {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Int32(_) => 4,
+        Value::Int64(_) => 8,
+        Value::Double(_) => 8,
+        Value::String(s) => s.len(),
+        Value::Numeric(d) => d.to_string().len(),
+        Value::Date(_) => 10,
+        Value::Timestamp(_) => 26,
+    }
+}
+
 /// Accumulates emitted output rows, serialising to a proto batch on flush.
 #[derive(Default)]
 pub struct EmitBuffer {
     rows: Vec<Vec<Value>>,
+    /// Running approximate serialised size of the buffered rows. Incremented in
+    /// `push`, reset in `clear`; read by `should_flush`.
+    byte_estimate: usize,
 }
 
 impl EmitBuffer {
@@ -156,7 +183,14 @@ impl EmitBuffer {
     }
 
     pub fn push(&mut self, values: Vec<Value>) {
+        self.byte_estimate += values.iter().map(value_byte_cost).sum::<usize>();
         self.rows.push(values);
+    }
+
+    /// Whether the buffered rows have reached the byte threshold and should be
+    /// flushed to the DB. A single oversized row trips this on its own push.
+    pub fn should_flush(&self) -> bool {
+        self.byte_estimate >= EMIT_BUFFER_LIMIT_BYTES
     }
 
     /// Serialise accumulated rows into an `ExascriptTableData`.
@@ -234,6 +268,7 @@ impl EmitBuffer {
 
     pub fn clear(&mut self) {
         self.rows.clear();
+        self.byte_estimate = 0;
     }
 
     pub fn len(&self) -> usize {
@@ -421,11 +456,20 @@ fn first_nonloopback_ipv4() -> Result<String, exasol_udf_sdk::error::UdfError> {
 pub type ConnRequester<'a> =
     Box<dyn Fn(&str) -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>;
 
+/// Flushes the accumulated emit buffer to the DB mid-run. Receives `&mut
+/// EmitBuffer` so it can serialise the rows (`to_proto`), send the `MT_EMIT`
+/// exchange, and then `clear` the buffer. Feature-independent: mid-run flushing
+/// is not gated on `connect-back`.
+pub type EmitFlusher<'a> = Box<dyn FnMut(&mut EmitBuffer) -> Result<(), UdfError> + 'a>;
+
 pub struct HostContextBridge<'a> {
     input: &'a mut InputRowSet,
     emit_buf: &'a mut EmitBuffer,
     input_cols: &'a [ColumnMeta],
     started: bool,
+    /// Sends the buffered emit rows to the DB when the buffer crosses its byte
+    /// threshold, keeping a single batch's output bounded. Invoked from `emit`.
+    flusher: EmitFlusher<'a>,
     /// Last error captured from a UDF context method. Surfaced through
     /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
     /// because `connection()` records errors through a shared `&self` borrow.
@@ -439,6 +483,7 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
+        flusher: EmitFlusher<'a>,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -446,6 +491,7 @@ impl<'a> HostContextBridge<'a> {
             emit_buf,
             input_cols,
             started: false,
+            flusher,
             last_error: std::cell::Cell::new(None),
             #[cfg(feature = "connect-back")]
             conn_requester,
@@ -473,6 +519,7 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
+        flusher: EmitFlusher<'a>,
         conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -480,6 +527,7 @@ impl<'a> HostContextBridge<'a> {
             emit_buf,
             input_cols,
             started: false,
+            flusher,
             last_error: std::cell::Cell::new(None),
             conn_requester,
         }
@@ -500,6 +548,9 @@ impl UdfContext for HostContextBridge<'_> {
 
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
         self.emit_buf.push(values.to_vec());
+        if self.emit_buf.should_flush() {
+            (self.flusher)(self.emit_buf)?;
+        }
         Ok(())
     }
 
@@ -698,6 +749,7 @@ mod tests {
             input,
             emit,
             cols,
+            Box::new(|_buf: &mut EmitBuffer| Ok(())),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
@@ -1029,6 +1081,51 @@ mod tests {
         };
         let rs = InputRowSet::from_proto(&table, &meta);
         assert_eq!(rs.row(0).unwrap(), &[Value::Null, Value::Null]);
+    }
+
+    #[test]
+    fn emit_buffer_byte_estimate_and_should_flush() {
+        // Each row carries a 1000-byte string; the estimate grows by ~1000 per
+        // push. Pushing rows until just below the 4 MB limit must keep
+        // should_flush() false; one more push crosses it and flips it true.
+        let row = || vec![Value::String("x".repeat(1000))];
+        let mut emit = EmitBuffer::new();
+
+        // Rows needed to first reach or exceed the limit.
+        let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000);
+
+        for _ in 0..(rows_to_limit - 1) {
+            emit.push(row());
+        }
+        assert!(
+            !emit.should_flush(),
+            "buffer just below the limit must not request a flush"
+        );
+
+        emit.push(row());
+        assert!(
+            emit.should_flush(),
+            "buffer at or above the limit must request a flush"
+        );
+
+        emit.clear();
+        assert!(
+            !emit.should_flush(),
+            "clear() must reset the byte estimate so should_flush() is false"
+        );
+    }
+
+    #[test]
+    fn oversized_single_row_flushes_alone() {
+        // A single row whose string exceeds the limit must trip should_flush()
+        // after one push, so an oversized row is flushed on its own rather than
+        // accumulating forever.
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![Value::String("y".repeat(EMIT_BUFFER_LIMIT_BYTES + 1))]);
+        assert!(
+            emit.should_flush(),
+            "a single oversized row must request a flush after one push"
+        );
     }
 
     #[test]

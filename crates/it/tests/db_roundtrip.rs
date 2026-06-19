@@ -24,6 +24,8 @@ const SC_LIB: &str = "libsingle_call_fixture.so";
 const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 const RESOLV_LIB: &str = "libresolv_udf.so";
+const EMIT_BULK_LIB: &str = "libemit_bulk.so";
+const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -107,6 +109,12 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let resolv_path = harness
         .upload_udf(RESOLV_LIB, read_udf_artifact(RESOLV_LIB)?)
         .await?;
+    let emit_bulk_path = harness
+        .upload_udf(EMIT_BULK_LIB, read_udf_artifact(EMIT_BULK_LIB)?)
+        .await?;
+    let cb_stream_path = harness
+        .upload_udf(CB_STREAM_LIB, read_udf_artifact(CB_STREAM_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -118,6 +126,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario udf_error ok");
     udf_error_message_reaches_db(&mut conn).await?;
     eprintln!("[it] scenario udf_error_message ok");
+
+    emit_bulk_flushes_multiple_batches(&mut conn, &emit_bulk_path).await?;
+    eprintln!("[it] scenario emit_bulk ok");
 
     // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
@@ -159,6 +170,13 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario connect_back_writeback_same_schema ok");
+
+    if let Err(e) = connect_back_stream_reads_all_rows(&mut conn, &cb_stream_path, &harness).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connect_back_stream failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario connect_back_stream ok");
 
     resolv_udf_resolves_external_host(&mut conn, &resolv_path).await?;
     eprintln!("[it] scenario resolv_udf_resolves_external_host ok");
@@ -615,4 +633,80 @@ async fn resolv_udf_errors_on_unresolvable_host(
             Ok(())
         }
     }
+}
+
+/// Verify that the 4,000,000-byte mid-run flush works end-to-end:
+/// emitting 50,000 rows × ~98 bytes = ~4.9 MB forces at least one mid-run
+/// MT_EMIT flush plus a tail flush; all rows must arrive intact.
+async fn emit_bulk_flushes_multiple_batches(conn: &mut Connection, lib_path: &str) -> Result<()> {
+    const N: i64 = 50_000;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.emit_bulk(n BIGINT) \
+         EMITS (val VARCHAR(200)) AS\n\
+         %udf_object {lib_path};\n/"
+    ))
+    .await?;
+    let result = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) \
+         FROM (SELECT emit_bulk(50000) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_bulk count query returned NULL"))?;
+    let count: i64 = result.parse().map_err(|e| anyhow!("parse count: {e}"))?;
+    if count != N {
+        bail!("emit_bulk: expected {N} rows, got {count}");
+    }
+    Ok(())
+}
+
+/// Verify that `query_for_each` streams all rows from a seeded table via
+/// connect-back: the UDF emits the total row count and we assert it equals M.
+async fn connect_back_stream_reads_all_rows(
+    conn: &mut Connection,
+    lib_path: &str,
+    harness: &Harness,
+) -> Result<()> {
+    const M: i64 = 100;
+    let cb_addr = harness.connect_back_sql_address().await?;
+    // CB_SELF may already exist from earlier scenarios; CREATE OR REPLACE is safe.
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
+
+    // Seed the table with M rows; recreate for idempotency.
+    conn.execute("DROP TABLE IF EXISTS it_rust.cb_stream_seed")
+        .await?;
+    conn.execute("CREATE TABLE it_rust.cb_stream_seed (id INTEGER)")
+        .await?;
+    let values: String = (1..=M)
+        .map(|i| format!("({i})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(&format!(
+        "INSERT INTO it_rust.cb_stream_seed VALUES {values}"
+    ))
+    .await?;
+
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.connect_back_stream(dummy BOOLEAN) \
+         EMITS (row_count BIGINT) AS\n\
+         %udf_object {lib_path};\n/"
+    ))
+    .await?;
+
+    let result = query_single_string(
+        conn,
+        "SELECT TO_CHAR(row_count) \
+         FROM (SELECT connect_back_stream(TRUE) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("connect_back_stream returned NULL"))?;
+    let count: i64 = result.parse().map_err(|e| anyhow!("parse count: {e}"))?;
+    if count != M {
+        bail!("connect_back_stream: expected {M} rows, got {count}");
+    }
+    Ok(())
 }

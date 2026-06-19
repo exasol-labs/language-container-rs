@@ -1,0 +1,14 @@
+[package]
+name = "emit-bulk"
+publish = false
+version = "0.1.0"
+license.workspace = true
+edition = "2024"
+
+[lib]
+name = "emit_bulk"
+crate-type = ["cdylib"]
+
+[dependencies]
+exasol-udf-sdk = { path = "../../crates/exasol-udf-sdk" }
+exasol-udf-macros = { path = "../../crates/exasol-udf-macros" }

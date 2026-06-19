@@ -3,7 +3,9 @@
 use arrow::array::Int64Array;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use exasol_udf_sdk::connect_back::{ConnectionObject, ExaConnection};
+use exasol_udf_sdk::connect_back::{
+    ConnectionObject, ExaConnection, record_batch_to_rows, record_batches_to_rows,
+};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::Value;
@@ -124,4 +126,114 @@ fn connect_back_accepts_caller_built_object() {
     let mut ctx = MockCtx;
     let result = ctx.connect_back(&obj);
     assert!(result.is_err());
+}
+
+#[test]
+fn record_batch_to_rows_matches_multibatch() {
+    // Build two batches with a few rows each and verify that converting each
+    // batch individually then concatenating produces the same result as the
+    // multi-batch helper.
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+
+    let batch0 = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+
+    let batch1 =
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![4, 5]))]).unwrap();
+
+    let mut combined = record_batch_to_rows(&batch0).unwrap();
+    combined.extend(record_batch_to_rows(&batch1).unwrap());
+
+    let via_multi = record_batches_to_rows(&[batch0, batch1]).unwrap();
+
+    assert_eq!(combined, via_multi);
+}
+
+/// Mock connection that returns two batches with known values.
+struct TwoBatchConn;
+
+impl ExaConnection for TwoBatchConn {
+    fn query_arrow(&mut self, _sql: &str) -> Result<Vec<RecordBatch>, UdfError> {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let batch0 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+        let batch1 = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![3, 4]))])
+            .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+        Ok(vec![batch0, batch1])
+    }
+
+    fn execute(&mut self, _sql: &str) -> Result<u64, UdfError> {
+        Ok(0)
+    }
+}
+
+#[test]
+fn query_for_each_default_streams_rows() {
+    // query_for_each must fire the callback in batch-then-row order: all rows
+    // from batch 0 before any row from batch 1.
+    let mut conn = TwoBatchConn;
+
+    let mut via_for_each: Vec<Vec<Value>> = Vec::new();
+    conn.query_for_each("SELECT v FROM t", &mut |row| {
+        via_for_each.push(row);
+        Ok(())
+    })
+    .unwrap();
+
+    // Expected order: [1], [2], [3], [4]
+    assert_eq!(
+        via_for_each,
+        vec![
+            vec![Value::Int64(1)],
+            vec![Value::Int64(2)],
+            vec![Value::Int64(3)],
+            vec![Value::Int64(4)],
+        ]
+    );
+
+    // query (which now delegates to query_for_each) must produce the same rows.
+    let via_query = conn.query("SELECT v FROM t").unwrap();
+    assert_eq!(via_for_each, via_query);
+}
+
+/// Mock connection that returns one batch with three rows.
+struct ThreeRowConn;
+
+impl ExaConnection for ThreeRowConn {
+    fn query_arrow(&mut self, _sql: &str) -> Result<Vec<RecordBatch>, UdfError> {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![10, 20, 30]))])
+                .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+        Ok(vec![batch])
+    }
+
+    fn execute(&mut self, _sql: &str) -> Result<u64, UdfError> {
+        Ok(0)
+    }
+}
+
+#[test]
+fn query_for_each_stops_on_callback_error() {
+    // The callback returns an error on the second row. query_for_each must
+    // propagate that error and must NOT invoke the callback for the third row.
+    let mut conn = ThreeRowConn;
+    let mut call_count = 0usize;
+
+    let result = conn.query_for_each("SELECT v FROM t", &mut |_row| {
+        call_count += 1;
+        if call_count == 2 {
+            Err(UdfError::User("stop".into()))
+        } else {
+            Ok(())
+        }
+    });
+
+    assert!(matches!(result, Err(UdfError::User(_))));
+    // Callback was called for row 1 (Ok) and row 2 (Err), but NOT row 3.
+    assert_eq!(call_count, 2);
 }

@@ -91,6 +91,7 @@ fn connection_fetches_credentials_via_mt_import() {
         &mut input,
         &mut emit,
         &cols,
+        Box::new(|_buf: &mut EmitBuffer| Ok(())),
         Box::new(|name: &str| {
             assert_eq!(name, "CB_SELF");
             Ok(fake_conn_info())
@@ -119,6 +120,7 @@ fn connect_back_opens_from_connection_object() {
         &mut input,
         &mut emit,
         &cols,
+        Box::new(|_buf: &mut EmitBuffer| Ok(())),
         Box::new(|_| Ok(fake_conn_info())),
     );
 
@@ -201,6 +203,7 @@ fn connect_back_dsn_built_only_from_connection_object() {
         &mut input,
         &mut emit,
         &cols,
+        Box::new(|_buf: &mut EmitBuffer| Ok(())),
         Box::new(|_| Ok(fake_conn_info())),
     );
     // Either outcome is acceptable: a ConnectBack error (no live DB) or a
