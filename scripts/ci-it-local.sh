@@ -80,7 +80,10 @@ cargo build --release \
   -p connect-back-crunch \
   -p resolv-udf \
   -p emit-bulk \
-  -p connect-back-stream
+  -p connect-back-stream \
+  -p timestamp-add-second \
+  -p timestamp-now \
+  -p timestamp-passthrough
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"

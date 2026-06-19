@@ -10,10 +10,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # RAM guard for the ~8 GB runner: cap concurrent codegen units (peak rustc/
-  # linker memory) rather than letting cargo fan out across all 8 cores; drop
-  # release debuginfo (smaller, cheaper link); incremental is useless on a CI
-  # cache and just inflates target/.
+  # RAM guard for the standard 4-vCPU / 16 GB runner: cap concurrent codegen
+  # units (peak rustc/linker memory); drop release debuginfo (smaller, cheaper
+  # link); incremental is useless on a CI cache and just inflates target/.
   CARGO_BUILD_JOBS: "4"
   CARGO_PROFILE_RELEASE_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
@@ -26,7 +25,7 @@ jobs:
   # transitively), so the DAG reflects "build early".
   build:
     name: Build (warm cache + artifacts)
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +100,7 @@ jobs:
   # ── fan-out: lint / unit-tests / build-slc all need build ────────────────
   lint:
     name: Check & Lint
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     needs: [build]
     steps:
       - uses: actions/checkout@v4
@@ -137,7 +136,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     needs: [build]
     steps:
       - uses: actions/checkout@v4
@@ -169,7 +168,7 @@ jobs:
 
   licenses:
     name: License Check
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     needs: [build]
     steps:
       - uses: actions/checkout@v4
@@ -222,7 +221,7 @@ jobs:
 
   build-slc:
     name: Build SLC image
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     needs: [build]
     steps:
       - uses: actions/checkout@v4
@@ -472,7 +471,7 @@ jobs:
   # validated — this job does NOT re-run the integration matrix (lean publish).
   release:
     name: Release
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest
     needs: [build, build-slc]
     if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     permissions:
