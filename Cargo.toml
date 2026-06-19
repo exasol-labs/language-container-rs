@@ -24,6 +24,9 @@ members = [
     "test-udfs/resolv-udf",
     "test-udfs/emit-bulk",
     "test-udfs/connect-back-stream",
+    "test-udfs/timestamp-add-second",
+    "test-udfs/timestamp-now",
+    "test-udfs/timestamp-passthrough",
 ]
 # `it` requires a live Exasol container; build/test it explicitly:
 # `cargo test -p it --features integration`
@@ -49,6 +52,9 @@ default-members = [
     "test-udfs/resolv-udf",
     "test-udfs/emit-bulk",
     "test-udfs/connect-back-stream",
+    "test-udfs/timestamp-add-second",
+    "test-udfs/timestamp-now",
+    "test-udfs/timestamp-passthrough",
 ]
 
 [workspace.package]

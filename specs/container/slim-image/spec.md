@@ -6,6 +6,8 @@ Packages the `exaudfclient` binary into a slim Alpine-based SLC Docker image (Op
 
 The slim image is a multi-stage build: a `rust:1.91-bookworm` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`), then copies the glibc runtime libs (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libstdc++.so.6`, `ld-linux-x86-64.so.2`, NSS modules) with `cp -L` into an `alpine:3` runtime stage. The runtime stage ships only `ca-certificates` and the bundled glibc, placing the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The `exaudfclient` binary is glibc-linked — it runs on the Debian/glibc Exasol host after BucketFS extraction; Alpine serves as the packaging layer only.
 
+The Exasol engine sets `TZ` from the session timezone for every UDF (via `NSEXEC_ENV_TZ` → `TZ`), commonly as an IANA name such as `Europe/Berlin`. The runtime image must bundle the IANA zoneinfo database so `chrono::Local`/`time` resolve named zones instead of silently falling back to UTC; the runtime never reads `TZ` itself.
+
 The SLC is distributed as a flattened root-filesystem tarball that Exasol extracts after BucketFS upload, with the executable at `/exaudf/exaudfclient`. For DNS to work inside the UDF sandbox, the tarball must present `/etc/hosts` and `/etc/resolv.conf` as symlinks into `/conf/`, which the database populates at runtime. These symlinks cannot be baked as live symlinks in the image layers (`COPY` dereferences a dangling symlink into a 0-byte file; `RUN ln -sf` hits Docker's build-time bind-mount of those two paths), so they are created in a staging directory and tarred inside the Docker build itself.
 
 ## Scenarios
@@ -59,9 +61,9 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 
 * *GIVEN* the `Dockerfile.alpine` runtime stage `FROM alpine:3`
 * *WHEN* the image is built
-* *THEN* it MUST install `libzmq` and `ca-certificates` via `apk`
+* *THEN* it MUST install `libzmq`, `ca-certificates`, and `tzdata` via `apk`
+* *AND* installing `tzdata` MUST populate the IANA zoneinfo database at `/usr/share/zoneinfo` so a DB-supplied named `TZ` resolves to a real zone instead of UTC
 * *AND* it MUST set `LANG=C.UTF-8` rather than running `locale-gen`, because Alpine/musl provides no `locales` package
-* *AND* it MUST place the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`
 * *AND* it MUST NOT contain a Rust toolchain or a vendored Cargo registry
 
 ### Scenario: Alpine image passes the db-roundtrip integration suite
@@ -85,3 +87,10 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *THEN* `etc/hosts` MUST be a symbolic-link entry pointing to `/conf/hosts`
 * *AND* `etc/resolv.conf` MUST be a symbolic-link entry pointing to `/conf/resolv.conf`
 * *AND* producing the tarball MUST NOT require any interpreter or tool outside the Docker build environment (no host `python3`)
+
+### Scenario: Runtime image bundles the IANA zoneinfo database
+
+* *GIVEN* the built slim Alpine image and that the database always sends the session timezone as `TZ` for every UDF
+* *WHEN* the runtime filesystem is inspected for the zoneinfo database
+* *THEN* `/usr/share/zoneinfo/Europe/Berlin` MUST exist as a readable zone file
+* *AND* the fix MUST be packaging only (an `apk add` of `tzdata`), since `chrono`/`time` consult the zoneinfo database implicitly and the runtime MUST NOT read `TZ` itself

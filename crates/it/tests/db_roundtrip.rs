@@ -26,6 +26,9 @@ const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 const RESOLV_LIB: &str = "libresolv_udf.so";
 const EMIT_BULK_LIB: &str = "libemit_bulk.so";
 const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
+const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
+const TS_NOW_LIB: &str = "libtimestamp_now.so";
+const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -115,6 +118,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let cb_stream_path = harness
         .upload_udf(CB_STREAM_LIB, read_udf_artifact(CB_STREAM_LIB)?)
         .await?;
+    let ts_add_path = harness
+        .upload_udf(TS_ADD_LIB, read_udf_artifact(TS_ADD_LIB)?)
+        .await?;
+    let ts_now_path = harness
+        .upload_udf(TS_NOW_LIB, read_udf_artifact(TS_NOW_LIB)?)
+        .await?;
+    let ts_pass_path = harness
+        .upload_udf(TS_PASS_LIB, read_udf_artifact(TS_PASS_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -186,6 +198,17 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario resolv_udf_errors_on_unresolvable_host ok");
+
+    timestamp_arithmetic_roundtrips(&mut conn, &ts_add_path).await?;
+    eprintln!("[it] scenario timestamp_arithmetic_roundtrips ok");
+    if let Err(e) = udf_local_time_matches_session_tz(&mut conn, &ts_now_path).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after udf_local_time_matches_session_tz failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario udf_local_time_matches_session_tz ok");
+    timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
+    eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
 
     conn.close().await?;
     Ok(())
@@ -707,6 +730,194 @@ async fn connect_back_stream_reads_all_rows(
     let count: i64 = result.parse().map_err(|e| anyhow!("parse count: {e}"))?;
     if count != M {
         bail!("connect_back_stream: expected {M} rows, got {count}");
+    }
+    Ok(())
+}
+
+/// Scenario: timestamp arithmetic round-trips through a SCALAR UDF.
+///
+/// `ts_add_second(t TIMESTAMP) RETURNS TIMESTAMP` reads a `Value::Timestamp`,
+/// adds one second, and emits it. We assert the result equals the input plus
+/// exactly one second AND that the sub-second `.250` component survived the
+/// decode/emit round-trip (a zeroing/truncation bug would make the equality
+/// fail). The comparison is done SQL-side via `CASE WHEN ... = TIMESTAMP '...'`
+/// so it is robust to `TO_CHAR` fractional-second formatting quirks.
+async fn timestamp_arithmetic_roundtrips(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT ts_add_second(t TIMESTAMP) RETURNS TIMESTAMP AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    // Plain TIMESTAMP is precision-3, so `.250` fits without engine truncation.
+    let got = query_single_string(
+        conn,
+        "SELECT CASE \
+           WHEN ts_add_second(TIMESTAMP '2026-06-14 09:30:15.250000') \
+              = TIMESTAMP '2026-06-14 09:30:16.250000' \
+           THEN 'eq' ELSE 'ne' END",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("ts_add_second comparison returned NULL"))?;
+    if got != "eq" {
+        bail!(
+            "ts_add_second(2026-06-14 09:30:15.250000) did not equal \
+             2026-06-14 09:30:16.250000 (got {got:?}); the +1s arithmetic or the \
+             sub-second .250 component did not survive the round-trip"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: the UDF's local wall-clock agrees with the session timezone and is
+/// NOT UTC — the regression gate for the `tzdata` packaging fix.
+///
+/// `udf_now() RETURNS TIMESTAMP` emits `chrono::Local::now().naive_local()`,
+/// i.e. the container's local wall-clock resolved from `TZ` + the bundled
+/// `/usr/share/zoneinfo`. With `tzdata` present the emitted naive value carries
+/// the Berlin wall-clock; WITHOUT `tzdata` `chrono::Local` silently falls back
+/// to UTC and the offset assertion below reports ~0 instead of the Berlin
+/// offset — so this scenario FAILS on an Alpine image built without `tzdata`
+/// and PASSES with it.
+///
+/// Two SQL-side properties are asserted (no fragile client-side timestamp
+/// parsing — `AT TIME ZONE` is not supported by this engine, so the UTC instant
+/// is obtained via `POSIX_TIME()`):
+///
+///  (a) Bounded skew: `ABS(SECONDS_BETWEEN(udf_now(), CURRENT_TIMESTAMP))` is
+///      within a few seconds, covering UDF execution latency. Both values are
+///      the Berlin wall-clock, so they must agree closely.
+///  (b) Non-UTC Berlin offset: the UDF's naive value, interpreted as
+///      seconds-since-epoch, MUST differ from the true UTC epoch
+///      (`POSIX_TIME()`) by the Berlin UTC offset (3600s for CET or 7200s for
+///      CEST). `SECONDS_BETWEEN(ts, TIMESTAMP '1970-01-01 00:00:00')` treats
+///      `ts` as a naive value, so subtracting `POSIX_TIME()` yields the offset
+///      baked into the emitted wall-clock. A UTC fallback yields ~0 and fails.
+async fn udf_local_time_matches_session_tz(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT udf_now() RETURNS TIMESTAMP AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    // Named IANA zone; verified accepted form against the live DB
+    // (SESSIONTIMEZONE reports 'EUROPE/BERLIN').
+    conn.execute("ALTER SESSION SET TIME_ZONE='Europe/Berlin'")
+        .await?;
+
+    // (a) Bounded skew between the UDF wall-clock and the DB wall-clock.
+    let skew = query_single_string(
+        conn,
+        "SELECT TO_CHAR(ABS(SECONDS_BETWEEN(udf_now(), CURRENT_TIMESTAMP)))",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("udf_now skew query returned NULL"))?;
+    let skew_secs: f64 = skew
+        .parse()
+        .map_err(|e| anyhow!("parsing udf_now skew {skew:?}: {e}"))?;
+    // Generous tolerance for container/execution latency.
+    if skew_secs > 30.0 {
+        bail!(
+            "udf_now() disagrees with CURRENT_TIMESTAMP by {skew_secs}s \
+             (> 30s tolerance); the UDF wall-clock is not tracking the session clock"
+        );
+    }
+
+    // (b) The emitted wall-clock carries the Berlin offset, not UTC.
+    // offset = (udf_now interpreted as naive epoch seconds) - (true UTC epoch).
+    let offset = query_single_string(
+        conn,
+        "SELECT TO_CHAR(\
+            SECONDS_BETWEEN(udf_now(), TIMESTAMP '1970-01-01 00:00:00') - POSIX_TIME())",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("udf_now offset query returned NULL"))?;
+    let offset_secs: f64 = offset
+        .parse()
+        .map_err(|e| anyhow!("parsing udf_now offset {offset:?}: {e}"))?;
+    // Accept CET (3600s) or CEST (7200s); the +-30s slack absorbs the latency
+    // between the two function evaluations. A UTC fallback (no tzdata) gives ~0
+    // and fails this assertion — exactly the regression we are gating.
+    let is_cet = (offset_secs - 3600.0).abs() <= 30.0;
+    let is_cest = (offset_secs - 7200.0).abs() <= 30.0;
+    if !(is_cet || is_cest) {
+        bail!(
+            "udf_now() offset from UTC is {offset_secs}s, expected the Berlin \
+             offset (~3600s CET or ~7200s CEST). ~0 means the UDF reported UTC \
+             — the tzdata packaging regression"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: TIMESTAMP fractional precision round-trips through the engine's
+/// receipt-side truncation for the 0/3/6/9 matrix.
+///
+/// `timestamp-passthrough` reads a `Value::Timestamp` and re-emits it unchanged.
+/// For each precision `p` we register `ts_pass_p(t TIMESTAMP(p)) RETURNS
+/// TIMESTAMP(p)` over the same `.so`, feed a literal carrying exactly `p`
+/// fractional digits (the base `123456789` truncated to `p`), and assert the
+/// returned value equals what survives a UDF round-trip at that precision.
+///
+/// The DB caps the fractional precision of every UDF *input* column at
+/// microseconds — `SWIGTableData::getTimestamp` formats `...FF6` for all script
+/// languages (verified against the engine source and empirically across Rust,
+/// Python, and Java; see decision-log [2]). The emit side carries all 9 digits
+/// (`%.9f`) and the engine truncates them to the column's declared precision on
+/// receipt. So the realistic round-trip ceiling through a UDF is microseconds:
+/// the expected stored value is the literal truncated to `min(p, 6)` fractional
+/// digits, then widened back to `TIMESTAMP(p)`.
+///
+/// For `p ∈ {0,3,6}` that is exactly `CAST(LIT AS TIMESTAMP(p))` (lossless,
+/// nothing beyond microseconds to lose). `p = 9` is the input-cap case: the DB
+/// delivers `.123456000` to the UDF, so the round-trip yields `.123456000`, not
+/// the stored literal `.123456789`. `p = 0` must NOT gain a spurious `.000000` —
+/// the engine truncates the emitted fraction away, so the equality still holds.
+async fn timestamp_precision_matrix_roundtrips(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    // base fractional digits: 123456789; truncate to `p` digits per precision.
+    for p in [0u32, 3, 6, 9] {
+        let frac = match p {
+            0 => String::new(),
+            _ => format!(".{}", &"123456789"[..p as usize]),
+        };
+        let literal = format!("2026-06-14 09:30:15{frac}");
+
+        // The DB delivers UDF input columns at microsecond precision (FF6), so the
+        // value the UDF can return is the literal truncated to min(p,6) digits and
+        // widened back to TIMESTAMP(p). For p<=6 this equals CAST(LIT AS TIMESTAMP(p)).
+        let input_cap = p.min(6);
+
+        let script = format!("ts_pass_{p}");
+        conn.execute(&format!(
+            "CREATE OR REPLACE RUST SCALAR SCRIPT {script}(t TIMESTAMP({p})) \
+             RETURNS TIMESTAMP({p}) AS\n\
+             %udf_object {udf_object};\n/"
+        ))
+        .await?;
+
+        let got = query_single_string(
+            conn,
+            &format!(
+                "SELECT CASE \
+                   WHEN {script}(TIMESTAMP '{literal}') \
+                      = CAST(CAST(TIMESTAMP '{literal}' AS TIMESTAMP({input_cap})) \
+                             AS TIMESTAMP({p})) \
+                   THEN 'eq' ELSE 'ne' END"
+            ),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("{script} comparison returned NULL"))?;
+        if got != "eq" {
+            bail!(
+                "{script}(TIMESTAMP '{literal}') did not match the expected \
+                 microsecond-capped round-trip at TIMESTAMP({p}) (got {got:?}); \
+                 expected the literal truncated to {input_cap} fractional digits \
+                 (the DB delivers UDF inputs at FF6/microsecond precision)"
+            );
+        }
     }
     Ok(())
 }
