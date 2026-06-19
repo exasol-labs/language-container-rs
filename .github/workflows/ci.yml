@@ -70,7 +70,9 @@ jobs:
             -p connect-back-scalar \
             -p connect-back-insert \
             -p connect-back-crunch \
-            -p resolv-udf
+            -p resolv-udf \
+            -p emit-bulk \
+            -p connect-back-stream
 
       - name: Build IT test binary (compile once)
         run: |
@@ -301,7 +303,7 @@ jobs:
       - name: Download SLC tarball
         uses: actions/download-artifact@v4
         with:
-          name: slc-tarball
+          name: lc-tarball
 
       # Cache the (multi-GB) Exasol DB image per matrix version so each leg
       # loads it from a tarball instead of re-pulling from Docker Hub every run.
