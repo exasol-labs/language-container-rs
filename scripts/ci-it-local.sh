@@ -54,6 +54,8 @@ log "Config: MEM=$MEM MEMSWAP=$MEMSWAP SHM=$SHM DB_MEM='${DB_MEM:-<auto>}' IMAGE
 # 1. Build the SLC tarball via the artifact stage ----------------------------
 SLC_DIR="${SLC_DIR:-/tmp/lc-rs-$$}"
 if [ -z "${SKIP_SLC_BUILD:-}" ]; then
+  log "Generate OS/runtime license bundle (dist/generate-os-licenses.sh)"
+  bash "$REPO_ROOT/dist/generate-os-licenses.sh"
   log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
   mkdir -p "$SLC_DIR"
   docker build -f Dockerfile.alpine --target artifact \

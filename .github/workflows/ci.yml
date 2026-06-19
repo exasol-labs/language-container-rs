@@ -229,6 +229,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Install Rust 1.92
+        uses: dtolnay/rust-toolchain@1.92
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+
+      # THIRD-PARTY-OS-LICENSES.md is git-ignored (it embeds license texts), so
+      # generate it into dist/ before the build — Dockerfile.alpine COPYs it
+      # into /exaudf so it ships inside lc-rs.tar.gz.
+      - name: Generate OS/runtime license bundle
+        run: bash dist/generate-os-licenses.sh
+
       # Build the SLC artifact tarball (packager stage bakes the /conf resolver
       # symlinks; artifact stage exposes lc-rs.tar.gz for --output extraction).
       - name: Build SLC tarball (--target artifact)
