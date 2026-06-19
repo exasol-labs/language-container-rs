@@ -164,7 +164,7 @@ fn value_byte_cost(v: &Value) -> usize {
         Value::String(s) => s.len(),
         Value::Numeric(d) => d.to_string().len(),
         Value::Date(_) => 10,
-        Value::Timestamp(_) => 26,
+        Value::Timestamp(_) => 29,
     }
 }
 
@@ -285,8 +285,18 @@ impl EmitBuffer {
 const DATE_FORMAT: &str = "%Y-%m-%d";
 /// Parse format: `%.f` is optional fractional digits, tolerates both `HH:MM:SS` and `HH:MM:SS.ffffff`.
 const TIMESTAMP_PARSE: &str = "%Y-%m-%d %H:%M:%S%.f";
-/// Emit format: `%.6f` always emits exactly 6 microsecond digits, matching Exasol's `YYYY-MM-DD HH:MM:SS.ffffff`.
-const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.6f";
+/// Emit format: `%.9f` always emits exactly 9 fractional (nanosecond) digits.
+/// The Exasol engine truncates the emitted value to the output column's declared
+/// precision on receipt (`SWIGResultHandler::setTimestamp` parses `YYYY-MM-DD
+/// HH24:MI:SS.FF9` then applies `trunc_to_fractional_seconds_precision(value,
+/// m_types[col].prec)`), so emitting all 9 digits is lossless for every declared
+/// precision; the old `%.6f` capped output at microseconds and lost precision for
+/// `TIMESTAMP(7/8/9)`. This benefits only UDF-*generated* sub-microsecond values
+/// (e.g. a wall-clock or connect-back source): the DB delivers input columns to
+/// every UDF at microsecond precision (`SWIGTableData::getTimestamp` formats
+/// `...FF6`), so an input→output round-trip is capped at microseconds regardless
+/// of this emit format.
+const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.9f";
 /// ISO-8601 `T`-separated fallback some sources emit for timestamps.
 const TIMESTAMP_FORMAT_ISO: &str = "%Y-%m-%dT%H:%M:%S%.f";
 
@@ -1125,6 +1135,37 @@ mod tests {
         assert!(
             emit.should_flush(),
             "a single oversized row must request a flush after one push"
+        );
+    }
+
+    #[test]
+    fn timestamp_emit_nanosecond_roundtrip() {
+        // GIVEN a Timestamp value with sub-microsecond (nanosecond) precision.
+        // 123456789 ns = 123456 µs + 789 ns; %.6f would truncate to 123456 µs.
+        let ts = NaiveDate::from_ymd_opt(2026, 6, 14)
+            .unwrap()
+            .and_hms_nano_opt(9, 30, 15, 123_456_789)
+            .unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+
+        // WHEN serialised via EmitBuffer -> to_proto (uses value_to_block_string).
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![Value::Timestamp(ts)]);
+        let table = emit.to_proto(&meta);
+
+        // THEN the emitted string contains exactly 9 fractional digits.
+        let emitted_str = &table.data_string[0];
+        assert!(
+            emitted_str.ends_with(".123456789"),
+            "expected 9-digit nanosecond fraction, got: {emitted_str}"
+        );
+
+        // AND it round-trips losslessly via from_proto.
+        let rs = InputRowSet::from_proto(&table, &meta);
+        assert_eq!(
+            rs.row(0).unwrap(),
+            &[Value::Timestamp(ts)],
+            "nanosecond timestamp must survive to_proto -> from_proto round-trip"
         );
     }
 

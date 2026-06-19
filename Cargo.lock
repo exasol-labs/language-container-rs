@@ -3418,6 +3418,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "timestamp-add-second"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
+name = "timestamp-now"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
+name = "timestamp-passthrough"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "tiny-keccak"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
