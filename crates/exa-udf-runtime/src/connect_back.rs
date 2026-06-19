@@ -12,6 +12,7 @@
 
 use arrow::record_batch::RecordBatch;
 use exa_zmq_protocol::ConnInfo;
+use exarrow_rs::Parameter;
 use exarrow_rs::adbc::{Connection, Driver};
 use exasol_udf_sdk::connect_back::ExaConnection;
 use exasol_udf_sdk::error::UdfError;
@@ -208,6 +209,55 @@ impl ExaConnection for RuntimeExaConnection {
     fn rollback(&mut self) -> Result<(), UdfError> {
         self.run_txn_op("rollback", |inner| inner.rollback())
     }
+
+    fn execute_batch(&mut self, sql: &str, rows: &[Vec<Value>]) -> Result<u64, UdfError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        cb_log(&format!(
+            "[cb] execute_batch: '{}', {} rows",
+            sql,
+            rows.len()
+        ));
+        let param_rows: Vec<Vec<Parameter>> = rows
+            .iter()
+            .map(|row| row.iter().map(value_to_parameter).collect::<Result<_, _>>())
+            .collect::<Result<_, _>>()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            connect_back_rt().block_on(async {
+                let stmt = self
+                    .inner
+                    .prepare(sql)
+                    .await
+                    .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+                let count = self
+                    .inner
+                    .execute_batch_update(&stmt, &param_rows)
+                    .await
+                    .map_err(|e| UdfError::ConnectBack(e.to_string()));
+                // Log close errors but don't replace the execution result.
+                if let Err(e) = self.inner.close_prepared(stmt).await {
+                    cb_log(&format!("[cb] execute_batch: close_prepared error: {e}"));
+                }
+                count.map(|n| n.max(0) as u64)
+            })
+        }));
+        cb_log("[cb] execute_batch: returned from block_on");
+        match result {
+            Ok(r) => r,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                cb_log(&format!("[cb] execute_batch panic: {msg}"));
+                Err(UdfError::ConnectBack(format!(
+                    "panic in execute_batch: {msg}"
+                )))
+            }
+        }
+    }
 }
 
 impl RuntimeExaConnection {
@@ -240,6 +290,27 @@ impl RuntimeExaConnection {
                 Err(UdfError::ConnectBack(format!("panic in {name}: {msg}")))
             }
         }
+    }
+}
+
+/// Map one SDK [`Value`] to the exarrow-rs [`Parameter`] required by prepared
+/// statement execution.
+///
+/// The common DML binding types (String, integers, float, boolean, null) map
+/// directly. Numeric/Date/Timestamp have no lossless wire mapping today and
+/// return [`UdfError::Unimplemented`] — callers that need them can format the
+/// value as a string literal and use `execute` instead.
+fn value_to_parameter(v: &Value) -> Result<Parameter, UdfError> {
+    match v {
+        Value::Null => Ok(Parameter::Null),
+        Value::Bool(b) => Ok(Parameter::Boolean(*b)),
+        Value::Int32(i) => Ok(Parameter::Integer(*i as i64)),
+        Value::Int64(i) => Ok(Parameter::Integer(*i)),
+        Value::Double(f) => Ok(Parameter::Float(*f)),
+        Value::String(s) => Ok(Parameter::String(s.clone())),
+        other => Err(UdfError::Unimplemented(format!(
+            "execute_batch: no Parameter mapping for {other:?}"
+        ))),
     }
 }
 
@@ -327,6 +398,67 @@ fn build_dsn(conn_info: &ConnInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_batch_value_mapping_roundtrip() {
+        // Supported variants map to the expected Parameter discriminants.
+        assert!(matches!(
+            value_to_parameter(&Value::Null),
+            Ok(Parameter::Null)
+        ));
+        assert!(matches!(
+            value_to_parameter(&Value::Bool(true)),
+            Ok(Parameter::Boolean(true))
+        ));
+        assert!(matches!(
+            value_to_parameter(&Value::Bool(false)),
+            Ok(Parameter::Boolean(false))
+        ));
+        assert!(matches!(
+            value_to_parameter(&Value::Int32(7)),
+            Ok(Parameter::Integer(7))
+        ));
+        assert!(matches!(
+            value_to_parameter(&Value::Int64(-1)),
+            Ok(Parameter::Integer(-1))
+        ));
+        assert!(matches!(
+            value_to_parameter(&Value::Double(1.5)),
+            Ok(Parameter::Float(_))
+        ));
+        let s = Value::String("hello".into());
+        assert!(matches!(value_to_parameter(&s), Ok(Parameter::String(_))));
+
+        // Int32 is widened to i64.
+        if let Ok(Parameter::Integer(n)) = value_to_parameter(&Value::Int32(42)) {
+            assert_eq!(n, 42i64);
+        } else {
+            panic!("Int32 did not widen to Integer");
+        }
+
+        // Unsupported variants return Unimplemented.
+        use exasol_udf_sdk::value::Decimal;
+        let num = Value::Numeric(Decimal {
+            unscaled: 1,
+            scale: 0,
+        });
+        assert!(matches!(
+            value_to_parameter(&num),
+            Err(UdfError::Unimplemented(_))
+        ));
+
+        let d = Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap());
+        assert!(matches!(
+            value_to_parameter(&d),
+            Err(UdfError::Unimplemented(_))
+        ));
+
+        let ts = Value::Timestamp(chrono::NaiveDateTime::default());
+        assert!(matches!(
+            value_to_parameter(&ts),
+            Err(UdfError::Unimplemented(_))
+        ));
+    }
 
     #[test]
     fn dsn_disables_cert_validation_and_carries_credentials() {

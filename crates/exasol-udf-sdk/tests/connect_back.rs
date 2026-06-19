@@ -32,6 +32,20 @@ impl ExaConnection for MockConn {
 }
 
 #[test]
+fn execute_batch_default_returns_unimplemented() {
+    // MockConn only implements query_arrow + execute; execute_batch must
+    // fall through to the trait default which returns Unimplemented.
+    // This also verifies the method signature is exarrow-rs–free at the
+    // SDK boundary (no Parameter type appears in the signature).
+    let mut conn: Box<dyn ExaConnection> = Box::new(MockConn { last_sql: None });
+    let rows = vec![vec![Value::Int64(1), Value::String("a".into())]];
+    assert!(matches!(
+        conn.execute_batch("INSERT INTO t VALUES (?, ?)", &rows),
+        Err(UdfError::Unimplemented(_))
+    ));
+}
+
+#[test]
 fn transaction_methods_default_to_unimplemented() {
     // begin/commit/rollback exist on the trait surface so UDF code can call
     // them on a Box<dyn ExaConnection>. A connection that does not implement
