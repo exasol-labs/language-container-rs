@@ -2692,11 +2692,11 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- exa-proto 0.12.0
-- exa-udf-runtime 0.12.0
-- exa-zmq-protocol 0.12.0
-- exasol-udf-sdk 0.12.0
-- exaudfclient 0.12.0
+- exa-proto 0.12.1
+- exa-udf-runtime 0.12.1
+- exa-zmq-protocol 0.12.1
+- exasol-udf-sdk 0.12.1
+- exaudfclient 0.12.1
 - brotli-decompressor 5.0.1
 - chrono 0.4.45
 - libm 0.2.16
