@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -253,10 +252,6 @@ jobs:
     # unprivileged user namespaces, which the "Allow unprivileged user
     # namespaces" step below disables. See that step for the full explanation.
     runs-on: ubuntu-latest
-    # Skipped on tag pushes: a vX.Y.Z tag points at an already-merged main commit
-    # that passed this matrix as a required PR check, so the release path does not
-    # re-run the privileged-Docker matrix (lean publish).
-    if: github.ref_type != 'tag'
     needs: [lint, licenses, unit-tests, build-slc]
     timeout-minutes: 45
     strategy:
@@ -463,51 +458,73 @@ jobs:
           docker stop exasol-db || true
           docker rm   exasol-db || true
 
-  # ── release: triggered by pushing a vX.Y.Z tag ──────────────────────────
-  # Cuts a GitHub Release + publishes the public crates when a vX.Y.Z tag is
-  # pushed. The maintainer drives a release explicitly: bump the version in a PR,
-  # merge to main, then `git tag vX.Y.Z && git push origin vX.Y.Z`. main is gated
-  # by branch protection + required PR checks, so the tagged commit is already
-  # validated — this job does NOT re-run the integration matrix (lean publish).
+  # ── release: auto-tag + publish on merge to main when the version is bumped ──
+  # Runs only after the full CI is green — `needs: [build-slc, integration]`, and
+  # integration transitively needs lint/licenses/unit-tests/build, so any red job
+  # blocks this one. On a push to main it reads the workspace version and, if no
+  # matching vX.Y.Z tag exists yet (i.e. this merge bumped the version), it
+  # creates+pushes the tag, cuts the GitHub Release with the SLC tarball, and
+  # publishes the public crates. A merge that does not bump the version is a
+  # no-op (the tag already exists). Everything is done in this one job so the
+  # release does not depend on the token-pushed tag triggering a second workflow
+  # (pushes made with GITHUB_TOKEN deliberately do not trigger workflows).
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [build, build-slc]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [build-slc, integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: write   # create GitHub Release + asset upload
+      contents: write   # push tag + create GitHub Release + asset upload
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Derive version from tag and verify it matches Cargo.toml
+      - name: Read version from Cargo.toml
         id: version
         run: |
-          VER="${GITHUB_REF_NAME#v}"
-          MANIFEST_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          if [ "$VER" != "$MANIFEST_VER" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} (version ${VER}) does not match Cargo.toml version ${MANIFEST_VER}"
-            exit 1
-          fi
+          VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to release (tag absent == version bumped)
+        id: gate
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.version.outputs.tag }} already exists — version not bumped; nothing to release."
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "Version bumped to ${{ steps.version.outputs.version }} — releasing ${{ steps.version.outputs.tag }}."
+          fi
 
       - name: Download SLC tarball
+        if: steps.gate.outputs.release == 'true'
         uses: actions/download-artifact@v4
         with:
           name: lc-tarball
 
       - name: Rename SLC tarball for release
+        if: steps.gate.outputs.release == 'true'
         run: |
           VER="${{ steps.version.outputs.version }}"
           cp lc-rs.tar.gz "lc-rust-${VER}.tar.gz"
           ls -la "lc-rust-${VER}.tar.gz"
 
+      - name: Create and push tag
+        if: steps.gate.outputs.release == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
       - name: Create GitHub Release
+        if: steps.gate.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
           files: lc-rust-*.tar.gz
 
@@ -519,9 +536,11 @@ jobs:
       # secret; if it is absent the step is a no-op (so the job doesn't fail before
       # the token is configured).
       - name: Install Rust toolchain
+        if: steps.gate.outputs.release == 'true'
         uses: dtolnay/rust-toolchain@1.92
 
       - name: Publish public crates to crates.io
+        if: steps.gate.outputs.release == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
           VER: ${{ steps.version.outputs.version }}
