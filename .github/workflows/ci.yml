@@ -200,24 +200,10 @@ jobs:
       - name: Check advisories
         run: cargo deny check advisories
 
-      # The third-party attribution bundle shipped in lc-rs.tar.gz must stay in
-      # sync with the exaudfclient dependency graph. Regenerate and fail if the
-      # committed file is stale (cargo-about is pinned so output is reproducible).
-      - name: Install cargo-about
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-about@0.9.0
-
-      - name: Verify THIRD-PARTY-LICENSES.md is current
-        run: |
-          cargo about generate --manifest-path crates/exaudfclient/Cargo.toml \
-            about.hbs -o /tmp/third-party.md
-          if ! diff -q THIRD-PARTY-LICENSES.md /tmp/third-party.md >/dev/null; then
-            echo "::error::THIRD-PARTY-LICENSES.md is stale. Regenerate with:"
-            echo "  cargo about generate --manifest-path crates/exaudfclient/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES.md"
-            diff THIRD-PARTY-LICENSES.md /tmp/third-party.md || true
-            exit 1
-          fi
+      # The third-party attribution bundles (THIRD-PARTY-LICENSES.md and
+      # THIRD-PARTY-OS-LICENSES.md) are generated at build time into dist/ by
+      # dist/generate-licenses.sh and are not committed, so there is no committed
+      # file to verify here — the build-slc job generates them before docker build.
 
   build-slc:
     name: Build SLC image
@@ -237,11 +223,11 @@ jobs:
         with:
           tool: cargo-about@0.9.0
 
-      # THIRD-PARTY-OS-LICENSES.md is git-ignored (it embeds license texts), so
-      # generate it into dist/ before the build — Dockerfile.alpine COPYs it
-      # into /exaudf so it ships inside lc-rs.tar.gz.
-      - name: Generate OS/runtime license bundle
-        run: bash dist/generate-os-licenses.sh
+      # Both THIRD-PARTY-*.md bundles are git-ignored (they embed license texts),
+      # so generate them into dist/ before the build — Dockerfile.alpine COPYs
+      # them into /exaudf so they ship inside lc-rs.tar.gz.
+      - name: Generate license bundles
+        run: bash dist/generate-licenses.sh
 
       # Build the SLC artifact tarball (packager stage bakes the /conf resolver
       # symlinks; artifact stage exposes lc-rs.tar.gz for --output extraction).

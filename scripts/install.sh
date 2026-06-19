@@ -84,8 +84,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── step 1: build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "==> Generating OS/runtime license bundle …"
-  bash "$REPO_ROOT/dist/generate-os-licenses.sh"
+  echo "==> Generating license bundles …"
+  bash "$REPO_ROOT/dist/generate-licenses.sh"
   echo "==> Building SLC tarball (--target artifact) …"
   TMP_DIR=$(mktemp -d /tmp/slc-XXXXXX)
   trap 'rm -rf "$TMP_DIR"' EXIT
