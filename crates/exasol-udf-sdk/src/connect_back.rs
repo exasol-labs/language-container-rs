@@ -83,6 +83,17 @@ pub trait ExaConnection: Send {
     /// Execute a DML/DDL statement, returning the affected row count.
     fn execute(&mut self, sql: &str) -> Result<u64, UdfError>;
 
+    /// Execute a parameterised DML statement once per row in `rows`, returning
+    /// the total affected row count.
+    ///
+    /// The default returns [`UdfError::Unimplemented`] so existing mock
+    /// implementations in unit tests keep compiling without changes.
+    fn execute_batch(&mut self, _sql: &str, _rows: &[Vec<Value>]) -> Result<u64, UdfError> {
+        Err(UdfError::Unimplemented(
+            "execute_batch not supported on this connection".into(),
+        ))
+    }
+
     /// Begin an explicit transaction (disable autocommit).
     ///
     /// The default returns [`UdfError::Unimplemented`] so connections that do

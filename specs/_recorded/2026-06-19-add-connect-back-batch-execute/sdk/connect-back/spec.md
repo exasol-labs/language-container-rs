@@ -69,8 +69,10 @@ The connect-back surface exposes a public `ConnectionObject` credential struct, 
 
 * *GIVEN* the `exasol-udf-sdk` connect-back module
 * *WHEN* a single `RecordBatch` is passed to the `record_batch_to_rows` helper
-* *THEN* it MUST return the rows of exactly that one batch as `Vec<Vec<Value>>`, using the same per-cell type mapping as `record_batches_to_rows`
-* *AND* `record_batches_to_rows` MUST be expressed in terms of `record_batch_to_rows` applied per batch, so the multi-batch and single-batch converters cannot diverge in their type handling
+* *THEN* it MUST return the rows of exactly that one batch as `Vec<Vec<Value>>`, using the same per-cell type mapping as `query`
+* *AND* MUST be expressed in terms of `cell_to_value` applied per batch, so the multi-batch and single-batch converters cannot diverge in their type handling
+
+<!-- CHANGED -->
 
 ### Scenario: ExaConnection execute_batch default returns Unimplemented on a mock
 
@@ -79,3 +81,5 @@ The connect-back surface exposes a public `ConnectionObject` credential struct, 
 * *THEN* the call MUST return `Err(UdfError::Unimplemented(_))` from the trait default
 * *AND* the crate MUST compile with zero errors, confirming the default does not require the implementor to supply `execute_batch`
 * *AND* the `execute_batch` signature MUST be `fn execute_batch(&mut self, sql: &str, rows: &[Vec<Value>]) -> Result<u64, UdfError>` with no `exarrow-rs` type in the public signature
+
+<!-- /CHANGED -->
