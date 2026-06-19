@@ -28,24 +28,7 @@ The workspace ships three crates for UDF authors, container operators, and build
 
 ## Install the language container
 
-`scripts/install.sh` builds the Docker image, exports the container filesystem, uploads it to BucketFS, and registers the `RUST` script language — all in one command:
-
-```bash
-scripts/install.sh \
-  --host localhost \
-  --password exasol \
-  --bfs-password <write-password>
-```
-
-The BucketFS write password for the Docker image can be read with:
-
-```bash
-docker exec exasol-db bash -c \
-  "xmllint --xpath '//BucketFSService[@id=\"bfsdefault\"]/Bucket[@id=\"default\"]/WritePasswd/text()' \
-  /exa/etc/EXAConf"
-```
-
-Full option reference: `scripts/install.sh --help`
+`scripts/install.sh` builds the Docker image, uploads it to BucketFS, and registers the `RUST` script language in one command. See [Installation](docs/installation.md) for the full walkthrough, including how to read the BucketFS write password.
 
 ## Quick start
 
@@ -107,6 +90,7 @@ Three crates are published to [crates.io](https://crates.io) for UDF authors; th
 
 | | |
 |---|---|
+| [Installation](docs/installation.md) | Build, upload and register the container; read the BucketFS write password |
 | [Writing a Rust UDF](docs/writing-a-udf.md) | Implement, test, build and deploy a UDF from scratch |
 | [Exasol UDF protocol](docs/protocol.md) | The ZMQ REQ/REP + Protobuf SLC wire protocol |
 | [Cargo ecosystem](docs/cargo-ecosystem.md) | Workspace layout, feature flags, build tooling |
