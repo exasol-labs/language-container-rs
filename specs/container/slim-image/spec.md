@@ -13,7 +13,7 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 ### Scenario: docker build produces a tagged slim image
 
 * *GIVEN* the workspace with a `Dockerfile.alpine` at the repository root
-* *WHEN* `docker build -f Dockerfile.alpine -t slc-rs-slim:dev .` is run
+* *WHEN* `docker build -f Dockerfile.alpine -t lc-rs-slim:dev .` is run
 * *THEN* the build MUST complete successfully
 * *AND* the resulting image MUST contain an executable at `/exaudf/exaudfclient`
 
@@ -66,14 +66,14 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 
 ### Scenario: Alpine image passes the db-roundtrip integration suite
 
-* *GIVEN* the `slc-rs-slim:dev` image built from `Dockerfile.alpine` and a running `exasol/docker-db:2026.latest` container
+* *GIVEN* the `lc-rs-slim:dev` image built from `Dockerfile.alpine` and a running `exasol/docker-db:2026.latest` container
 * *WHEN* the db-roundtrip integration harness registers the Alpine SLC, uploads the UDF artifacts, and runs every roundtrip scenario
 * *THEN* the scalar, set/EMITS, statically-linked-dependency, UDF-error, and single-call scenarios MUST all pass against the Alpine image
 * *AND* the Alpine image MUST be interchangeable with the Debian image for SLC registration, requiring no change to the `language_definitions.json` contract
 
 ### Scenario: Alpine image is smaller than the Debian slim image
 
-* *GIVEN* both the Debian `slc-rs-slim:dev` image and the Alpine `slc-rs-slim:dev` image built from the same workspace
+* *GIVEN* both the Debian `lc-rs-slim:dev` image and the Alpine `lc-rs-slim:dev` image built from the same workspace
 * *WHEN* the compressed and on-disk sizes of both images are measured with `docker image inspect`
 * *THEN* the Alpine image on-disk size MUST be smaller than the Debian slim image
 * *AND* the measured size delta MUST be recorded in the plan's spike notes

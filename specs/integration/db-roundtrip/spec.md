@@ -21,7 +21,7 @@ The pre-existing non-connect-back scenarios in this feature — `sanity_select_o
 
 ### Scenario: Slim SLC is registered for the session
 
-* *GIVEN* a running Exasol container and the locally built `slc-rs-slim:dev` image uploaded into BucketFS as the language container
+* *GIVEN* a running Exasol container and the locally built `lc-rs-slim:dev` image uploaded into BucketFS as the language container
 * *WHEN* the harness runs `ALTER SESSION SET SCRIPT_LANGUAGES` with the `RUST=localzmq+protobuf://...#.../exaudf/exaudfclient` definition
 * *THEN* the statement MUST succeed
 * *AND* `RUST` MUST be usable as a script language alias in subsequent `CREATE SCRIPT` statements

@@ -18,7 +18,7 @@ struct VTableProbe {
 pub fn run(args: &[String]) -> Result<(), String> {
     let path = args
         .first()
-        .ok_or_else(|| "Usage: cargo exaudf validate <path-to-so>".to_string())?;
+        .ok_or_else(|| "Usage: cargo exasol-udf validate <path-to-so>".to_string())?;
     let so_path = Path::new(path);
 
     if !so_path.exists() {

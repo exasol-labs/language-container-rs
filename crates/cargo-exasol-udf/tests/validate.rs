@@ -1,6 +1,6 @@
 use std::process::Command;
 
-fn cargo_exaudf_bin() -> std::path::PathBuf {
+fn cargo_exasol_udf_bin() -> std::path::PathBuf {
     let mut p = std::env::current_exe().unwrap();
     loop {
         p.pop();
@@ -11,16 +11,16 @@ fn cargo_exaudf_bin() -> std::path::PathBuf {
             panic!("Could not find target dir");
         }
     }
-    p.push("cargo-exaudf");
+    p.push("cargo-exasol-udf");
     p
 }
 
 #[test]
 fn validate_rejects_missing_file() {
-    let output = Command::new(cargo_exaudf_bin())
-        .args(["exaudf", "validate", "/nonexistent/path/lib.so"])
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "validate", "/nonexistent/path/lib.so"])
         .output()
-        .expect("failed to run cargo-exaudf");
+        .expect("failed to run cargo-exasol-udf");
 
     assert!(
         !output.status.success(),
@@ -56,10 +56,10 @@ fn validate_rejects_missing_entry_symbol() {
         }
     };
 
-    let output = Command::new(cargo_exaudf_bin())
-        .args(["exaudf", "validate", so_path])
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "validate", so_path])
         .output()
-        .expect("failed to run cargo-exaudf");
+        .expect("failed to run cargo-exasol-udf");
 
     assert!(
         !output.status.success(),

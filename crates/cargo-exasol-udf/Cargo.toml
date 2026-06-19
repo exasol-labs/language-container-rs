@@ -1,0 +1,19 @@
+[package]
+name = "cargo-exasol-udf"
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition = "2024"
+description = "Cargo subcommand to scaffold, build (static musl .so), and validate Exasol Rust UDF crates."
+
+[[bin]]
+name = "cargo-exasol-udf"
+path = "src/main.rs"
+
+[dependencies]
+libloading = { workspace = true }
+exasol-udf-sdk = { workspace = true }
+
+[dev-dependencies]
+tempfile = "=3.14.0"

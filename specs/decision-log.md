@@ -1001,7 +1001,7 @@ Exasol UDFs run in a sandbox that bind-mounts the database's resolver config at 
 
 ### Decision
 
-Produce `/etc/hosts → /conf/hosts` and `/etc/resolv.conf → /conf/resolv.conf` inside the Docker build, in a `packager` stage that copies the runtime root into a staging directory, runs `ln -sf` there (the staging dir is NOT bind-mounted, so `ln` succeeds), and `tar`s it with Alpine's own pinned `tar` (which records symlinks as-is, with no `COPY` dereference). An `artifact` stage (`FROM scratch`) exposes the resulting `slc-rs.tar.gz` for `docker build --output`. `python3` leaves the SLC packaging path entirely. Verified 2026-06-15 to produce byte-for-byte the same symlink entries the python script produced.
+Produce `/etc/hosts → /conf/hosts` and `/etc/resolv.conf → /conf/resolv.conf` inside the Docker build, in a `packager` stage that copies the runtime root into a staging directory, runs `ln -sf` there (the staging dir is NOT bind-mounted, so `ln` succeeds), and `tar`s it with Alpine's own pinned `tar` (which records symlinks as-is, with no `COPY` dereference). An `artifact` stage (`FROM scratch`) exposes the resulting `lc-rs.tar.gz` for `docker build --output`. `python3` leaves the SLC packaging path entirely. Verified 2026-06-15 to produce byte-for-byte the same symlink entries the python script produced.
 
 ### Options Considered
 
@@ -1029,18 +1029,18 @@ Previously each consumer of the SLC (install.sh, IT harness, CI) independently r
 
 ### Decision
 
-Make `slc-rs.tar.gz` (produced by the `artifact` stage with `docker build --target artifact --output type=local,...`) the single build artifact. The IT harness reads it via `SLC_TARBALL`; `install.sh`, `ci-it-local.sh`, and `ci.yml` produce it with `docker build --target artifact --output` and upload/consume it directly. `docker save`/`docker load`/`docker export` per-consumer steps are dropped.
+Make `lc-rs.tar.gz` (produced by the `artifact` stage with `docker build --target artifact --output type=local,...`) the single build artifact. The IT harness reads it via `SLC_TARBALL`; `install.sh`, `ci-it-local.sh`, and `ci.yml` produce it with `docker build --target artifact --output` and upload/consume it directly. `docker save`/`docker load`/`docker export` per-consumer steps are dropped.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Single `slc-rs.tar.gz` artifact from `artifact` stage; all consumers read it | ✓ Chosen — one source of truth; eliminates drift; no per-consumer export round-trip; symlinks already baked in (ADR-037) |
+| Single `lc-rs.tar.gz` artifact from `artifact` stage; all consumers read it | ✓ Chosen — one source of truth; eliminates drift; no per-consumer export round-trip; symlinks already baked in (ADR-037) |
 | Keep `docker save` (CI image artifact) + per-consumer `docker export \| gzip` | ✗ Rejected — every consumer reran the export step, which drifts and duplicates the flatten-and-gzip logic; does not solve the symlink problem |
 
 ### Consequences
 
-A single, self-contained `slc-rs.tar.gz` artifact is produced once and read by every consumer without modification. The IT harness reads the path from `SLC_TARBALL` and fails fast with clear guidance if it is unset — a missing tarball is a setup error, not a condition to recover from silently. The `docker save`/`docker load`/`docker export` steps are removed from all consumers.
+A single, self-contained `lc-rs.tar.gz` artifact is produced once and read by every consumer without modification. The IT harness reads the path from `SLC_TARBALL` and fails fast with clear guidance if it is unset — a missing tarball is a setup error, not a condition to recover from silently. The `docker save`/`docker load`/`docker export` steps are removed from all consumers.
 
 ---
 

@@ -1,5 +1,6 @@
 [package]
 name = "scalar-double"
+publish = false
 version = "0.1.1"
 license.workspace = true
 edition = "2024"

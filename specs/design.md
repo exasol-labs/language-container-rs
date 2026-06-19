@@ -1,4 +1,4 @@
-# slc-rs — Technical Design: Rust-native Exasol Language Container
+# lc-rs — Technical Design: Rust-native Exasol Language Container
 
 ## Context
 
@@ -16,7 +16,7 @@ The existing C++ launcher (`script-languages-release/exaudfclient/exaudfclient.c
 ## 1. Cargo Workspace Structure
 
 ```
-slc-rs/
+lc-rs/
   Cargo.toml                        # [workspace], members = all crates below
   rust-toolchain.toml               # pinned channel (e.g. stable 1.92) — MUST match container
   Cargo.lock
@@ -184,7 +184,7 @@ Error close path: on UDF failure, serialize the error string and send it through
 
 **Recommendation: C as primary (JIT), A as the fast path. Both share the same loader.**
 
-- **Option C (JIT):** `exascript_info.source_code` contains the user's Rust source. The runtime writes it to `/tmp/udf-<sha256>/src/lib.rs` inside a pre-baked template crate (`/opt/slc-rs/template/` — includes `Cargo.toml` with `exasol-udf-sdk` dependency and `.cargo/config.toml` pointing to the offline vendored registry at `/opt/slc-rs/vendor/`). Runs `cargo build --release --offline`. Caches the resulting `libudf.so` at `/tmp/udf-cache/<hash>/` keyed by `sha256(source ++ SDK_VERSION ++ RUSTC_VERSION)`. A warm-cache hit skips compilation entirely.
+- **Option C (JIT):** `exascript_info.source_code` contains the user's Rust source. The runtime writes it to `/tmp/udf-<sha256>/src/lib.rs` inside a pre-baked template crate (`/opt/lc-rs/template/` — includes `Cargo.toml` with `exasol-udf-sdk` dependency and `.cargo/config.toml` pointing to the offline vendored registry at `/opt/lc-rs/vendor/`). Runs `cargo build --release --offline`. Caches the resulting `libudf.so` at `/tmp/udf-cache/<hash>/` keyed by `sha256(source ++ SDK_VERSION ++ RUSTC_VERSION)`. A warm-cache hit skips compilation entirely.
 
 - **Option A (precompiled):** A `%`-option in the script source (e.g. `%udf_object /buckets/bfsdefault/default/path/libudf.so`) names a prebuilt `.so` in BucketFS. The runtime reads the path and skips compilation. Authors use `cargo exaudf build` locally (or in CI) against the exact same toolchain pinned in `rust-toolchain.toml`.
 
@@ -477,11 +477,11 @@ ENV PATH=/usr/local/cargo/bin:$PATH \
     RUSTUP_HOME=/usr/local/rustup
 
 RUN mkdir -p /exaudf /build_info /conf /buckets \
-             /opt/slc-rs/vendor /opt/slc-rs/template
+             /opt/lc-rs/vendor /opt/lc-rs/template
 COPY --from=builder /src/target/release/exaudfclient /exaudf/exaudfclient
-COPY --from=builder /vendor /opt/slc-rs/vendor
-COPY container/template-crate/    /opt/slc-rs/template/
-COPY container/cargo-offline.toml /opt/slc-rs/template/.cargo/config.toml
+COPY --from=builder /vendor /opt/lc-rs/vendor
+COPY container/template-crate/    /opt/lc-rs/template/
+COPY container/cargo-offline.toml /opt/lc-rs/template/.cargo/config.toml
 COPY build_info/language_definitions.json /build_info/language_definitions.json
 ```
 
@@ -538,22 +538,22 @@ flavors/standard-EXASOL-all-rust/
 
 ```dockerfile
 FROM {{language_deps}}
-RUN mkdir /exaudfclient /exaudf /opt/slc-rs/vendor /opt/slc-rs/template
-COPY /slc-rs /exaudfclient
+RUN mkdir /exaudfclient /exaudf /opt/lc-rs/vendor /opt/lc-rs/template
+COPY /lc-rs /exaudfclient
 WORKDIR /exaudfclient
 RUN cargo build --release -p exaudfclient && \
     cp target/release/exaudfclient /exaudf/exaudfclient && \
-    cargo vendor crates/exasol-udf-sdk /opt/slc-rs/vendor
-COPY container/template-crate/    /opt/slc-rs/template/
-COPY container/cargo-offline.toml /opt/slc-rs/template/.cargo/config.toml
+    cargo vendor crates/exasol-udf-sdk /opt/lc-rs/vendor
+COPY container/template-crate/    /opt/lc-rs/template/
+COPY container/cargo-offline.toml /opt/lc-rs/template/.cargo/config.toml
 RUN rm -rf target ~/.cargo/registry/cache
 ```
 
-`build_steps.py` adds `slc-rs` to `get_additional_build_directories_mapping`:
+`build_steps.py` adds `lc-rs` to `get_additional_build_directories_mapping`:
 
 ```python
 def get_additional_build_directories_mapping(self):
-    return {"slc-rs": "slc-rs"}   # analogous to {"exaudfclient": "exaudfclient"} in python flavor
+    return {"lc-rs": "lc-rs"}   # analogous to {"exaudfclient": "exaudfclient"} in python flavor
 ```
 
 No Bazel — pure Cargo. The build system's only requirement is that `/exaudf/exaudfclient` exists in the release image.

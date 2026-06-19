@@ -6,7 +6,7 @@ use std::env;
 use std::process;
 
 fn usage() -> ! {
-    eprintln!("Usage: cargo exaudf <subcommand> [args]");
+    eprintln!("Usage: cargo exasol-udf <subcommand> [args]");
     eprintln!("Subcommands:");
     eprintln!("  new <path>       Scaffold a new UDF crate at <path>");
     eprintln!("  build [<path>]   Build the UDF crate (defaults to .)");
@@ -15,9 +15,9 @@ fn usage() -> ! {
 }
 
 fn main() {
-    // When invoked as `cargo exaudf <cmd>`, argv is:
-    //   ["cargo-exaudf", "exaudf", <cmd>, ...]
-    // Skip argv[0] (binary name) and argv[1] ("exaudf" cargo-subcommand token).
+    // When invoked as `cargo exasol-udf <cmd>`, argv is:
+    //   ["cargo-exasol-udf", "exasol-udf", <cmd>, ...]
+    // Skip argv[0] (binary name) and argv[1] ("exasol-udf" cargo-subcommand token).
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(2).map(|s| s.as_str());
     let rest = args.get(3..).unwrap_or_default();

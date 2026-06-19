@@ -5,7 +5,7 @@ use std::path::Path;
 pub fn run(args: &[String]) -> Result<(), String> {
     let path = args
         .first()
-        .ok_or_else(|| "Usage: cargo exaudf new <path>".to_string())?;
+        .ok_or_else(|| "Usage: cargo exasol-udf new <path>".to_string())?;
     let target = Path::new(path);
 
     if target.exists() {

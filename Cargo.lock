@@ -493,7 +493,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-exaudf"
+name = "cargo-exasol-udf"
 version = "0.11.1"
 dependencies = [
  "exasol-udf-sdk",

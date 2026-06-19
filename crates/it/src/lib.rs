@@ -210,7 +210,7 @@ impl Harness {
                 "SLC_TARBALL is not set; build the tarball first:\n  \
                  docker build -f Dockerfile.alpine --target artifact \
                  --output type=local,dest=<dir> .\n  \
-                 then: export SLC_TARBALL=<dir>/slc-rs.tar.gz\n  \
+                 then: export SLC_TARBALL=<dir>/lc-rs.tar.gz\n  \
                  or run: scripts/ci-it-local.sh"
             )
         })?;

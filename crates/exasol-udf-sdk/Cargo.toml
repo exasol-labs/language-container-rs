@@ -2,7 +2,10 @@
 name = "exasol-udf-sdk"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 edition = "2024"
+description = "SDK for writing Exasol UDFs in Rust: UdfRun/UdfContext traits, Value/ExaType, and the Arrow bridge."
 
 [dependencies]
 thiserror = { workspace = true }

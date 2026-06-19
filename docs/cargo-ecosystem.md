@@ -6,16 +6,19 @@
 
 ## Workspace layout
 
-| Crate | Role | In default build? |
-|-------|------|:-----------------:|
-| `exasol-udf-sdk` | Author-facing trait, types, macros | yes |
-| `exasol-udf-macros` | Proc-macro crate for `#[exasol_udf]` | yes |
-| `exa-udf-runtime` | ZMQ event loop; dispatches to `.so` via FFI | yes |
-| `cargo-exaudf` | `cargo exaudf` build/validate subcommands | yes |
-| `exa-zmq-protocol` | ZMQ framing and message routing | yes |
-| `exa-proto` | Protobuf types (prost codegen) | yes |
-| `exaudfclient` | Thin ZMQ client used by the container entrypoint | yes |
-| `it` | Integration tests (Docker, Exasol 2026.latest) | **no** |
+| Crate | Role | Published to crates.io? |
+|-------|------|:-----------------------:|
+| `exasol-udf-sdk` | Author-facing trait, types, macros | **yes** |
+| `exasol-udf-macros` | Proc-macro crate for `#[exasol_udf]` | **yes** |
+| `cargo-exasol-udf` | `cargo exasol-udf` build/validate subcommands | **yes** |
+| `exa-udf-runtime` | ZMQ event loop; dispatches to `.so` via FFI | no (internal) |
+| `exa-zmq-protocol` | ZMQ framing and message routing | no (internal) |
+| `exa-proto` | Protobuf types (prost codegen) | no (internal) |
+| `exaudfclient` | Thin ZMQ client used by the container entrypoint | no (internal) |
+| `it` | Integration tests (Docker, Exasol 2026.latest) | no (internal) |
+
+The three published crates are the customer-facing API; the rest are marked
+`publish = false` and ship only as the prebuilt container binary.
 
 `connect-back-query`, `connect-back-insert`, `connect-back-crunch`, `connect-back-cluster-ip`, and `spike-connect` are in `default-members` and build with plain `cargo build` under the unified 1.92 / edition-2024 toolchain.
 
@@ -45,7 +48,7 @@ Feature flags:
 | _(none)_ | Core trait + types; no async, no arrow |
 | `connect-back` | `cluster_ip`, `connection`, `connect_back` on `UdfContext`; pulls in `arrow 58`, `exarrow-rs`, `tokio` |
 
-## exa-udf-runtime — operator-facing runtime
+## exa-udf-runtime — internal runtime
 
 The ZMQ event loop that the container process runs. Responsibilities:
 
@@ -54,32 +57,34 @@ The ZMQ event loop that the container process runs. Responsibilities:
 - `dlopen`s the UDF `.so` and calls the generated C entry point
 - Catches panics across the FFI boundary and returns them as UDF errors
 
-UDF authors do **not** depend on `exa-udf-runtime` directly. Operators who build a custom container binary embed it:
+This crate is **internal** (`publish = false`) — UDF authors never depend on it.
+It ships only as the prebuilt `exaudfclient` binary inside the container, built
+from this workspace. Feature `connect-back` adds an embedded Tokio runtime and the
+ADBC/exarrow-rs connect-back implementation.
 
-```toml
-[dependencies]
-exa-udf-runtime = { version = "0.8" }
-```
+## cargo-exasol-udf — build tool
 
-Feature `connect-back` adds an embedded Tokio runtime and the ADBC/exarrow-rs connect-back implementation.
-
-## cargo-exaudf — build tool
-
-Install from this workspace:
+Install from crates.io:
 
 ```bash
-cargo install --path crates/cargo-exaudf
+cargo install cargo-exasol-udf
+```
+
+Or from this workspace (development):
+
+```bash
+cargo install --path crates/cargo-exasol-udf
 ```
 
 Subcommands:
 
 | Subcommand | What it does |
 |------------|-------------|
-| `cargo exaudf new <path>` | Scaffold a new UDF crate with the correct `Cargo.toml` and `lib.rs` stub |
-| `cargo exaudf build [<path>]` | Cross-compile to `x86_64-unknown-linux-musl` `.so` (release, symbols stripped) |
-| `cargo exaudf validate <path>` | Inspect a compiled `.so` for the expected exported symbol |
+| `cargo exasol-udf new <path>` | Scaffold a new UDF crate with the correct `Cargo.toml` and `lib.rs` stub |
+| `cargo exasol-udf build [<path>]` | Cross-compile to `x86_64-unknown-linux-musl` `.so` (release, symbols stripped) |
+| `cargo exasol-udf validate <path>` | Inspect a compiled `.so` for the expected exported symbol |
 
-`cargo exaudf build` sets `CARGO_TARGET_DIR`, selects the musl target, and passes `--release` — equivalent to `cargo build --target x86_64-unknown-linux-musl --release` but without needing to remember the flags.
+`cargo exasol-udf build` sets `CARGO_TARGET_DIR`, selects the musl target, and passes `--release` — equivalent to `cargo build --target x86_64-unknown-linux-musl --release` but without needing to remember the flags.
 
 ## exa-zmq-protocol / exa-proto — protocol layer
 

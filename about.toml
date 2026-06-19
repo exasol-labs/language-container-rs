@@ -1,0 +1,24 @@
+# cargo-about config for the third-party license bundle shipped in lc-rs.tar.gz.
+# The accepted list mirrors deny.toml's [licenses].allow (plus OpenSSL, which
+# ring/aws-lc-rs carry as a combined notice). Build- and dev-only deps are not
+# linked into the distributed exaudfclient binary, so they are excluded.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "OpenSSL",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+targets = ["x86_64-unknown-linux-musl"]

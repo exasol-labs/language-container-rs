@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-fn cargo_exaudf_bin() -> std::path::PathBuf {
+fn cargo_exasol_udf_bin() -> std::path::PathBuf {
     // Use the already-built binary from target/debug
     let mut p = std::env::current_exe().unwrap();
     // walk up to the target/debug dir
@@ -14,7 +14,7 @@ fn cargo_exaudf_bin() -> std::path::PathBuf {
             panic!("Could not find target dir");
         }
     }
-    p.push("cargo-exaudf");
+    p.push("cargo-exasol-udf");
     p
 }
 
@@ -23,12 +23,12 @@ fn new_scaffolds_crate_files() {
     let dir = tempfile::tempdir().unwrap();
     let udf_path = dir.path().join("my-udf");
 
-    let status = Command::new(cargo_exaudf_bin())
-        .args(["exaudf", "new", udf_path.to_str().unwrap()])
+    let status = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "new", udf_path.to_str().unwrap()])
         .status()
-        .expect("failed to run cargo-exaudf");
+        .expect("failed to run cargo-exasol-udf");
 
-    assert!(status.success(), "cargo-exaudf new should succeed");
+    assert!(status.success(), "cargo-exasol-udf new should succeed");
 
     // Cargo.toml must exist and contain cdylib
     let cargo_toml = udf_path.join("Cargo.toml");
@@ -65,14 +65,14 @@ fn new_rejects_existing_nonempty_target() {
     // Put a file in it to make it non-empty
     fs::write(udf_path.join("existing_file.txt"), "data").unwrap();
 
-    let output = Command::new(cargo_exaudf_bin())
-        .args(["exaudf", "new", udf_path.to_str().unwrap()])
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "new", udf_path.to_str().unwrap()])
         .output()
-        .expect("failed to run cargo-exaudf");
+        .expect("failed to run cargo-exasol-udf");
 
     assert!(
         !output.status.success(),
-        "cargo-exaudf new should fail on non-empty target"
+        "cargo-exasol-udf new should fail on non-empty target"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

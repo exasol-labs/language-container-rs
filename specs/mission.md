@@ -1,4 +1,4 @@
-# Mission: slc-rs
+# Mission: lc-rs
 
 > A Rust-native Exasol Language Container (SLC) that lets users write Exasol UDFs in Rust by implementing the standard `localzmq+protobuf` wire protocol — with zero dependency on the existing C++ launcher or libexaudflib.
 
@@ -18,10 +18,10 @@ Exasol UDFs are currently limited to Python, Java, and R. Teams with Rust codeba
 
 1. **Full wire-protocol implementation** — handles every `localzmq+protobuf` message type (handshake, scalar, set/EMITS, single-call SC_FN_*, ping-pong, reset, error close path) so the Rust SLC is indistinguishable from the existing C++ one.
 2. **Ergonomic Rust UDF SDK** — exposes `UdfRun` / `UdfContext` traits and `#[exasol_udf]` proc macro so authors write idiomatic Rust with typed column access, Arrow batch fast paths, and optional connect-back to Exasol. Connect-back is surfaced via the `ExaConnection` trait (defined in the SDK) so UDFs never link `exarrow-rs` directly — the host process owns the connection, the UDF just calls trait methods returning Arrow `RecordBatch`.
-3. **Dual execution model** — Precompiled mode (primary author path): author builds a fully-static musl `.so` with `cargo exaudf build`, uploads via `exapump udf deploy`, SLC loads it directly from BucketFS. JIT mode (secondary): Rust source pasted into `CREATE SCRIPT` body, compiled in-container on first call and cached.
+3. **Dual execution model** — Precompiled mode (primary author path): author builds a fully-static musl `.so` with `cargo exasol-udf build`, uploads via `exapump udf deploy`, SLC loads it directly from BucketFS. JIT mode (secondary): Rust source pasted into `CREATE SCRIPT` body, compiled in-container on first call and cached.
 4. **ABI-safe dynamic loading** — `abi_version` + `sdk_fingerprint` checks at `dlopen` time produce a clear error instead of UB when a `.so` was built with a mismatched toolchain.
 5. **Container packaging** — `slim` image (~150 MB, no toolchain, precompiled `.so` only) and `jit` image (~1.4 GB, full Rust toolchain + vendored Cargo registry), both plugging into the `exaslct` flavor DAG.
-6. **Developer tooling** — `cargo-exaudf` CLI: scaffold a new UDF crate, build a fully-static musl `.so` (target triple hidden, musl toolchain installed automatically via `rustup`), and validate ABI compatibility locally. Pairs with `exapump udf deploy` for one-command upload + `CREATE OR REPLACE RUST SCRIPT` generation (type annotations from `#[exasol_udf(input(...), emits(...))]` are optional but used automatically when present).
+6. **Developer tooling** — `cargo-exasol-udf` CLI: scaffold a new UDF crate, build a fully-static musl `.so` (target triple hidden, musl toolchain installed automatically via `rustup`), and validate ABI compatibility locally. Pairs with `exapump udf deploy` for one-command upload + `CREATE OR REPLACE RUST SCRIPT` generation (type annotations from `#[exasol_udf(input(...), emits(...))]` are optional but used automatically when present).
 
 ## Out of Scope
 
@@ -43,7 +43,7 @@ Exasol UDFs are currently limited to Python, Java, and R. Teams with Rust codeba
 | Option C | JIT execution path — script source is compiled inside the container on first call |
 | ABI fingerprint | `"SDK_VERSION:RUSTC_HASH\0"` string baked into every compiled vtable; guards against toolchain-mismatch UB at load time |
 | `ExaConnection` | SDK trait (defined in `exasol-udf-sdk`) exposing `query_arrow`, `execute`, `import_arrow`, `export_arrow`. Host implements it via `exarrow-rs`. UDF code never links `exarrow-rs` directly. |
-| musl | `x86_64-unknown-linux-musl` target; all Rust deps statically linked; no glibc dependency in the `.so`. `cargo exaudf build` targets this automatically. |
+| musl | `x86_64-unknown-linux-musl` target; all Rust deps statically linked; no glibc dependency in the `.so`. `cargo exasol-udf build` targets this automatically. |
 | exarrow-rs | crates.io crate (`exarrow-rs` v0.12.7, features = ["websocket"]) providing Arrow-based ADBC connectivity back to Exasol — used by the host runtime only; UDFs access it through the `ExaConnection` trait. |
 | exaslct | Exasol's SLC build-and-release toolchain; the CI pipeline that assembles, tests, and publishes SLC images |
 | `exaudfclient` | The binary the DB invokes per UDF call: `exaudfclient <ipc_socket_path> lang=rust` |
@@ -118,10 +118,10 @@ cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 
 # Scaffold a new UDF crate
-cargo exaudf new my-udf
+cargo exasol-udf new my-udf
 
 # Build a fully-static musl UDF .so (musl toolchain installed automatically)
-cargo exaudf build
+cargo exasol-udf build
 # → target/x86_64-unknown-linux-musl/release/libmy_udf.so
 
 # Deploy: upload to BucketFS + CREATE OR REPLACE RUST SCRIPT
@@ -136,7 +136,7 @@ exapump udf deploy \
 ## Project Structure
 
 ```
-slc-rs/
+lc-rs/
 ├── Cargo.toml                    # workspace root; exarrow-rs + arrow pinned in [workspace.dependencies]
 ├── rust-toolchain.toml           # pinned Rust channel — MUST match container
 ├── Cargo.lock
@@ -147,10 +147,10 @@ slc-rs/
 │   ├── exasol-udf-macros/        # proc-macro: #[exasol_udf]
 │   ├── exa-udf-runtime/          # host: loads .so, drives protocol ↔ SDK
 │   ├── exaudfclient/             # binary: /exaudf/exaudfclient
-│   └── cargo-exaudf/             # CLI: scaffold + build + validate UDF .so locally
+│   └── cargo-exasol-udf/             # CLI: scaffold + build + validate UDF .so locally
 ├── container/
 │   ├── template-crate/           # pre-baked crate template for JIT builds
-│   └── cargo-offline.toml        # .cargo/config.toml pointing to /opt/slc-rs/vendor
+│   └── cargo-offline.toml        # .cargo/config.toml pointing to /opt/lc-rs/vendor
 └── specs/                        # project spec library (this directory)
 ```
 
@@ -176,7 +176,7 @@ exaudfclient (binary)
 ## Constraints
 
 - **Technical**: Binary must be at `/exaudf/exaudfclient`; invocation contract is `exaudfclient <ipc_socket_path> lang=rust [scriptOptionsParserVersion=1|2]` — must match the C++ launcher exactly. Rust toolchain version in `rust-toolchain.toml` must equal the toolchain baked into the `jit` container image. `arrow = "58"` must stay in sync with `exarrow-rs`.
-- **Build**: No Bazel; pure Cargo. JIT builds run `cargo build --offline` inside the container against the vendored registry at `/opt/slc-rs/vendor/`.
+- **Build**: No Bazel; pure Cargo. JIT builds run `cargo build --offline` inside the container against the vendored registry at `/opt/lc-rs/vendor/`.
 - **Performance**: JIT warm-cache (keyed by `sha256(source ++ SDK_VERSION ++ RUSTC_VERSION)`) must skip compilation entirely. Arrow batch fast path (`get_arrow_batch` / `emit_arrow_batch`) must avoid row-by-row allocation.
 - **Safety**: `catch_unwind` in the `run` shim converts UDF panics to error codes. `sdk_fingerprint` mismatch at `dlopen` must produce a clear error, not UB.
 
@@ -187,7 +187,7 @@ exaudfclient (binary)
 | Exasol DB (ZMQ ROUTER) | Drives the full protocol; sends input batches and receives output | No UDFs can run |
 | `exarrow-rs` (crates.io, v0.12.7) | Arrow ADBC connect-back — used exclusively by the host runtime to implement `ExaConnection`; UDFs never link it directly | `ctx.exa()` / `ctx.exa_named()` / `ctx.exa_connect()` return errors; UDFs that call connect-back fail at runtime |
 | BucketFS | Stores precompiled `.so` for Option A | Option A UDFs can't be loaded; JIT unaffected |
-| Vendored Cargo registry (`/opt/slc-rs/vendor/`) | Enables offline JIT builds inside the container | JIT compilation fails; Option A unaffected |
+| Vendored Cargo registry (`/opt/lc-rs/vendor/`) | Enables offline JIT builds inside the container | JIT compilation fails; Option A unaffected |
 | `zmqcontainer.proto` (GitHub / git submodule) | Canonical protocol definition for `exa-proto` build | Cannot build `exa-proto`; fetch via `git submodule update --init` in `script-languages-release` or from the raw GitHub URL |
 | `exaslct` build pipeline | Assembles, tests, and publishes the final SLC Docker images | Container images cannot be released |
 

@@ -52,9 +52,9 @@ trap on_exit EXIT
 log "Config: MEM=$MEM MEMSWAP=$MEMSWAP SHM=$SHM DB_MEM='${DB_MEM:-<auto>}' IMAGE=$IMAGE"
 
 # 1. Build the SLC tarball via the artifact stage ----------------------------
-SLC_DIR="${SLC_DIR:-/tmp/slc-rs-$$}"
+SLC_DIR="${SLC_DIR:-/tmp/lc-rs-$$}"
 if [ -z "${SKIP_SLC_BUILD:-}" ]; then
-  log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/slc-rs.tar.gz)"
+  log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
   mkdir -p "$SLC_DIR"
   docker build -f Dockerfile.alpine --target artifact \
     --output "type=local,dest=$SLC_DIR" .
@@ -64,7 +64,7 @@ else
     echo "ERROR: SKIP_SLC_BUILD set but SLC_TARBALL is not set"; exit 1
   fi
 fi
-export SLC_TARBALL="${SLC_TARBALL:-$SLC_DIR/slc-rs.tar.gz}"
+export SLC_TARBALL="${SLC_TARBALL:-$SLC_DIR/lc-rs.tar.gz}"
 
 # 2. Build the UDF .so artifacts (release) — same set as the build job --------
 log "Build UDF .so artifacts (cargo build --release)"

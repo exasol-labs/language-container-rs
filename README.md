@@ -72,7 +72,7 @@ pub fn double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 **Build**
 
 ```bash
-cargo exaudf build
+cargo exasol-udf build
 # → target/x86_64-unknown-linux-musl/release/libdouble.so
 ```
 
@@ -95,11 +95,13 @@ RETURNS BIGINT AS
 
 ## Crates
 
+Three crates are published to [crates.io](https://crates.io) for UDF authors; the protocol and runtime crates are internal to the container.
+
 | Crate | Audience | Purpose |
 |-------|----------|---------|
-| `exasol-udf-sdk` | UDF authors | Trait, macros, types |
-| `exa-udf-runtime` | Container operators | ZMQ host-dispatch runtime |
-| `cargo-exaudf` | Build tooling | Build/validate `.so` UDF artifacts |
+| [`exasol-udf-sdk`](https://crates.io/crates/exasol-udf-sdk) | UDF authors | `UdfRun`/`UdfContext` traits, `Value`/`ExaType`, Arrow bridge |
+| [`exasol-udf-macros`](https://crates.io/crates/exasol-udf-macros) | UDF authors | `#[exasol_udf]` proc-macro |
+| [`cargo-exasol-udf`](https://crates.io/crates/cargo-exasol-udf) | Build tooling | Scaffold, build (static musl `.so`), validate |
 
 ## Documentation
 
@@ -113,7 +115,9 @@ Full index → [docs/index.md](docs/index.md)
 
 ## License
 
-Community-supported. Licensed under [MIT](LICENSE).
+Community-supported. Licensed under [MIT](LICENSE). Third-party dependency notices
+bundled with the distributed binary are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md);
+the security/advisory policy is in [SECURITY.md](SECURITY.md).
 
 ---
 <div align="center">Built with Rust 🦀 and made with ❤️ as part of <a href="https://github.com/exasol-labs">Exasol Labs</a> 🧪.</div>

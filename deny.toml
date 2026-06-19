@@ -34,3 +34,6 @@ allow = [
     "BSL-1.0",
     "Unicode-3.0",
 ]
+# Workspace crates are all MIT; internal ones are publish = false. Don't check
+# our own crates against the dependency allow-list, only third-party deps.
+private = { ignore = true }

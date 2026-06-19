@@ -2,7 +2,10 @@
 name = "exasol-udf-macros"
 version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 edition = "2024"
+description = "Proc-macro #[exasol_udf] for the exasol-udf-sdk: generates the ABI vtable for Rust Exasol UDFs."
 
 [lib]
 proc-macro = true
@@ -11,7 +14,7 @@ proc-macro = true
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-exasol-udf-sdk = { path = "../exasol-udf-sdk" }
+exasol-udf-sdk = { workspace = true }
 
 [dev-dependencies]
 trybuild = "1"

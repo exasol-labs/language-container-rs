@@ -1,5 +1,6 @@
 [package]
 name = "annotated-fixture"
+publish = false
 version = "0.1.1"
 license.workspace = true
 edition = "2024"

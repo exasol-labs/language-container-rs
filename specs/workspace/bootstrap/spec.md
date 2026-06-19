@@ -1,6 +1,6 @@
 # Feature: workspace-bootstrap
 
-Bootstrap the `slc-rs` Cargo workspace from an empty repository: create the workspace manifest, pin the Rust toolchain, scaffold all seven crate stubs, and produce a fully building `exa-proto` crate with a vendored proto and prost-build code generation.
+Bootstrap the `lc-rs` Cargo workspace from an empty repository: create the workspace manifest, pin the Rust toolchain, scaffold all seven crate stubs, and produce a fully building `exa-proto` crate with a vendored proto and prost-build code generation.
 
 ## Background
 

@@ -92,7 +92,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     --target artifact \
     --output "type=local,dest=$TMP_DIR" \
     "$REPO_ROOT"
-  TMP_TAR="$TMP_DIR/slc-rs.tar.gz"
+  TMP_TAR="$TMP_DIR/lc-rs.tar.gz"
   echo "==> Build complete."
 else
   echo "==> Skipping build (--skip-build); using SLC_TARBALL=${SLC_TARBALL:-<unset>}."

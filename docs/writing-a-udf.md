@@ -10,16 +10,16 @@
   ```bash
   rustup target add x86_64-unknown-linux-musl
   ```
-- `cargo-exaudf` installed from this workspace:
+- `cargo-exasol-udf` installed from crates.io (or `--path crates/cargo-exasol-udf` from this workspace):
   ```bash
-  cargo install --path crates/cargo-exaudf
+  cargo install cargo-exasol-udf
   ```
 - A running Exasol cluster with BucketFS write access.
 
 ## 1. Scaffold a UDF crate
 
 ```bash
-cargo exaudf new my-udf
+cargo exasol-udf new my-udf
 cd my-udf
 ```
 
@@ -30,8 +30,8 @@ Or create the crate manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.8" }
-exasol-udf-macros = { version = "0.8" }
+exasol-udf-sdk    = { version = "0.11" }
+exasol-udf-macros = { version = "0.11" }
 ```
 
 ## 2. The `#[exasol_udf]` macro
@@ -214,7 +214,7 @@ Connect-back lets a UDF open a regular Exasol connection from inside `run()` and
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.8", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.11", features = ["connect-back"] }
 ```
 
 ### Create a CONNECTION object
@@ -371,7 +371,7 @@ Use the returned IP when constructing the `CONNECTION` object, or store it in a 
 
 ```bash
 # Cross-compile to a musl .so (release profile, stripped)
-cargo exaudf build
+cargo exasol-udf build
 
 # Artifact:
 #   target/x86_64-unknown-linux-musl/release/libmy_udf.so
@@ -386,7 +386,7 @@ RETURNS BIGINT AS
 /
 ```
 
-`cargo exaudf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
+`cargo exasol-udf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
 
 ## 10. Unit testing
 
