@@ -37,6 +37,31 @@ pub trait ExaConnection: Send {
     /// value. `query_arrow` is safe only within a single binary (e.g. tests).
     fn query_arrow(&mut self, sql: &str) -> Result<Vec<RecordBatch>, UdfError>;
 
+    /// Run a query and invoke `f` for each result row.
+    ///
+    /// Rows are delivered in batch-then-row order. Iteration stops immediately
+    /// if `f` returns an error, and that error is propagated to the caller.
+    ///
+    /// The default delegates to [`ExaConnection::query_arrow`] +
+    /// [`record_batch_to_rows`]. The runtime may override this to avoid
+    /// materialising all batches at once.
+    ///
+    /// The callback is taken as `&mut dyn FnMut` so the method is object-safe
+    /// and usable on `Box<dyn ExaConnection>`.
+    fn query_for_each(
+        &mut self,
+        sql: &str,
+        f: &mut dyn FnMut(Vec<Value>) -> Result<(), UdfError>,
+    ) -> Result<(), UdfError> {
+        let batches = self.query_arrow(sql)?;
+        for batch in &batches {
+            for row in record_batch_to_rows(batch)? {
+                f(row)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Run a query and return its rows as the SDK's own [`Value`] type.
     ///
     /// This is the FFI-safe query API for UDFs: the arrow→`Value` conversion
@@ -44,10 +69,15 @@ pub trait ExaConnection: Send {
     /// (no arrow types, no `TypeId` downcasts) crosses the UDF boundary.
     ///
     /// The runtime overrides this with a conversion compiled in its own arrow
-    /// context; the default delegates to `query_arrow` for in-process callers
-    /// (e.g. mock connections in unit tests).
+    /// context; the default delegates to [`ExaConnection::query_for_each`] for
+    /// in-process callers (e.g. mock connections in unit tests).
     fn query(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, UdfError> {
-        record_batches_to_rows(&self.query_arrow(sql)?)
+        let mut rows = Vec::new();
+        self.query_for_each(sql, &mut |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
     }
 
     /// Execute a DML/DDL statement, returning the affected row count.
@@ -84,28 +114,39 @@ pub trait ExaConnection: Send {
     }
 }
 
+/// Convert a single arrow [`RecordBatch`] into rows of the SDK's [`Value`] type.
+///
+/// This must be called in the same arrow-link context that produced the batch,
+/// so the per-type `downcast_ref` calls resolve consistently. The resulting
+/// `Vec<Vec<Value>>` is plain owned data and crosses the UDF FFI boundary safely.
+///
+/// Type mapping mirrors the input-row convention: Exasol `DECIMAL`/`BIGINT`
+/// (arrow `Decimal128`) becomes a typed [`Value::Numeric`] carrying the unscaled
+/// integer plus scale, matching how NUMERIC input columns are delivered.
+pub fn record_batch_to_rows(batch: &RecordBatch) -> Result<Vec<Vec<Value>>, UdfError> {
+    let n_rows = batch.num_rows();
+    let n_cols = batch.num_columns();
+    let mut rows = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let mut row = Vec::with_capacity(n_cols);
+        for c in 0..n_cols {
+            row.push(cell_to_value(batch.column(c).as_ref(), r)?);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
 /// Convert arrow record batches into rows of the SDK's [`Value`] type.
 ///
 /// This must be called in the same arrow-link context that produced the
 /// batches (the runtime), so the per-type `downcast_ref` calls resolve. The
 /// resulting `Vec<Vec<Value>>` is plain owned data and crosses the UDF FFI
 /// boundary safely.
-///
-/// Type mapping mirrors the input-row convention: Exasol `DECIMAL`/`BIGINT`
-/// (arrow `Decimal128`) becomes a typed [`Value::Numeric`] carrying the unscaled
-/// integer plus scale, matching how NUMERIC input columns are delivered.
 pub fn record_batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<Vec<Value>>, UdfError> {
-    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut rows = Vec::new();
     for batch in batches {
-        let n_rows = batch.num_rows();
-        let n_cols = batch.num_columns();
-        for r in 0..n_rows {
-            let mut row = Vec::with_capacity(n_cols);
-            for c in 0..n_cols {
-                row.push(cell_to_value(batch.column(c).as_ref(), r)?);
-            }
-            rows.push(row);
-        }
+        rows.extend(record_batch_to_rows(batch)?);
     }
     Ok(rows)
 }

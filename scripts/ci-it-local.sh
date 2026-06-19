@@ -78,7 +78,9 @@ cargo build --release \
   -p connect-back-scalar \
   -p connect-back-insert \
   -p connect-back-crunch \
-  -p resolv-udf
+  -p resolv-udf \
+  -p emit-bulk \
+  -p connect-back-stream
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"

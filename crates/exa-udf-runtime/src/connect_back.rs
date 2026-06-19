@@ -91,14 +91,87 @@ impl ExaConnection for RuntimeExaConnection {
         }
     }
 
+    /// Override the default `query_for_each` so result batches are converted
+    /// and consumed one at a time, in the runtime's own arrow-link context.
+    ///
+    /// Fetching and conversion both run here, in the runtime crate, so the
+    /// per-type `downcast_ref` calls in `record_batch_to_rows` resolve against
+    /// the runtime's arrow `TypeId`s. The default trait impl would run the
+    /// conversion in the *caller's* (UDF `.so`'s) arrow context, where the
+    /// downcast fails on a `TypeId` mismatch.
+    ///
+    /// The fetch is driven with a single `block_on` over
+    /// `execute(sql).await?.fetch_all().await?`. We deliberately do not use
+    /// `ResultSet::into_iterator()` / `next_batch()`: those call
+    /// `Handle::try_current()` then `handle.block_on(...)`, which on our
+    /// `current_thread` runtime would re-enter the only runtime thread from
+    /// within an outer `block_on` and deadlock. `fetch_all` materialises the
+    /// batches once; we then iterate the owned `Vec` with `into_iter()`,
+    /// converting and dropping each batch before processing the next so a
+    /// batch's arrow buffers are released before its rows are handed to `f`.
+    fn query_for_each(
+        &mut self,
+        sql: &str,
+        f: &mut dyn FnMut(Vec<Value>) -> Result<(), UdfError>,
+    ) -> Result<(), UdfError> {
+        cb_log(&format!("[cb] query_for_each: '{sql}'"));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            connect_back_rt().block_on(async {
+                let batches = self
+                    .inner
+                    .execute(sql)
+                    .await
+                    .map_err(|e| UdfError::ConnectBack(e.to_string()))?
+                    .fetch_all()
+                    .await
+                    .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+                Ok::<Vec<RecordBatch>, UdfError>(batches)
+            })
+        }));
+        cb_log("[cb] query_for_each: fetch done");
+        let batches = match result {
+            Ok(Ok(batches)) => batches,
+            Ok(Err(e)) => {
+                cb_log(&format!("[cb] query_for_each: error: {e}"));
+                return Err(e);
+            }
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic payload");
+                cb_log(&format!("[cb] query_for_each panic: {msg}"));
+                return Err(UdfError::ConnectBack(format!(
+                    "panic in query_for_each: {msg}"
+                )));
+            }
+        };
+        cb_log(&format!(
+            "[cb] query_for_each: ok, {} batches",
+            batches.len()
+        ));
+        for batch in batches {
+            let rows = exasol_udf_sdk::connect_back::record_batch_to_rows(&batch)?;
+            drop(batch);
+            for row in rows {
+                f(row)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Override the default `query` so the arrow→`Value` conversion runs here,
-    /// in the runtime's own arrow-link context. The default trait impl would
-    /// run the conversion in the *caller's* (UDF `.so`'s) arrow context, where
-    /// `downcast_ref` on runtime-produced arrays fails on a `TypeId` mismatch.
+    /// in the runtime's own arrow-link context, by delegating to
+    /// [`RuntimeExaConnection::query_for_each`] and collecting its rows.
     /// Returning `Vec<Vec<Value>>` keeps arrow types off the FFI boundary.
     fn query(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, UdfError> {
-        let batches = self.query_arrow(sql)?;
-        exasol_udf_sdk::connect_back::record_batches_to_rows(&batches)
+        let mut rows = Vec::new();
+        self.query_for_each(sql, &mut |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, UdfError> {
