@@ -4,7 +4,7 @@ Defines the connect-back surface of the author-facing SDK — the `ConnectionObj
 
 ## Background
 
-The connect-back surface exposes a public `ConnectionObject` credential struct, an `ExaConnection` trait (referencing no exarrow-rs type), and three `UdfContext` methods: `cluster_ip()` returns the originating cluster node IP, `connection(name)` returns the raw credentials of a named database `CONNECTION` object as a `ConnectionObject`, and `connect_back(&ConnectionObject)` opens a live external-client session. A `ConnectionObject` may also describe a foreign (non-Exasol) system the author drives with another driver. Every session returned by `connect_back` is a new external client session and a new transaction, independent of the invoking query. The `ExaConnection` trait now also exposes transaction control methods (`begin`, `commit`, `rollback`) with default implementations that return `UdfError::Unimplemented` so existing mock implementations continue to compile unchanged.
+The connect-back surface exposes a public `ConnectionObject` credential struct, an `ExaConnection` trait (referencing no exarrow-rs type), and three `UdfContext` methods: `cluster_ip()` returns the originating cluster node IP, `connection(name)` returns the raw credentials of a named database `CONNECTION` object as a `ConnectionObject`, and `connect_back(&ConnectionObject)` opens a live external-client session. A `ConnectionObject` may also describe a foreign (non-Exasol) system the author drives with another driver. Every session returned by `connect_back` is a new external client session and a new transaction, independent of the invoking query. The `ExaConnection` trait now also exposes transaction control methods (`begin`, `commit`, `rollback`) with default implementations that return `UdfError::Unimplemented` so existing mock implementations continue to compile unchanged. The trait additionally exposes `execute_batch` with a default returning `UdfError::Unimplemented` so existing mock implementations continue to compile unchanged.
 
 ## Scenarios
 
@@ -20,9 +20,10 @@ The connect-back surface exposes a public `ConnectionObject` credential struct, 
 
 * *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
 * *WHEN* the `connect_back` module is referenced
-* *THEN* it MUST expose an `ExaConnection` trait with `query_arrow`, `query`, `query_for_each`, `execute`, `begin`, `commit`, and `rollback` methods returning `Result<_, UdfError>`, none of which reference any `exarrow-rs` type in their public signature
+* *THEN* it MUST expose an `ExaConnection` trait with `query_arrow`, `query`, `query_for_each`, `execute`, `begin`, `commit`, `rollback`, and `execute_batch` methods returning `Result<_, UdfError>`, none of which reference any `exarrow-rs` type in their public signature
 * *AND* `query_for_each` MUST take the SQL plus a row callback `F: FnMut(Vec<Value>) -> Result<(), UdfError>` and MUST have a default implementation that delegates to `query_arrow`, converting each batch's rows and invoking the callback, so a connection implementing only `query_arrow` streams without extra code; and `query` MUST have a default that calls `query_for_each` and collects into `Vec<Vec<Value>>`, sharing one code path
 * *AND* `begin`, `commit`, and `rollback` MUST each have a default implementation returning `UdfError::Unimplemented`, so connections that do not manage transactions (e.g. test mocks) continue to compile, and the module MUST NOT expose a `ConnectionKind` type because connection selection is expressed through `ConnectionObject`
+* *AND* `execute_batch` MUST accept `sql: &str` and `rows: &[Vec<Value>]` and MUST have a default implementation returning `UdfError::Unimplemented` so existing mock implementations that do not support batch execution continue to compile unchanged
 
 ### Scenario: UdfContext connect-back methods are absent without the feature
 
@@ -70,3 +71,11 @@ The connect-back surface exposes a public `ConnectionObject` credential struct, 
 * *WHEN* a single `RecordBatch` is passed to the `record_batch_to_rows` helper
 * *THEN* it MUST return the rows of exactly that one batch as `Vec<Vec<Value>>`, using the same per-cell type mapping as `record_batches_to_rows`
 * *AND* `record_batches_to_rows` MUST be expressed in terms of `record_batch_to_rows` applied per batch, so the multi-batch and single-batch converters cannot diverge in their type handling
+
+### Scenario: ExaConnection execute_batch default returns Unimplemented on a mock
+
+* *GIVEN* a type that implements `ExaConnection` without providing `execute_batch`
+* *WHEN* `execute_batch(sql, rows)` is called on the type as `Box<dyn ExaConnection>`
+* *THEN* the call MUST return `Err(UdfError::Unimplemented(_))` from the trait default
+* *AND* the crate MUST compile with zero errors, confirming the default does not require the implementor to supply `execute_batch`
+* *AND* the `execute_batch` signature MUST be `fn execute_batch(&mut self, sql: &str, rows: &[Vec<Value>]) -> Result<u64, UdfError>` with no `exarrow-rs` type in the public signature
