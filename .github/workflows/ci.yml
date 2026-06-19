@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -250,6 +251,10 @@ jobs:
     # unprivileged user namespaces, which the "Allow unprivileged user
     # namespaces" step below disables. See that step for the full explanation.
     runs-on: ubuntu-latest
+    # Skipped on tag pushes: a vX.Y.Z tag points at an already-merged main commit
+    # that passed this matrix as a required PR check, so the release path does not
+    # re-run the privileged-Docker matrix (lean publish).
+    if: github.ref_type != 'tag'
     needs: [lint, licenses, unit-tests, build-slc]
     timeout-minutes: 45
     strategy:
@@ -456,65 +461,51 @@ jobs:
           docker stop exasol-db || true
           docker rm   exasol-db || true
 
-  # ── release: on merge to main, gated on the full pipeline succeeding ─────
-  # Auto-tags and releases when Cargo.toml's version was bumped (i.e. the
-  # vX.Y.Z tag does not yet exist). Mirrors exasol-labs/exarrow-rs: the version
-  # is the single source of truth — bump it in a PR, and merging cuts the tag +
-  # GitHub Release. Already-released versions are a no-op (the tag-exists guard).
+  # ── release: triggered by pushing a vX.Y.Z tag ──────────────────────────
+  # Cuts a GitHub Release + publishes the public crates when a vX.Y.Z tag is
+  # pushed. The maintainer drives a release explicitly: bump the version in a PR,
+  # merge to main, then `git tag vX.Y.Z && git push origin vX.Y.Z`. main is gated
+  # by branch protection + required PR checks, so the tagged commit is already
+  # validated — this job does NOT re-run the integration matrix (lean publish).
   release:
     name: Release
     runs-on: ubuntu-latest-8-cores
-    needs: [integration]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, build-slc]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     permissions:
-      contents: write   # create tag + GitHub Release + asset upload
+      contents: write   # create GitHub Release + asset upload
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Derive version and tag from Cargo.toml
+      - name: Derive version from tag and verify it matches Cargo.toml
         id: version
         run: |
-          VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether the tag already exists
-        id: check
-        run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "v${{ steps.version.outputs.version }} already released — skipping."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          VER="${GITHUB_REF_NAME#v}"
+          MANIFEST_VER=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [ "$VER" != "$MANIFEST_VER" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} (version ${VER}) does not match Cargo.toml version ${MANIFEST_VER}"
+            exit 1
           fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
 
       - name: Download SLC tarball
-        if: steps.check.outputs.exists == 'false'
         uses: actions/download-artifact@v4
         with:
           name: lc-tarball
 
       - name: Rename SLC tarball for release
-        if: steps.check.outputs.exists == 'false'
         run: |
           VER="${{ steps.version.outputs.version }}"
           cp lc-rs.tar.gz "lc-rust-${VER}.tar.gz"
           ls -la "lc-rust-${VER}.tar.gz"
 
-      - name: Create and push tag
-        if: steps.check.outputs.exists == 'false'
-        run: |
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
-
       - name: Create GitHub Release
-        if: steps.check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: lc-rust-*.tar.gz
 
@@ -522,15 +513,13 @@ jobs:
       # `cargo publish` waits for each crate to appear on the index before
       # returning (cargo >=1.66), so the sequential sdk -> macros/cli order is safe
       # with no manual sleep. Each crate is skipped if its version is already on
-      # the index, so re-runs are idempotent. Requires the CRATES_TOKEN secret;
-      # if it is absent the step is a no-op (so the job doesn't fail before the
-      # token is configured).
+      # the index, so re-running a tag is idempotent. Requires the CRATES_TOKEN
+      # secret; if it is absent the step is a no-op (so the job doesn't fail before
+      # the token is configured).
       - name: Install Rust toolchain
-        if: steps.check.outputs.exists == 'false'
         uses: dtolnay/rust-toolchain@1.92
 
       - name: Publish public crates to crates.io
-        if: steps.check.outputs.exists == 'false'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
           VER: ${{ steps.version.outputs.version }}
