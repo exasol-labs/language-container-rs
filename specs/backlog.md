@@ -2,31 +2,13 @@
 
 > Deferred work and known limitations that outlive any single plan. Unlike a
 > plan's verification report (which is archived into `specs/_recorded/` by
-> `/speq:record`), this file is permanent and sits beside `mission.md`,
-> `design.md`, and `decision-log.md`. Add an entry when you defer work; remove it
-> when the work lands (ideally referencing the plan that closed it).
+> `/speq:record`), this file is permanent and sits beside `mission.md` and
+> `decision-log.md`. Add an entry when you defer work; remove it when the work
+> lands (ideally referencing the plan that closed it).
 
 ---
 
 ## UX / DX
-
-### B-001: Propagate UDF error messages through the protocol
-
-**Raised by:** `fix-connect-back-version-matrix` (2026-06-10)
-**Severity:** high (debuggability)
-
-The `#[exasol_udf]` macro shim
-([`crates/exasol-udf-macros/src/lib.rs`](../crates/exasol-udf-macros/src/lib.rs))
-collapses any `Result::Err` from a UDF to a bare return code 1; the
-`UdfError`'s message is discarded. The database therefore surfaces only
-`F-UDF-CL-RUST-9001: … error code 1`, with no indication of *what* failed. This
-forced sentinel-value debugging during the connect-back work.
-
-**Proposed fix:** give `UdfContext` a `set_last_error(msg)` hook (the
-`HostContextBridge` already stores `last_error`), have the shim call it with
-`e.to_string()` before returning non-zero, and have the dispatcher fold that
-message into the `F-UDF-CL-RUST-####` close. Then a failed UDF reports its real
-error.
 
 ### B-002: Prefer `query()` over `query_arrow()` in the connect-back API
 
@@ -36,10 +18,10 @@ error.
 `ExaConnection::query_arrow()` returns `arrow::RecordBatch`. Because a UDF `.so`
 links its own copy of `arrow`, `downcast_ref::<…Array>()` on a runtime-produced
 array silently returns `None` (different `TypeId`s across the cdylib boundary),
-yielding wrong values with no error. The FFI-safe `query()` (returns SDK
-`Value`s) now exists and is documented as the preferred API. Consider
-deprecating `query_arrow()` for UDF use, or hiding it behind a clearly-named
-"same-process only" gate.
+yielding wrong values with no error. The FFI-safe `query()` / `query_for_each()`
+(return SDK `Value`s) now exist and are documented as the preferred API.
+Consider deprecating `query_arrow()` for UDF use, or hiding it behind a
+clearly-named "same-process only" gate.
 
 ### B-003: Richer connect-back errors with the failing SQL
 
@@ -63,26 +45,3 @@ the SQL statement that failed. The runtime has the statement in hand
 `db_roundtrip_all_scenarios` is verified locally on `2026.1.0`. CI runs the
 `2025.1.11` / `2025.2.1` / `2026.1.0` matrix; a local sweep across all three
 (via `EXASOL_VERSION` / `EXASOL_DB_SERIES`) would catch version drift earlier.
-
----
-
-## Spec library organisation
-
-### B-005: Split runtime/host-dispatch into a rowset-codec sub-feature
-
-**Raised by:** `2026-06-11-vs-adapter-and-single-call-connect-back` (2026-06-11)
-**Severity:** low
-
-`runtime/host-dispatch` now carries 16 scenarios, above the library's 10-scenario
-soft limit. The root cause is the rowset codec scenarios (row-major packing,
-NULL-cell handling, EmitBuffer, InputRowSet) co-located with loader, bridge, and
-dispatcher scenarios. These are cleanly separable:
-
-- **`runtime/host-dispatch`** — loader, bridge (row iteration), scalar/set
-  dispatch, single-call dispatch, VS adapter dispatch, schema validation
-- **`runtime/rowset-codec`** (new) — `EmitBuffer::to_proto`, `InputRowSet::from_proto`,
-  row-major packing, NULL-cell bitmap logic, declared-type dispatch
-
-**Proposed action:** create `specs/runtime/rowset-codec/spec.md` and migrate the
-four codec scenarios there in a future plan. No code change is needed — this is a
-spec library reorganisation only.
