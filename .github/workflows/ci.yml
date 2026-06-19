@@ -72,7 +72,10 @@ jobs:
             -p connect-back-crunch \
             -p resolv-udf \
             -p emit-bulk \
-            -p connect-back-stream
+            -p connect-back-stream \
+            -p timestamp-add-second \
+            -p timestamp-now \
+            -p timestamp-passthrough
 
       - name: Build IT test binary (compile once)
         run: |

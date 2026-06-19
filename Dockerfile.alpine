@@ -50,7 +50,7 @@ RUN mkdir -p /glibc-rt/lib/x86_64-linux-gnu \
 # the matching glibc runtime bundled for in-container dlopen compatibility.
 FROM alpine:3 AS runtime
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates tzdata
 
 ENV LANG=C.UTF-8
 
@@ -75,6 +75,14 @@ ENTRYPOINT ["/exaudf/exaudfclient"]
 # Stage 3: Packager — bake resolver symlinks into the SLC tarball
 FROM runtime AS packager
 
+# GNU tar — BusyBox tar lacks --hard-dereference. tzdata stores ~258 zones as
+# hardlinks (e.g. Europe/Berlin → Atlantic/Jan_Mayen); BucketFS extraction of the
+# SLC tarball does NOT recreate hardlinks, so those zones vanish in the UDF
+# sandbox and named-timezone resolution silently falls back to UTC. Building the
+# tarball with --hard-dereference materialises each hardlink as an independent
+# regular file so every zone survives extraction.
+RUN apk add --no-cache tar
+
 RUN mkdir -p /slc && \
     tar -C / --exclude='./slc' \
               --exclude='./etc/hosts' \
@@ -85,7 +93,7 @@ RUN mkdir -p /slc && \
               -cf - . | tar -C /slc -xf - && \
     ln -sf /conf/hosts /slc/etc/hosts && \
     ln -sf /conf/resolv.conf /slc/etc/resolv.conf && \
-    tar -C /slc -czf /lc-rs.tar.gz .
+    tar --hard-dereference -C /slc -czf /lc-rs.tar.gz .
 
 # Stage 4: Artifact — expose the SLC tarball for docker build --output
 FROM scratch AS artifact
