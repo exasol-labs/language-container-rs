@@ -1,0 +1,13 @@
+# Synthetic, dependency-free crate that exists solely to drive `cargo about`.
+# Its `license` expression is the list of OS/runtime licenses bundled in the
+# distributed SLC tarball; `cargo about` renders each license's canonical text
+# from its embedded SPDX store, so no license text is committed to the repo.
+# The empty `[workspace]` table detaches it from the parent workspace.
+[workspace]
+
+[package]
+name = "lc-rs-os-attribution"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only AND LGPL-2.1 AND MPL-2.0 AND Apache-2.0 AND MIT AND BSD-2-Clause AND Zlib AND (GPL-3.0-only WITH GCC-exception-3.1)"

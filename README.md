@@ -99,9 +99,7 @@ Full index → [docs/index.md](docs/index.md)
 
 ## License
 
-Community-supported. Licensed under [MIT](LICENSE). Third-party dependency notices
-bundled with the distributed binary are in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md);
-the security/advisory policy is in [SECURITY.md](SECURITY.md).
+Community-supported. Licensed under [MIT](LICENSE).
 
 ---
 <div align="center">Built with Rust 🦀 and made with ❤️ as part of <a href="https://github.com/exasol-labs">Exasol Labs</a> 🧪.</div>

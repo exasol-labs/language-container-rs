@@ -1,0 +1,14 @@
+# cargo-about config for the OS/runtime attribution bundle shipped in
+# lc-rs.tar.gz. The accepted list mirrors the license expression in
+# os-attribution/Cargo.toml — every license bundled by the Alpine rootfs and
+# the copied Debian glibc/GCC runtime libs.
+accepted = [
+    "GPL-2.0-only",
+    "LGPL-2.1",
+    "MPL-2.0",
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "Zlib",
+    "GPL-3.0-only WITH GCC-exception-3.1",
+]
