@@ -17,3 +17,12 @@ pub fn annotated(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     };
     ctx.emit(&[v])
 }
+
+#[exasol_udf(input(x: i64), emits(y: i64))]
+pub fn annotated_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let v = match ctx.get(0)? {
+        Value::Int64(n) => Value::Int64(n * 2),
+        other => other.clone(),
+    };
+    ctx.emit(&[v])
+}

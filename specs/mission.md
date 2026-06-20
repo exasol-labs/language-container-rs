@@ -183,7 +183,7 @@ exaudfclient (binary)
 
 **Key design decisions:**
 - `exa-zmq-protocol::Protocol` is a pure state machine (no I/O) that converts `ExascriptResponse` → `HostEvent` and `HostAction` → `ExascriptRequest`. The ZMQ socket lives only in the transport wrapper — this makes the protocol fully unit-testable with fixtures.
-- The only ABI crossing is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable`. Rich trait objects (`UdfRun`, `UdfContext`) never cross the boundary — they stay in the host process; the `sdk_fingerprint` check enforces a matching toolchain at load time.
+- The only ABI crossing is one `extern "C" fn __exa_udf_entry_<NAME>() -> *const ExaUdfVTable` per UDF (`<NAME>` is the UPPER_SNAKE_CASE SQL script name); a single `.so` may export several. Rich trait objects (`UdfRun`, `UdfContext`) never cross the boundary — they stay in the host process; the `sdk_fingerprint` check enforces a matching toolchain at load time.
 - Connect-back uses a dedicated `OnceLock<tokio::runtime::Runtime>` (current_thread) so async Exasol queries can be called from synchronous UDF code without runtime conflicts. The Arrow→`Value` conversion runs on the host side, so only plain `Value` data crosses the `.so` boundary.
 - Arrow `= "58"` is pinned at the workspace level in `[workspace.dependencies]` to ensure a single copy is shared between `exasol-udf-sdk` and `exarrow-rs`.
 

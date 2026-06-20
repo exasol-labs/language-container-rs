@@ -15,3 +15,9 @@ fn annotation_unknown_type() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/trybuild/bad_annotation_type.rs");
 }
+
+#[test]
+fn invalid_name_annotation() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/trybuild/bad_name.rs");
+}

@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn schema_pointers_non_null() {
-        let vtable = __exa_udf_entry();
+        let vtable = __exa_udf_entry_ANNOTATED_DOUBLE();
         let vt = unsafe { &*vtable };
         assert!(!vt.annotated_input_schema.is_null());
         assert!(!vt.annotated_output_schema.is_null());

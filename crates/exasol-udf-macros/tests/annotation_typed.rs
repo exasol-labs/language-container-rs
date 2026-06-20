@@ -26,7 +26,7 @@ fn schema_str(ptr: *const std::ffi::c_char) -> Option<String> {
 
 #[test]
 fn macro_maps_decimal_date_timestamp() {
-    let vt = unsafe { &*__exa_udf_entry() };
+    let vt = unsafe { &*__exa_udf_entry_TYPED_UDF() };
     let input = schema_str(vt.annotated_input_schema).unwrap();
     let output = schema_str(vt.annotated_output_schema).unwrap();
     assert_eq!(

@@ -63,7 +63,7 @@ fn handshake(server: &zmq::Socket, conn_id: u64, source: &str) {
     let mut info = response(MessageType::MtInfo, conn_id);
     info.info = Some(ExascriptInfo {
         source_code: source.to_string(),
-        script_name: "single_call_udf".into(),
+        script_name: "SINGLE_CALL_UDF".into(),
         ..Default::default()
     });
     send_resp(server, &info);

@@ -2,9 +2,11 @@ use std::ffi::CStr;
 use std::path::Path;
 use std::process::Command;
 
+use crate::validate::{VTableProbe, enumerate_entry_symbols};
+
 const MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
 
-/// Build the UDF crate at `path` for the musl target.
+/// Build the UDF crate at `path` for the musl target and verify the produced artifact exports named entry points.
 pub fn run(args: &[String]) -> Result<(), String> {
     let path = args.first().map(|s| s.as_str()).unwrap_or(".");
     let crate_dir = Path::new(path);
@@ -43,6 +45,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .join(&so_name);
 
     println!("{}", so_path.display());
+
+    // Verify the artifact exports at least one named entry point.
+    if so_path.exists() {
+        let entry_names = enumerate_entry_symbols(&so_path).unwrap_or_default();
+        if entry_names.is_empty() {
+            return Err(format!(
+                "build produced '{}' but it exports no __exa_udf_entry_<NAME> symbols; \
+                 annotate at least one function with #[exasol_udf]",
+                so_path.display()
+            ));
+        }
+    }
 
     // Try to emit schema sidecar if annotated schemas are present
     if so_path.exists()
@@ -113,35 +127,37 @@ fn ensure_musl_target() -> Result<(), String> {
 
 /// Attempt to dlopen the `.so` and emit a `<name>.udf-meta.json` sidecar
 /// if the vtable has non-null annotated schema pointers.
+///
+/// Uses the first discovered `__exa_udf_entry_<NAME>` symbol.
 fn maybe_emit_sidecar(so_path: &Path, crate_name: &str) -> Result<(), String> {
     use libloading::Library;
 
-    #[repr(C)]
-    struct VTableProbe {
-        abi_version: u32,
-        fingerprint: *const std::ffi::c_char,
-        // Skip run (fn pointer — 8 bytes on 64-bit)
-        run: *const std::ffi::c_void,
-        // Skip destroy (fn pointer)
-        destroy: *const std::ffi::c_void,
-        // Skip 4 optional fn pointers (each 8 bytes on 64-bit, as Option<fn> = 8)
-        default_output_columns: *const std::ffi::c_void,
-        virtual_schema_adapter_call: *const std::ffi::c_void,
-        generate_sql_for_import_spec: *const std::ffi::c_void,
-        generate_sql_for_export_spec: *const std::ffi::c_void,
-        annotated_input_schema: *const std::ffi::c_char,
-        annotated_output_schema: *const std::ffi::c_char,
+    // Find the first named entry symbol.
+    let entry_names = enumerate_entry_symbols(so_path).unwrap_or_default();
+    let mut names_iter = entry_names.iter();
+    let first_udf = names_iter
+        .next()
+        .cloned()
+        .ok_or_else(|| "no __exa_udf_entry_<NAME> symbol found".to_string())?;
+    if names_iter.next().is_some() {
+        eprintln!(
+            "warning: {} contains multiple UDFs; only the schema sidecar for '{}' is emitted",
+            so_path.display(),
+            first_udf
+        );
     }
+
+    let symbol = format!("__exa_udf_entry_{}\0", first_udf);
 
     let lib = unsafe { Library::new(so_path) }.map_err(|e| format!("dlopen failed: {}", e))?;
 
     let entry: libloading::Symbol<unsafe extern "C" fn() -> *const VTableProbe> =
-        unsafe { lib.get(b"__exa_udf_entry\0") }
-            .map_err(|_| "symbol __exa_udf_entry not found".to_string())?;
+        unsafe { lib.get(symbol.as_bytes()) }
+            .map_err(|_| format!("symbol {} not found", symbol.trim_end_matches('\0')))?;
 
     let vtable = unsafe { entry() };
     if vtable.is_null() {
-        return Err("__exa_udf_entry returned null".to_string());
+        return Err(format!("{} returned null", symbol.trim_end_matches('\0')));
     }
 
     let input_schema = unsafe { (*vtable).annotated_input_schema };

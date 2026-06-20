@@ -67,6 +67,6 @@ static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVT
 };
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __exa_udf_entry() -> *const exasol_udf_sdk::abi::ExaUdfVTable {
+pub extern "C" fn __exa_udf_entry_SINGLE_CALL_UDF() -> *const exasol_udf_sdk::abi::ExaUdfVTable {
     &VTABLE as *const _
 }
