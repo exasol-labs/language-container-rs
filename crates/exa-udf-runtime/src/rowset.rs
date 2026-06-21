@@ -162,7 +162,10 @@ fn value_byte_cost(v: &Value) -> usize {
         Value::Int64(_) => 8,
         Value::Double(_) => 8,
         Value::String(s) => s.len(),
-        Value::Numeric(d) => d.to_string().len(),
+        // O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign (≤40),
+        // which also dominates the scale-padded form (sign + scale+1 + point).
+        // Over-counts → flushes early, matching the conservative intent above.
+        Value::Numeric(d) => 40 + d.scale as usize,
         Value::Date(_) => 10,
         Value::Timestamp(_) => 29,
     }
@@ -544,6 +547,37 @@ impl<'a> HostContextBridge<'a> {
     }
 }
 
+/// Resolve a CONNECTION name to a [`ConnectionObject`] via the on-demand
+/// credential fetcher. Shared by both context bridges.
+#[cfg(feature = "connect-back")]
+fn request_connection(
+    requester: &ConnRequester,
+    name: &str,
+) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+    requester(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
+        kind: ci.kind,
+        address: ci.address,
+        user: ci.user,
+        password: ci.password,
+    })
+}
+
+/// Open a self-connection back to the DB from a resolved [`ConnectionObject`].
+/// Shared by both context bridges.
+#[cfg(feature = "connect-back")]
+fn open_connect_back(
+    conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
+    let info = exa_zmq_protocol::ConnInfo {
+        kind: conn.kind.clone(),
+        address: conn.address.clone(),
+        user: conn.user.clone(),
+        password: conn.password.clone(),
+    };
+    crate::connect_back::open_connection(&info)
+        .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>)
+}
+
 impl UdfContext for HostContextBridge<'_> {
     fn num_columns(&self) -> usize {
         self.input_cols.len()
@@ -589,13 +623,7 @@ impl UdfContext for HostContextBridge<'_> {
         &self,
         name: &str,
     ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-        let result =
-            (self.conn_requester)(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
-                kind: ci.kind,
-                address: ci.address,
-                user: ci.user,
-                password: ci.password,
-            });
+        let result = request_connection(&self.conn_requester, name);
         if let Err(ref e) = result {
             self.record_error(e.to_string());
         }
@@ -607,14 +635,7 @@ impl UdfContext for HostContextBridge<'_> {
         &mut self,
         conn: &exasol_udf_sdk::connect_back::ConnectionObject,
     ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
-        let info = exa_zmq_protocol::ConnInfo {
-            kind: conn.kind.clone(),
-            address: conn.address.clone(),
-            user: conn.user.clone(),
-            password: conn.password.clone(),
-        };
-        let result = crate::connect_back::open_connection(&info)
-            .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>);
+        let result = open_connect_back(conn);
         if let Err(ref e) = result {
             self.record_error(e.to_string());
         }
@@ -700,13 +721,7 @@ impl UdfContext for SingleCallContext<'_> {
         &self,
         name: &str,
     ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-        let result =
-            (self.conn_requester)(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
-                kind: ci.kind,
-                address: ci.address,
-                user: ci.user,
-                password: ci.password,
-            });
+        let result = request_connection(&self.conn_requester, name);
         if let Err(ref e) = result {
             self.record_error(e.to_string());
         }
@@ -718,14 +733,7 @@ impl UdfContext for SingleCallContext<'_> {
         &mut self,
         conn: &exasol_udf_sdk::connect_back::ConnectionObject,
     ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
-        let info = exa_zmq_protocol::ConnInfo {
-            kind: conn.kind.clone(),
-            address: conn.address.clone(),
-            user: conn.user.clone(),
-            password: conn.password.clone(),
-        };
-        let result = crate::connect_back::open_connection(&info)
-            .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>);
+        let result = open_connect_back(conn);
         if let Err(ref e) = result {
             self.record_error(e.to_string());
         }

@@ -12,4 +12,3 @@ prost = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 zmq = { workspace = true }
-chrono = { workspace = true }
