@@ -34,26 +34,13 @@ fn compile_fixture(out_dir: &Path, name: &str, source: &str) -> PathBuf {
     so_path
 }
 
-/// Compute the same fingerprint the cargo-exasol-udf binary uses:
-/// "0.1.1:<sanitized-rustc-version>".
+/// The fingerprint the cargo-exasol-udf binary expects, taken from the linked
+/// `exasol-udf-sdk` (the same constant the macro bakes into real `.so`s), with
+/// the trailing C NUL stripped. A fixture baking this value validates as OK.
 fn compute_expected_fingerprint() -> String {
-    let output = Command::new("rustc")
-        .arg("--version")
-        .output()
-        .expect("rustc --version");
-    let rustc_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let hash_part: String = rustc_hash
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(64)
-        .collect();
-    format!("0.1.1:{}", hash_part)
+    exasol_udf_sdk::abi::EXA_SDK_FINGERPRINT
+        .trim_end_matches('\0')
+        .to_string()
 }
 
 /// Generate a cdylib source that exports `__exa_udf_entry_<udf_name>` with the

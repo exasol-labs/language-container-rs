@@ -76,6 +76,36 @@ RETURNS BIGINT AS
 /
 ```
 
+> **The SQL script name must match the UDF name.** Each `#[exasol_udf]` function
+> exports an entry point named after it in `UPPER_SNAKE_CASE` (`fn double` →
+> `DOUBLE`), so `CREATE SCRIPT DOUBLE` resolves it. Override the name with
+> `#[exasol_udf(name = "MY_NAME")]`.
+
+### Multiple UDFs per `.so`
+
+One `.so` can host many UDFs — annotate several functions and create one script
+per entry point, all pointing at the same uploaded artifact:
+
+```rust
+#[exasol_udf]
+pub fn double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+
+#[exasol_udf]
+pub fn triple(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+```
+
+```sql
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.double(val BIGINT) RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udfs.so;
+/
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.triple(val BIGINT) RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udfs.so;
+/
+```
+
+> `.so` files built with `sdk < 0.14.0` export a single unnamed entry point and
+> must be rebuilt. See [Writing a Rust UDF](docs/writing-a-udf.md) for details.
+
 ## Crates
 
 Three crates are published to [crates.io](https://crates.io) for UDF authors; the protocol and runtime crates are internal to the container.

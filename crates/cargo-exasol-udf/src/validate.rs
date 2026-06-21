@@ -5,8 +5,13 @@ use std::process::Command;
 /// ABI version this binary was compiled against.
 const RUNTIME_ABI_VERSION: u32 = exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION;
 
-/// SDK fingerprint baked in at compile time by build.rs.
-const RUNTIME_FINGERPRINT: &str = env!("EXA_SDK_FINGERPRINT");
+/// SDK fingerprint this binary expects. Sourced from the linked `exasol-udf-sdk`
+/// (the single source of truth — the same constant the macro bakes into every
+/// `.so` and the runtime checks at load), with the trailing C NUL stripped so it
+/// compares equal to the `CStr`-decoded fingerprint read from the `.so`.
+fn runtime_fingerprint() -> &'static str {
+    exasol_udf_sdk::abi::EXA_SDK_FINGERPRINT.trim_end_matches('\0')
+}
 
 /// A `#[repr(C)]` mirror of `ExaUdfVTable` used to probe ABI fields without
 /// linking against the UDF `.so`'s SDK. Field names and byte-offset comments
@@ -75,10 +80,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         "  {}: ABI version mismatch — .so has {}, runtime expects {}",
                         udf_name, abi_version, RUNTIME_ABI_VERSION
                     ));
-                } else if fingerprint != RUNTIME_FINGERPRINT {
+                } else if fingerprint != runtime_fingerprint() {
                     errors.push(format!(
                         "  {}: SDK fingerprint mismatch — .so has '{}', runtime has '{}'",
-                        udf_name, fingerprint, RUNTIME_FINGERPRINT
+                        udf_name,
+                        fingerprint,
+                        runtime_fingerprint()
                     ));
                 } else {
                     ok_names.push(udf_name.clone());
@@ -98,7 +105,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for name in &ok_names {
         println!(
             "  {}: ABI version {}, fingerprint {} — OK",
-            name, RUNTIME_ABI_VERSION, RUNTIME_FINGERPRINT
+            name,
+            RUNTIME_ABI_VERSION,
+            runtime_fingerprint()
         );
     }
     println!(

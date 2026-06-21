@@ -29,6 +29,7 @@ const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
 const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
 const TS_NOW_LIB: &str = "libtimestamp_now.so";
 const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
+const ANNOTATED_FIXTURE_LIB: &str = "libannotated_fixture.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -127,9 +128,17 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let ts_pass_path = harness
         .upload_udf(TS_PASS_LIB, read_udf_artifact(TS_PASS_LIB)?)
         .await?;
+    let annotated_fixture_path = harness
+        .upload_udf(
+            ANNOTATED_FIXTURE_LIB,
+            read_udf_artifact(ANNOTATED_FIXTURE_LIB)?,
+        )
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
+    annotated_fixture_two_entries_from_one_so(&mut conn, &annotated_fixture_path).await?;
+    eprintln!("[it] scenario annotated_fixture_two_entries ok");
     set_filter_emits_positive_only(&mut conn, &set_path).await?;
     eprintln!("[it] scenario set_filter ok");
     json_parse_extracts_name(&mut conn, &json_path).await?;
@@ -273,6 +282,59 @@ async fn scalar_double_returns_42(conn: &mut Connection, udf_object: &str) -> Re
     let got = query_single_string(conn, "SELECT TO_CHAR(scalar_double(21))").await?;
     if got.as_deref() != Some("42") {
         bail!("scalar_double(21) returned {got:?}, expected 42");
+    }
+    Ok(())
+}
+
+/// Scenario: multiple UDFs from ONE `.so`. `annotated-fixture` exports two named
+/// entry points (`annotated`, `annotated_double`); we upload it once and create a
+/// script per entry, both referencing the same artifact, then assert each resolves
+/// to its own entry and runs. This is the live proof of the headline 0.14.0
+/// feature: one `.so`, many UDFs, addressed by SQL script name.
+///
+/// The fixture annotates `input(x: i64), emits(y: i64)`. Two constraints follow:
+/// (1) load-time schema validation requires the column ExaType to be exactly
+/// `Int64`, so the columns are `DECIMAL(18,0)` (Exasol delivers `DECIMAL(p,0)`
+/// fitting i64 as PB_INT64), not `BIGINT` (which arrives as PB_NUMERIC); and
+/// (2) the validation matches column NAMES case-sensitively, but Exasol
+/// upper-cases unquoted identifiers — so the column names are quoted (`"x"`,
+/// `"y"`) to preserve the lower-case names the annotation declares.
+async fn annotated_fixture_two_entries_from_one_so(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.annotated(\"x\" DECIMAL(18,0)) \
+         EMITS (\"y\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.annotated_double(\"x\" DECIMAL(18,0)) \
+         EMITS (\"y\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let identity = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT annotated(CAST(21 AS DECIMAL(18,0))) AS y FROM DUAL)",
+    )
+    .await?;
+    if identity.as_deref() != Some("21") {
+        bail!("annotated(21) returned {identity:?}, expected 21 (identity entry point)");
+    }
+
+    let doubled = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT annotated_double(CAST(21 AS DECIMAL(18,0))) AS y FROM DUAL)",
+    )
+    .await?;
+    if doubled.as_deref() != Some("42") {
+        bail!(
+            "annotated_double(21) returned {doubled:?}, expected 42 — the second \
+             named entry point in the same .so did not resolve correctly"
+        );
     }
     Ok(())
 }

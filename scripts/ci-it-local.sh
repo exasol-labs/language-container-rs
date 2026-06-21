@@ -85,7 +85,8 @@ cargo build --release \
   -p connect-back-stream \
   -p timestamp-add-second \
   -p timestamp-now \
-  -p timestamp-passthrough
+  -p timestamp-passthrough \
+  -p annotated-fixture
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
