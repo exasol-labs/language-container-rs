@@ -182,7 +182,7 @@ println!("{d}");   // "3.14"
 
 ### `ExaType`
 
-`ExaType` is the column-level SQL type, independent of the wire value. It is available via `ctx.column_type(col)` (returns `UdfError::Unimplemented` if the runtime does not populate it). The full variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp`, `TimestampTz`, `Geometry`, `HashType`, `IntervalYearToMonth`, `IntervalDayToSecond`, and `Unsupported`.
+`ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The full variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp`, `TimestampTz`, `Geometry`, `HashType`, `IntervalYearToMonth`, `IntervalDayToSecond`, and `Unsupported`.
 
 Most UDFs do not need `ExaType` — the `Value` variant and typed getters carry enough information.
 

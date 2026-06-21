@@ -144,10 +144,9 @@ pub fn resolve_parser_version(args: &[String]) -> String {
         .unwrap_or_else(|| "1".to_string())
 }
 
-fn usage() -> String {
+fn usage() -> &'static str {
     "Usage: exaudfclient <endpoint> lang=rust [parser_version=N]\n\
      Exasol Rust UDF Client v1"
-        .to_string()
 }
 
 #[cfg(test)]

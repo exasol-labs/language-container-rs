@@ -1,5 +1,5 @@
 use crate::error::UdfError;
-use crate::value::{Decimal, ExaType, Value};
+use crate::value::{Decimal, Value};
 
 /// Context for a single UDF call — provided by the host, read by the UDF
 pub trait UdfContext {
@@ -98,34 +98,6 @@ pub trait UdfContext {
                 other
             ))),
         }
-    }
-
-    /// Number of columns (defaults to `num_columns`).
-    fn column_count(&self) -> usize {
-        self.num_columns()
-    }
-
-    /// Name of a column by index.
-    fn column_name(&self, col: usize) -> Result<&str, UdfError> {
-        let _ = col;
-        Err(UdfError::Unimplemented("column_name".into()))
-    }
-
-    /// Declared type of a column by index.
-    fn column_type(&self, col: usize) -> Result<ExaType, UdfError> {
-        let _ = col;
-        Err(UdfError::Unimplemented("column_type".into()))
-    }
-
-    /// Index of a column by name.
-    fn column_index(&self, name: &str) -> Result<usize, UdfError> {
-        let _ = name;
-        Err(UdfError::Unimplemented("column_index".into()))
-    }
-
-    /// Reset iteration to the first input row (set UDFs only).
-    fn reset(&mut self) -> Result<(), UdfError> {
-        Err(UdfError::Unimplemented("reset".into()))
     }
 
     /// Return the IP address of the cluster node that started this language container.

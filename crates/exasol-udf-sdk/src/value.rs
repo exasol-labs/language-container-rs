@@ -36,19 +36,6 @@ impl TryFrom<&str> for Decimal {
     }
 }
 
-impl TryFrom<f64> for Decimal {
-    type Error = UdfError;
-
-    fn try_from(value: f64) -> Result<Self, Self::Error> {
-        if !value.is_finite() {
-            return Err(UdfError::Type(format!(
-                "cannot convert non-finite f64 to decimal: {value}"
-            )));
-        }
-        Decimal::try_from(format!("{value}").as_str())
-    }
-}
-
 impl std::fmt::Display for Decimal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.scale == 0 {
@@ -117,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decimal_from_str_and_f64_roundtrip() {
+    fn decimal_from_str_roundtrip() {
         let high_precision = Decimal::try_from("-1.000000000000000001").unwrap();
         assert_eq!(high_precision.unscaled, -1_000_000_000_000_000_001);
         assert_eq!(high_precision.scale, 18);
@@ -129,14 +116,6 @@ mod tests {
 
         let one_and_half = Decimal::try_from("1.5").unwrap();
         assert_eq!(one_and_half.to_string(), "1.5");
-
-        let from_f64 = Decimal::try_from(1.5_f64).unwrap();
-        assert_eq!(from_f64.to_string(), "1.5");
-
-        assert!(matches!(
-            Decimal::try_from(f64::NAN),
-            Err(UdfError::Type(_))
-        ));
 
         assert!(matches!(Decimal::try_from("abc"), Err(UdfError::Type(_))));
     }
