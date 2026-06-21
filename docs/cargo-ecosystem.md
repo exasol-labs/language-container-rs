@@ -82,9 +82,17 @@ Subcommands:
 |------------|-------------|
 | `cargo exasol-udf new <path>` | Scaffold a new UDF crate with the correct `Cargo.toml` and `lib.rs` stub |
 | `cargo exasol-udf build [<path>]` | Cross-compile to `x86_64-unknown-linux-musl` `.so` (release, symbols stripped) |
-| `cargo exasol-udf validate <path>` | Inspect a compiled `.so` for the expected exported symbol |
+| `cargo exasol-udf validate <path>` | Inspect a compiled `.so`: enumerates all `__exa_udf_entry_*` symbols and validates each vtable |
 
 `cargo exasol-udf build` sets `CARGO_TARGET_DIR`, selects the musl target, and passes `--release` — equivalent to `cargo build --target x86_64-unknown-linux-musl --release` but without needing to remember the flags.
+
+### Multiple entry points per `.so`
+
+A single `.so` may export any number of named entry points — one per `#[exasol_udf]`-annotated function. The macro derives the C symbol name from the Rust function identifier: `fn double_it` → `__exa_udf_entry_DOUBLE_IT`. The optional `name = "..."` attribute overrides the derived suffix verbatim.
+
+`cargo exasol-udf validate` checks that at least one `__exa_udf_entry_*` symbol is present and that every vtable it finds is valid; it lists all found names.
+
+> **Upgrade note (sdk < 0.14.0):** SDKs before 0.14.0 emitted a single bare `__exa_udf_entry` symbol. Rebuild any existing `.so` with sdk >= 0.14.0 so the runtime can locate the named symbol. The SQL `CREATE SCRIPT` name must match the UDF name (Rust fn ident, or the `name = "..."` override) — the runtime looks up `__exa_udf_entry_<UPPER_SNAKE_NAME>`.
 
 ## exa-zmq-protocol / exa-proto — protocol layer
 

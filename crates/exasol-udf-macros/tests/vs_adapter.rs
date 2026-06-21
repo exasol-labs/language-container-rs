@@ -42,7 +42,8 @@ impl UdfContext for NoopCtx {
 
 #[test]
 fn vs_adapter_annotation_wires_slot_and_echoes_through_context_abi() {
-    let vt = unsafe { &*__exa_udf_entry() };
+    // fn vs_run → SQL name VS_RUN → entry __exa_udf_entry_VS_RUN
+    let vt = unsafe { &*__exa_udf_entry_VS_RUN() };
     let hook = vt
         .virtual_schema_adapter_call
         .expect("vs_adapter annotation must wire the virtual_schema_adapter_call slot");

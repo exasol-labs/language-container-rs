@@ -71,7 +71,7 @@ impl Runtime {
         };
         tracing::debug!(?so_path, "resolved udf object");
 
-        let udf = match LoadedUdf::open(&so_path) {
+        let udf = match LoadedUdf::open(&so_path, &meta.script_name) {
             Ok(u) => u,
             Err(e) => {
                 let _ = transport

@@ -1,0 +1,19 @@
+error: name must be non-empty and contain only ASCII alphanumeric characters and underscores
+ --> tests/trybuild/bad_name.rs:6:21
+  |
+6 | #[exasol_udf(name = "BAD NAME")]
+  |                     ^^^^^^^^^^
+
+warning: unused import: `exasol_udf_sdk::context::UdfContext`
+ --> tests/trybuild/bad_name.rs:3:5
+  |
+3 | use exasol_udf_sdk::context::UdfContext;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `exasol_udf_sdk::error::UdfError`
+ --> tests/trybuild/bad_name.rs:4:5
+  |
+4 | use exasol_udf_sdk::error::UdfError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

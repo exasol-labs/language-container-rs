@@ -4,46 +4,11 @@ Provides the `cargo exaudf` developer CLI that scaffolds a Rust UDF crate, build
 
 ## Background
 
-`cargo-exaudf` is a Cargo subcommand binary invoked as `cargo exaudf <subcommand>`. All builds target `x86_64-unknown-linux-musl`; the triple is hidden from the author. The CLI MUST NOT verify SSL certificates is not relevant here — it performs no network I/O. ABI compatibility is judged against the same `EXA_UDF_ABI_VERSION` and `EXA_SDK_FINGERPRINT` constants baked into `exasol-udf-sdk`.
+The CLI validates and builds `.so` artifacts without a database, so it has no script name to resolve a single entry point. This delta changes `validate` and `build` to enumerate every exported `__exa_udf_entry_<NAME>` symbol (one per UDF in the crate) rather than resolving the single bare `__exa_udf_entry`. `validate` checks each discovered vtable's ABI/fingerprint and reports each UDF name; `build` verifies at least one named entry point exists. A `.so` with no named entry point — including legacy single-symbol artifacts — is rejected with a rebuild hint.
 
 ## Scenarios
 
-### Scenario: new scaffolds a buildable UDF crate
-
-* *GIVEN* a target directory that does not yet contain a crate
-* *WHEN* the author runs `cargo exaudf new my-udf`
-* *THEN* the CLI MUST create a `Cargo.toml` with `crate-type = ["cdylib"]` and a dependency on `exasol-udf-sdk`
-* *AND* it MUST create a `src/lib.rs` containing a `#[exasol_udf]` struct that implements `UdfRun`
-* *AND* the generated crate MUST compile as written
-
-### Scenario: new rejects an existing non-empty target
-
-* *GIVEN* a target directory that already contains a `Cargo.toml`
-* *WHEN* the author runs `cargo exaudf new` against that directory
-* *THEN* the CLI MUST refuse to overwrite and exit with a non-zero status
-* *AND* it MUST print a message naming the conflicting path
-
-### Scenario: build produces a fully-static musl .so
-
-* *GIVEN* a UDF crate produced by `cargo exaudf new`
-* *WHEN* the author runs `cargo exaudf build`
-* *THEN* the CLI MUST invoke `cargo build --release --target x86_64-unknown-linux-musl`
-* *AND* it MUST print the path `target/x86_64-unknown-linux-musl/release/lib<crate>.so`
-
-### Scenario: build installs the musl target when missing
-
-* *GIVEN* a host where the `x86_64-unknown-linux-musl` target is not installed
-* *WHEN* the author runs `cargo exaudf build`
-* *THEN* the CLI MUST run `rustup target add x86_64-unknown-linux-musl` before building
-* *AND* it MUST proceed with the build once the target is present
-
-### Scenario: build emits a schema sidecar for annotated UDFs
-
-* *GIVEN* a UDF crate whose struct is annotated `#[exasol_udf(input(...), emits(...))]`
-* *WHEN* the author runs `cargo exaudf build`
-* *THEN* the CLI MUST write a `<crate>.udf-meta.json` sidecar next to the `.so` describing the input and emit columns
-* *AND* a bare `#[exasol_udf]` crate MUST build without producing a sidecar
-
+<!-- DELTA:CHANGED -->
 ### Scenario: validate accepts a compatible .so
 
 * *GIVEN* a `.so` built against the current `exasol-udf-sdk` exporting one or more `__exa_udf_entry_<NAME>` symbols
@@ -51,24 +16,31 @@ Provides the `cargo exaudf` developer CLI that scaffolds a Rust UDF crate, build
 * *THEN* the CLI MUST dlopen the `.so` and discover every exported `__exa_udf_entry_<NAME>` symbol
 * *AND* for each discovered entry point it MUST confirm the vtable `abi_version` equals `EXA_UDF_ABI_VERSION` and the `sdk_fingerprint` matches the current SDK
 * *AND* it MUST report each discovered UDF name and exit zero reporting compatibility
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: validate rejects an ABI or fingerprint mismatch
 
 * *GIVEN* a `.so` with a `__exa_udf_entry_<NAME>` symbol whose vtable `abi_version` or `sdk_fingerprint` differs from the current SDK
 * *WHEN* the author runs `cargo exaudf validate <path.so>`
 * *THEN* the CLI MUST exit non-zero
 * *AND* it MUST report which UDF name and which of `abi_version` or `sdk_fingerprint` mismatched, showing expected and actual values
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: validate rejects a .so missing any entry symbol
 
 * *GIVEN* a shared object that exports no `__exa_udf_entry_<NAME>` symbol (including a legacy `.so` that exports only the bare `__exa_udf_entry`)
 * *WHEN* the author runs `cargo exaudf validate <path.so>`
 * *THEN* the CLI MUST exit non-zero
 * *AND* it MUST report that no `__exa_udf_entry_<NAME>` entry point could be found, with a hint to rebuild against sdk >= 0.14.0
+<!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: build verifies the artifact exports at least one named entry point
 
 * *GIVEN* an author crate annotated with `#[exasol_udf]`
 * *WHEN* the author runs `cargo exaudf build`
 * *THEN* after producing the musl `.so` the CLI MUST verify the artifact exports at least one `__exa_udf_entry_<NAME>` symbol resolving to a non-null vtable
 * *AND* a build whose artifact exports no named entry point MUST fail with a clear error rather than producing a silently-unusable `.so`
+<!-- /DELTA:CHANGED -->

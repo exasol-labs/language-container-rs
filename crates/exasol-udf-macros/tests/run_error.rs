@@ -39,7 +39,8 @@ impl UdfContext for NoopCtx {
 
 #[test]
 fn run_shim_writes_malloc_backed_error_string_on_user_error() {
-    let vt = unsafe { &*__exa_udf_entry() };
+    // fn failing_run → SQL name FAILING_RUN → entry __exa_udf_entry_FAILING_RUN
+    let vt = unsafe { &*__exa_udf_entry_FAILING_RUN() };
 
     let mut ctx = NoopCtx;
     let mut dyn_ref: &mut dyn UdfContext = &mut ctx;

@@ -53,6 +53,55 @@ pub fn my_udf(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
 The function name becomes the SQL script name (case-insensitive). Return `Ok(())` after all `emit` calls are done.
 
+### Multiple UDFs per `.so`
+
+A single cdylib can export any number of `#[exasol_udf]`-annotated functions. Each function generates its own C entry point and vtable; they never conflict:
+
+```rust
+#[exasol_udf(input(x: i64), emits(y: i64))]
+pub fn identity(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+
+#[exasol_udf(input(x: i64), emits(y: i64))]
+pub fn double_it(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+```
+
+Both entry points live in the same `.so`. Each is registered as a separate SQL script:
+
+```sql
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.identity(x BIGINT)
+RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.double_it(x BIGINT)
+RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+```
+
+### Entry-point naming and the `name` attribute
+
+The macro derives the exported C symbol from the Rust function name: it converts the identifier to `UPPER_SNAKE_CASE` and prefixes it with `__exa_udf_entry_`. For example, `fn double_it` → `__exa_udf_entry_DOUBLE_IT`.
+
+Use `name = "..."` to override the derived SQL name (and the symbol suffix) without renaming the Rust function:
+
+```rust
+#[exasol_udf(name = "MY_SPECIAL_UDF", input(x: i64), emits(y: i64))]
+pub fn internal_impl(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+// exports __exa_udf_entry_MY_SPECIAL_UDF
+```
+
+The SQL `CREATE SCRIPT` name must match exactly (case-insensitive on the SQL side, but the symbol suffix is verbatim):
+
+```sql
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.my_special_udf(x BIGINT)
+RETURNS BIGINT AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+```
+
+> **Upgrade note (sdk < 0.14.0):** Versions before 0.14.0 exported a single bare `__exa_udf_entry` symbol. If you have an existing `.so` built against an older SDK, rebuild it with sdk >= 0.14.0 before registering it with a `CREATE SCRIPT` that uses the named entry-point convention. The runtime will reject a `.so` that lacks the expected `__exa_udf_entry_<NAME>` symbol with a clear error message.
+
 ### Optional type annotations
 
 If you annotate the input and output types, the runtime validates the SQL column schema at load time:

@@ -29,6 +29,7 @@ const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
 const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
 const TS_NOW_LIB: &str = "libtimestamp_now.so";
 const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
+const ANNOTATED_FIXTURE_LIB: &str = "libannotated_fixture.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -127,9 +128,17 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let ts_pass_path = harness
         .upload_udf(TS_PASS_LIB, read_udf_artifact(TS_PASS_LIB)?)
         .await?;
+    let annotated_fixture_path = harness
+        .upload_udf(
+            ANNOTATED_FIXTURE_LIB,
+            read_udf_artifact(ANNOTATED_FIXTURE_LIB)?,
+        )
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
+    annotated_fixture_two_entries_from_one_so(&mut conn, &annotated_fixture_path).await?;
+    eprintln!("[it] scenario annotated_fixture_two_entries ok");
     set_filter_emits_positive_only(&mut conn, &set_path).await?;
     eprintln!("[it] scenario set_filter ok");
     json_parse_extracts_name(&mut conn, &json_path).await?;
@@ -265,14 +274,67 @@ async fn sanity_select_one(conn: &mut Connection) -> Result<()> {
 /// Scenario 8.4: scalar `double_it(21)` returns 42.
 async fn scalar_double_returns_42(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT double_it(x BIGINT) RETURNS BIGINT AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_double(x BIGINT) RETURNS BIGINT AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
 
-    let got = query_single_string(conn, "SELECT TO_CHAR(double_it(21))").await?;
+    let got = query_single_string(conn, "SELECT TO_CHAR(scalar_double(21))").await?;
     if got.as_deref() != Some("42") {
-        bail!("double_it(21) returned {got:?}, expected 42");
+        bail!("scalar_double(21) returned {got:?}, expected 42");
+    }
+    Ok(())
+}
+
+/// Scenario: multiple UDFs from ONE `.so`. `annotated-fixture` exports two named
+/// entry points (`annotated`, `annotated_double`); we upload it once and create a
+/// script per entry, both referencing the same artifact, then assert each resolves
+/// to its own entry and runs. This is the live proof of the headline 0.14.0
+/// feature: one `.so`, many UDFs, addressed by SQL script name.
+///
+/// The fixture annotates `input(x: i64), emits(y: i64)`. Two constraints follow:
+/// (1) load-time schema validation requires the column ExaType to be exactly
+/// `Int64`, so the columns are `DECIMAL(18,0)` (Exasol delivers `DECIMAL(p,0)`
+/// fitting i64 as PB_INT64), not `BIGINT` (which arrives as PB_NUMERIC); and
+/// (2) the validation matches column NAMES case-sensitively, but Exasol
+/// upper-cases unquoted identifiers — so the column names are quoted (`"x"`,
+/// `"y"`) to preserve the lower-case names the annotation declares.
+async fn annotated_fixture_two_entries_from_one_so(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.annotated(\"x\" DECIMAL(18,0)) \
+         EMITS (\"y\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.annotated_double(\"x\" DECIMAL(18,0)) \
+         EMITS (\"y\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let identity = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT annotated(CAST(21 AS DECIMAL(18,0))) AS y FROM DUAL)",
+    )
+    .await?;
+    if identity.as_deref() != Some("21") {
+        bail!("annotated(21) returned {identity:?}, expected 21 (identity entry point)");
+    }
+
+    let doubled = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT annotated_double(CAST(21 AS DECIMAL(18,0))) AS y FROM DUAL)",
+    )
+    .await?;
+    if doubled.as_deref() != Some("42") {
+        bail!(
+            "annotated_double(21) returned {doubled:?}, expected 42 — the second \
+             named entry point in the same .so did not resolve correctly"
+        );
     }
     Ok(())
 }
@@ -287,14 +349,14 @@ async fn set_filter_emits_positive_only(conn: &mut Connection, udf_object: &str)
     let expected_positive = 3i64;
 
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SET SCRIPT filter_positive(x BIGINT) EMITS (y BIGINT) AS\n\
+        "CREATE OR REPLACE RUST SET SCRIPT set_filter(x BIGINT) EMITS (y BIGINT) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
 
     let count = query_single_string(
         conn,
-        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT filter_positive(x) FROM nums)",
+        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT set_filter(x) FROM nums)",
     )
     .await?
     .ok_or_else(|| anyhow!("count query returned NULL"))?;
@@ -304,7 +366,7 @@ async fn set_filter_emits_positive_only(conn: &mut Connection, udf_object: &str)
 
     let min_emitted = query_single_string(
         conn,
-        "SELECT TO_CHAR(MIN(y)) FROM (SELECT filter_positive(x) AS y FROM nums)",
+        "SELECT TO_CHAR(MIN(y)) FROM (SELECT set_filter(x) AS y FROM nums)",
     )
     .await?
     .ok_or_else(|| anyhow!("min query returned NULL"))?;
@@ -318,12 +380,12 @@ async fn set_filter_emits_positive_only(conn: &mut Connection, udf_object: &str)
 /// third-party crate (`serde_json`) is statically linked into the musl `.so`.
 async fn json_parse_extracts_name(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT json_field(doc VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT json_parse(doc VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
 
-    let got = query_single_string(conn, "SELECT json_field('{\"name\":\"exa\"}')").await?;
+    let got = query_single_string(conn, "SELECT json_parse('{\"name\":\"exa\"}')").await?;
     if got.as_deref() != Some("exa") {
         bail!("json_field returned {got:?}, expected exa");
     }
@@ -335,7 +397,7 @@ async fn json_parse_extracts_name(conn: &mut Connection, udf_object: &str) -> Re
 /// runtime maps onto the prefixed error-close path. `double_it`'s `x * 2` wraps
 /// silently in release mode, so it is not a reliable error trigger.
 async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
-    let result = conn.query("SELECT json_field('not valid json')").await;
+    let result = conn.query("SELECT json_parse('not valid json')").await;
     match result {
         Ok(_) => bail!("expected overflow UDF error, query succeeded"),
         Err(e) => {
@@ -356,7 +418,7 @@ async fn udf_error_surfaces_prefix(conn: &mut Connection) -> Result<()> {
 /// This proves the runtime threads the error string from the ABI `error_out`
 /// parameter through the protobuf error-close path to the client.
 async fn udf_error_message_reaches_db(conn: &mut Connection) -> Result<()> {
-    let result = conn.query("SELECT json_field('not valid json')").await;
+    let result = conn.query("SELECT json_parse('not valid json')").await;
     match result {
         Ok(_) => bail!("expected UDF error, query succeeded"),
         Err(e) => {
@@ -460,7 +522,7 @@ async fn single_call_default_output_columns_roundtrip(
     udf_object: &str,
 ) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT sc_default_cols() RETURNS VARCHAR(2000) AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT single_call_udf() RETURNS VARCHAR(2000) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -744,7 +806,7 @@ async fn connect_back_stream_reads_all_rows(
 /// so it is robust to `TO_CHAR` fractional-second formatting quirks.
 async fn timestamp_arithmetic_roundtrips(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT ts_add_second(t TIMESTAMP) RETURNS TIMESTAMP AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT timestamp_add_second(t TIMESTAMP) RETURNS TIMESTAMP AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -753,7 +815,7 @@ async fn timestamp_arithmetic_roundtrips(conn: &mut Connection, udf_object: &str
     let got = query_single_string(
         conn,
         "SELECT CASE \
-           WHEN ts_add_second(TIMESTAMP '2026-06-14 09:30:15.250000') \
+           WHEN timestamp_add_second(TIMESTAMP '2026-06-14 09:30:15.250000') \
               = TIMESTAMP '2026-06-14 09:30:16.250000' \
            THEN 'eq' ELSE 'ne' END",
     )
@@ -795,7 +857,7 @@ async fn timestamp_arithmetic_roundtrips(conn: &mut Connection, udf_object: &str
 ///      baked into the emitted wall-clock. A UTC fallback yields ~0 and fails.
 async fn udf_local_time_matches_session_tz(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT udf_now() RETURNS TIMESTAMP AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT timestamp_now() RETURNS TIMESTAMP AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -808,7 +870,7 @@ async fn udf_local_time_matches_session_tz(conn: &mut Connection, udf_object: &s
     // (a) Bounded skew between the UDF wall-clock and the DB wall-clock.
     let skew = query_single_string(
         conn,
-        "SELECT TO_CHAR(ABS(SECONDS_BETWEEN(udf_now(), CURRENT_TIMESTAMP)))",
+        "SELECT TO_CHAR(ABS(SECONDS_BETWEEN(timestamp_now(), CURRENT_TIMESTAMP)))",
     )
     .await?
     .ok_or_else(|| anyhow!("udf_now skew query returned NULL"))?;
@@ -828,7 +890,7 @@ async fn udf_local_time_matches_session_tz(conn: &mut Connection, udf_object: &s
     let offset = query_single_string(
         conn,
         "SELECT TO_CHAR(\
-            SECONDS_BETWEEN(udf_now(), TIMESTAMP '1970-01-01 00:00:00') - POSIX_TIME())",
+            SECONDS_BETWEEN(timestamp_now(), TIMESTAMP '1970-01-01 00:00:00') - POSIX_TIME())",
     )
     .await?
     .ok_or_else(|| anyhow!("udf_now offset query returned NULL"))?;
@@ -890,7 +952,10 @@ async fn timestamp_precision_matrix_roundtrips(
         // widened back to TIMESTAMP(p). For p<=6 this equals CAST(LIT AS TIMESTAMP(p)).
         let input_cap = p.min(6);
 
-        let script = format!("ts_pass_{p}");
+        // One UDF entry point (`timestamp_passthrough`) backs every precision; the
+        // script name must equal that entry name, so the single name is reused and
+        // CREATE OR REPLACE'd per precision rather than suffixed with `p`.
+        let script = "timestamp_passthrough";
         conn.execute(&format!(
             "CREATE OR REPLACE RUST SCALAR SCRIPT {script}(t TIMESTAMP({p})) \
              RETURNS TIMESTAMP({p}) AS\n\

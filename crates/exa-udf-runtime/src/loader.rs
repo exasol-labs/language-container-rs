@@ -20,18 +20,29 @@ unsafe impl Send for LoadedUdf {}
 type EntryFn = unsafe extern "C" fn() -> *const ExaUdfVTable;
 
 impl LoadedUdf {
-    /// Open a `.so`, resolve `__exa_udf_entry`, and validate the vtable's ABI
-    /// version and SDK fingerprint before returning a usable handle.
+    /// Open a `.so`, resolve `__exa_udf_entry_<script_name>`, and validate the
+    /// vtable's ABI version and SDK fingerprint before returning a usable handle.
+    ///
+    /// `script_name` is the SQL object name the database sent in the handshake
+    /// metadata — it is used verbatim to build the symbol name, so it must
+    /// already be in the exact form the macro derived (i.e. UPPER_SNAKE_CASE).
     ///
     /// On any mismatch this returns an error WITHOUT calling `run` or `destroy`.
-    pub fn open(path: &std::path::Path) -> Result<Self, RuntimeError> {
+    pub fn open(path: &std::path::Path, script_name: &str) -> Result<Self, RuntimeError> {
         let lib = unsafe { Library::new(path) }?;
-        let entry: Symbol<EntryFn> = unsafe { lib.get(b"__exa_udf_entry\0") }
-            .map_err(|e| RuntimeError::Loader(format!("symbol not found: {e}")))?;
+
+        let symbol_name = format!("__exa_udf_entry_{script_name}\0");
+        let entry: Symbol<EntryFn> = unsafe { lib.get(symbol_name.as_bytes()) }.map_err(|_| {
+            RuntimeError::Loader(format!(
+                "no entry point found for script '{script_name}'; hint: rebuild with sdk >= 0.14.0"
+            ))
+        })?;
 
         let vtable_ptr = unsafe { entry() };
         if vtable_ptr.is_null() {
-            return Err(RuntimeError::Loader("__exa_udf_entry returned null".into()));
+            return Err(RuntimeError::Loader(format!(
+                "__exa_udf_entry_{script_name} returned null"
+            )));
         }
 
         let vtable = unsafe { &*vtable_ptr };

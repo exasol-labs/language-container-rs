@@ -74,7 +74,7 @@ fn scalar_dispatch_full_protocol() {
     let mut info = response(MessageType::MtInfo, conn_id);
     info.info = Some(ExascriptInfo {
         source_code: source,
-        script_name: "double_it".into(),
+        script_name: "SCALAR_DOUBLE".into(),
         ..Default::default()
     });
     send_resp(&server, &info);
@@ -174,7 +174,7 @@ fn annotated_schema_mismatch_closes_session() {
     let mut info = response(MessageType::MtInfo, conn_id);
     info.info = Some(ExascriptInfo {
         source_code: source,
-        script_name: "annotated".into(),
+        script_name: "ANNOTATED".into(),
         ..Default::default()
     });
     send_resp(&server, &info);

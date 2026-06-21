@@ -74,7 +74,8 @@ jobs:
             -p connect-back-stream \
             -p timestamp-add-second \
             -p timestamp-now \
-            -p timestamp-passthrough
+            -p timestamp-passthrough \
+            -p annotated-fixture
 
       - name: Build IT test binary (compile once)
         run: |
