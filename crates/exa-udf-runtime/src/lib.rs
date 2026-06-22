@@ -1,5 +1,4 @@
 mod artifact;
-mod compiler;
 #[cfg(feature = "connect-back")]
 mod connect_back;
 mod dispatch;
@@ -10,7 +9,6 @@ mod schema_check;
 mod single_call;
 
 pub use artifact::parse_udf_object_path;
-pub use compiler::compile_jit;
 pub use error::RuntimeError;
 pub use loader::LoadedUdf;
 pub use rowset::{EmitBuffer, HostContextBridge, InputRowSet};

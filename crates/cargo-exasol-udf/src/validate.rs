@@ -69,6 +69,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let mut errors: Vec<String> = Vec::new();
     let mut ok_names: Vec<String> = Vec::new();
+    let rt_fingerprint = runtime_fingerprint();
 
     for udf_name in &udf_names {
         let symbol = format!("__exa_udf_entry_{}\0", udf_name);
@@ -80,12 +81,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         "  {}: ABI version mismatch — .so has {}, runtime expects {}",
                         udf_name, abi_version, RUNTIME_ABI_VERSION
                     ));
-                } else if fingerprint != runtime_fingerprint() {
+                } else if fingerprint != rt_fingerprint {
                     errors.push(format!(
                         "  {}: SDK fingerprint mismatch — .so has '{}', runtime has '{}'",
-                        udf_name,
-                        fingerprint,
-                        runtime_fingerprint()
+                        udf_name, fingerprint, rt_fingerprint
                     ));
                 } else {
                     ok_names.push(udf_name.clone());
