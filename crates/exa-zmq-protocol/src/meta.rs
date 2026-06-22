@@ -197,7 +197,7 @@ impl UdfMeta {
 mod tests {
     use super::*;
     use exa_proto::exascript_metadata::ColumnDefinition;
-    use exa_proto::{ExascriptInfo, ExascriptMetadata, IterType as PbIterType};
+    use exa_proto::{ExascriptInfo, ExascriptMetadata};
 
     fn col(
         ty: ColumnType,
@@ -315,32 +315,16 @@ mod tests {
 
     fn make_info(maximal_memory_limit: u64) -> ExascriptInfo {
         ExascriptInfo {
-            database_name: "DB".to_string(),
-            database_version: "7".to_string(),
-            script_name: "S".to_string(),
-            script_schema: "SC".to_string(),
-            current_user: None,
-            scope_user: None,
-            source_code: "".to_string(),
-            session_id: 1,
-            statement_id: 1,
-            node_count: 1,
-            node_id: 0,
-            vm_id: 0,
             maximal_memory_limit,
-            meta_info: None,
-            current_schema: None,
+            ..Default::default()
         }
     }
 
     fn make_meta() -> ExascriptMetadata {
-        ExascriptMetadata {
-            input_iter_type: PbIterType::PbExactlyOnce as i32,
-            output_iter_type: PbIterType::PbExactlyOnce as i32,
-            input_columns: vec![],
-            output_columns: vec![],
-            single_call_mode: false,
-        }
+        // input_iter_type / output_iter_type default to 0; prost resolves 0 to
+        // PbExactlyOnce (the first variant) via unwrap_or(IterType::default()),
+        // so Default::default() is equivalent to the previous explicit form.
+        ExascriptMetadata::default()
     }
 
     #[test]
