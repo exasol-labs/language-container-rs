@@ -487,6 +487,9 @@ pub struct HostContextBridge<'a> {
     /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
     /// because `connection()` records errors through a shared `&self` borrow.
     last_error: std::cell::Cell<Option<String>>,
+    /// Maximum memory the DB has allocated for this UDF invocation, in bytes.
+    /// Sourced from `UdfMeta::maximal_memory_limit` at bridge construction time.
+    memory_limit: u64,
     #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
 }
@@ -497,6 +500,7 @@ impl<'a> HostContextBridge<'a> {
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
+        memory_limit: u64,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -506,6 +510,7 @@ impl<'a> HostContextBridge<'a> {
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
+            memory_limit,
             #[cfg(feature = "connect-back")]
             conn_requester,
         }
@@ -533,6 +538,7 @@ impl<'a> HostContextBridge<'a> {
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
+        memory_limit: u64,
         conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -542,6 +548,7 @@ impl<'a> HostContextBridge<'a> {
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
+            memory_limit,
             conn_requester,
         }
     }
@@ -581,6 +588,10 @@ fn open_connect_back(
 impl UdfContext for HostContextBridge<'_> {
     fn num_columns(&self) -> usize {
         self.input_cols.len()
+    }
+
+    fn memory_limit(&self) -> u64 {
+        self.memory_limit
     }
 
     fn get(&self, col: usize) -> Result<&Value, UdfError> {
@@ -768,6 +779,7 @@ mod tests {
             emit,
             cols,
             Box::new(|_buf: &mut EmitBuffer| Ok(())),
+            0,
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
@@ -1188,5 +1200,31 @@ mod tests {
         let mut emit = EmitBuffer::new();
         let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
         assert!(!bridge.next().unwrap());
+    }
+
+    #[test]
+    fn bridge_returns_memory_limit() {
+        let meta = vec![col("a", ExaType::Int64)];
+        let table = ExascriptTableData {
+            rows: 0,
+            ..Default::default()
+        };
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        let limit_bytes: u64 = 512 * 1024 * 1024;
+        let bridge = HostContextBridge::new(
+            &mut rs,
+            &mut emit,
+            &meta,
+            Box::new(|_buf: &mut EmitBuffer| Ok(())),
+            limit_bytes,
+            #[cfg(feature = "connect-back")]
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
+        );
+        assert_eq!(bridge.memory_limit(), limit_bytes);
     }
 }

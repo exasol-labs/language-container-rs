@@ -35,6 +35,8 @@ pub struct UdfMeta {
     pub(crate) node_id: u32,
     #[allow(dead_code)]
     pub(crate) node_count: u32,
+    /// Bytes, per-UDF-instance resident-memory limit.
+    pub maximal_memory_limit: u64,
     /// Connect-back credentials surfaced during the handshake, when the DB
     /// provided them (via an `MT_IMPORT` connection-information exchange).
     pub conn_info: Option<ConnInfo>,
@@ -174,6 +176,7 @@ impl UdfMeta {
             session_id: info.session_id,
             node_id: info.node_id,
             node_count: info.node_count,
+            maximal_memory_limit: info.maximal_memory_limit,
             conn_info: None,
         })
     }
@@ -194,6 +197,7 @@ impl UdfMeta {
 mod tests {
     use super::*;
     use exa_proto::exascript_metadata::ColumnDefinition;
+    use exa_proto::{ExascriptInfo, ExascriptMetadata};
 
     fn col(
         ty: ColumnType,
@@ -307,6 +311,32 @@ mod tests {
                 scale: Some(1)
             }
         );
+    }
+
+    fn make_info(maximal_memory_limit: u64) -> ExascriptInfo {
+        ExascriptInfo {
+            maximal_memory_limit,
+            ..Default::default()
+        }
+    }
+
+    fn make_meta() -> ExascriptMetadata {
+        // input_iter_type / output_iter_type default to 0; prost resolves 0 to
+        // PbExactlyOnce (the first variant) via unwrap_or(IterType::default()),
+        // so Default::default() is equivalent to the previous explicit form.
+        ExascriptMetadata::default()
+    }
+
+    #[test]
+    fn from_pb_carries_maximal_memory_limit() {
+        let info_nonzero = make_info(512 * 1024 * 1024);
+        let meta = make_meta();
+        let udf = UdfMeta::from_pb(&meta, &info_nonzero).unwrap();
+        assert_eq!(udf.maximal_memory_limit, 512 * 1024 * 1024);
+
+        let info_zero = make_info(0);
+        let udf_zero = UdfMeta::from_pb(&meta, &info_zero).unwrap();
+        assert_eq!(udf_zero.maximal_memory_limit, 0);
     }
 
     #[test]
