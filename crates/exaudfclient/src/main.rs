@@ -16,52 +16,13 @@ fn main() {
         ),
     );
 
-    // Probe whether getrandom(2) is available; BoringSSL aborts if it is not
-    // and /dev/urandom is also absent (BucketFS chroot strips device nodes).
-    let mut probe = [0u8; 1];
-    let gr_rc = unsafe {
-        libc::syscall(
-            libc::SYS_getrandom,
-            probe.as_mut_ptr() as *mut libc::c_void,
-            1usize,
-            0u32,
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("info".parse().unwrap()),
         )
-    };
-    eprintln!("[slc] getrandom probe rc={gr_rc}");
-
-    let diag_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("udf_diag.log")));
-    match diag_path.as_ref().and_then(|p| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(p)
-            .ok()
-    }) {
-        Some(f) => {
-            tracing_subscriber::fmt()
-                .with_writer(std::sync::Mutex::new(f))
-                .with_ansi(false)
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive("debug".parse().unwrap()),
-                )
-                .init();
-            std::panic::set_hook(Box::new(move |info| {
-                tracing::error!("PANIC: {info}");
-            }));
-        }
-        None => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stderr)
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive("info".parse().unwrap()),
-                )
-                .init();
-        }
-    }
+        .init();
 
     let args: Vec<String> = std::env::args().collect();
 

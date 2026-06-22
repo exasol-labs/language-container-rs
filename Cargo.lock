@@ -56,14 +56,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "annotated-double"
-version = "0.1.0"
-dependencies = [
- "exasol-udf-macros",
- "exasol-udf-sdk",
-]
-
-[[package]]
 name = "annotated-fixture"
 version = "0.1.1"
 dependencies = [
@@ -494,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "exasol-udf-sdk",
  "libloading",
@@ -607,7 +599,6 @@ dependencies = [
 name = "connect-back-query"
 version = "0.1.0"
 dependencies = [
- "arrow",
  "exasol-udf-macros",
  "exasol-udf-sdk",
 ]
@@ -962,19 +953,17 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "prost",
  "prost-build",
- "prost-types",
  "protoc-bin-vendored",
 ]
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
- "anyhow",
  "arrow",
  "chrono",
  "exa-proto",
@@ -994,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1039,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1050,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "arrow",
  "chrono",
@@ -1059,11 +1048,9 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
- "anyhow",
  "exa-udf-runtime",
- "libc",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1775,7 +1762,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3163,16 +3150,6 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spike-connect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arrow",
- "exarrow-rs",
- "tokio",
 ]
 
 [[package]]
