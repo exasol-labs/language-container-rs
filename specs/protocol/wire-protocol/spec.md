@@ -8,6 +8,8 @@ The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a
 
 v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_UNDEFINED_CALL`) carrying a `SingleCallFunctionId`, and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response for connect-back. The error close path continues to use the prefix `F-UDF-CL-RUST-####`. In single-call mode the DB acknowledges the container's `MT_RETURN` result by echoing `MT_RETURN`; the state machine surfaces this as `HostEvent::SingleCallAck` so the dispatch loop can close the run with `MT_DONE`. In non-single-call mode, `MT_RETURN` in the run phase remains a protocol error.
 
+The handshake `Info` response (`exascript_info`) carries the per-UDF-instance resident-memory limit in `maximal_memory_limit` (field 11, `required uint64`, bytes), which the database enforces on each VM. `UdfMeta` surfaces this alongside the existing `node_count`/`node_id` and connection-information fields so UDF code can size in-process memory to the sandbox limit.
+
 ## Scenarios
 
 ### Scenario: REQ transport connects to the IPC socket
@@ -129,3 +131,10 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 * *THEN* the state machine MUST emit `HostEvent::SingleCallAck` and MUST NOT treat this as a protocol error
 * *AND* in a non-single-call protocol, an `MT_RETURN` received in the Run phase MUST still be surfaced as a `ProtocolError::UnexpectedMessage`
 
+### Scenario: Memory limit is surfaced from the handshake info response
+
+* *GIVEN* a fresh `Protocol` in its initial phase
+* *WHEN* the `Info` response carries an `exascript_info` whose `maximal_memory_limit` field is set to a non-zero byte count
+* *THEN* the `HostEvent::Meta` MUST carry that value on `UdfMeta::maximal_memory_limit` as an unsigned byte count, decoded verbatim from `exascript_info.maximal_memory_limit` (field 11, `required uint64`), alongside the script source, connection id, and `node_count`
+* *AND* the value MUST be interpreted as the per-UDF-instance resident-memory limit in bytes that the database enforces, and MUST NOT be rescaled into any other unit
+* *AND* because the proto field is `required`, an `Info` response that omits it MUST yield `UdfMeta::maximal_memory_limit` of `0` (the proto default, denoting "no limit reported") rather than a protocol error

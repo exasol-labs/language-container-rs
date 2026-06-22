@@ -194,6 +194,7 @@ fn run_batch(
             &mut emit_buf,
             &meta.input_columns,
             flusher,
+            meta.maximal_memory_limit,
             #[cfg(feature = "connect-back")]
             conn_requester,
         );

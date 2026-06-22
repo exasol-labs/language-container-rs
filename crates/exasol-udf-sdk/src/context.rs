@@ -100,6 +100,14 @@ pub trait UdfContext {
         }
     }
 
+    /// Maximum memory (in bytes) the host has allocated for this UDF sandbox, as reported
+    /// by the DB in the handshake metadata.  Returns `0` when the host did not supply a
+    /// limit or when called on a context that does not override this method.  This is plain
+    /// metadata — no connect-back feature gate applies.
+    fn memory_limit(&self) -> u64 {
+        0
+    }
+
     /// Return the IP address of the cluster node that started this language container.
     /// The IP is parsed from the ZMQ endpoint; no network call is made.
     #[cfg(feature = "connect-back")]
@@ -225,6 +233,12 @@ mod tests {
         assert_eq!(ctx.get_date(3).unwrap(), Some(date));
         assert_eq!(ctx.get_value(4).unwrap(), None);
         assert!(matches!(ctx.get_f64(5), Err(UdfError::Type(_))));
+    }
+
+    #[test]
+    fn default_memory_limit_is_zero() {
+        let ctx = DummyCtx;
+        assert_eq!(ctx.memory_limit(), 0);
     }
 
     #[test]
