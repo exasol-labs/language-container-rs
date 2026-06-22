@@ -36,19 +36,7 @@ pub enum HostEvent {
 /// Action the runtime wants to take, encoded back to a protobuf request.
 #[derive(Debug)]
 pub enum HostAction {
-    Info(exa_proto::ExascriptClient),
     /// Ask the DB for column metadata; sent after MT_INFO, before MT_META.
     MetaRequest,
-    MetaReply(exa_proto::ExascriptMetadata),
-    EmitData(exa_proto::ExascriptTableData),
-    Next,
-    DoneReply,
-    CleanupReply,
-    FinishedReply,
-    CloseError(String),
     PingReply(String),
-    /// Return the string result of a single-call function invocation.
-    SingleCallReturn(String),
-    /// Tell the DB the requested function is not implemented in this container.
-    UndefinedCall(String),
 }

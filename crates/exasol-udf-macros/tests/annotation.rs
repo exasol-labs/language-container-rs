@@ -88,6 +88,23 @@ fn name_attribute_overrides_entry_name() {
     );
 }
 
+// ---- Decimal type annotation ----
+
+#[exasol_udf(input(x: Decimal), emits(result: Decimal))]
+fn decimal_udf(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    Ok(())
+}
+
+#[test]
+fn decimal_annotation_embeds_schema() {
+    let vt = unsafe { &*__exa_udf_entry_DECIMAL_UDF() };
+    let input = schema_str(vt.annotated_input_schema).unwrap();
+    let output = schema_str(vt.annotated_output_schema).unwrap();
+
+    assert_eq!(input, r#"[{"name":"x","type":"Numeric"}]"#);
+    assert_eq!(output, r#"[{"name":"result","type":"Numeric"}]"#);
+}
+
 // ---- two distinct names ----
 
 #[exasol_udf]

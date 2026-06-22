@@ -14,9 +14,10 @@ The `exarrow-rs` crate lives at `/home/talos/code/exarrow-rs` (not on crates.io)
 
 * *GIVEN* an empty repository with no Cargo files
 * *WHEN* `Cargo.toml` is created at the workspace root
-* *THEN* it MUST declare `[workspace]` with `resolver = "2"` and list all seven crate members under `members`
+* *THEN* it MUST declare `[workspace]` with `resolver = "2"` and list all crate members under `members`
 * *AND* it MUST include a `[workspace.dependencies]` table centralizing all shared dependencies (`zmq`, `prost`, `libloading`, `arrow`, `syn`, `quote`, `thiserror`, `tracing`)
-* *AND* it MUST include `[patch.crates-io]` pointing `exarrow-rs` to the local path `/home/talos/code/exarrow-rs`
+* *AND* the `[workspace.dependencies]` table MUST NOT declare `indexmap`, because no member crate references it (a declared-but-unused workspace dependency only bloats the dependency graph and `Cargo.lock`)
+* *AND* it MUST include `[patch.crates-io]` pointing `exarrow-rs` to the local path
 
 ### Scenario: All seven crate stubs exist and compile
 

@@ -4,7 +4,7 @@ Packages the `exaudfclient` binary into a slim Alpine-based SLC Docker image (Op
 
 ## Background
 
-The slim image is a multi-stage build: a `rust:1.91-bookworm` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`), then copies the glibc runtime libs (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libstdc++.so.6`, `ld-linux-x86-64.so.2`, NSS modules) with `cp -L` into an `alpine:3` runtime stage. The runtime stage ships only `ca-certificates` and the bundled glibc, placing the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The `exaudfclient` binary is glibc-linked — it runs on the Debian/glibc Exasol host after BucketFS extraction; Alpine serves as the packaging layer only.
+The slim image is a multi-stage build: a `rust:1.92-bookworm` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`), then copies the glibc runtime libs (`libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `libstdc++.so.6`, `ld-linux-x86-64.so.2`, NSS modules) with `cp -L` into an `alpine:3` runtime stage. The runtime stage ships only `ca-certificates` and the bundled glibc, placing the binary at `/exaudf/exaudfclient` and the language registration file at `/build_info/language_definitions.json`. The image carries no Rust toolchain and no vendored registry, so it supports precompiled `.so` UDFs only. The `exaudfclient` binary is glibc-linked — it runs on the Debian/glibc Exasol host after BucketFS extraction; Alpine serves as the packaging layer only.
 
 The Exasol engine sets `TZ` from the session timezone for every UDF (via `NSEXEC_ENV_TZ` → `TZ`), commonly as an IANA name such as `Europe/Berlin`. The runtime image must bundle the IANA zoneinfo database so `chrono::Local`/`time` resolve named zones instead of silently falling back to UTC; the runtime never reads `TZ` itself.
 
@@ -21,11 +21,12 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 
 ### Scenario: Builder toolchain and glibc runtime
 
-* *GIVEN* the Dockerfile builder stage `FROM rust:1.91-bookworm`
+* *GIVEN* the Dockerfile builder stage `FROM rust:1.92-bookworm`
 * *WHEN* the image is built
 * *THEN* the builder MUST install `protobuf-compiler` and `pkg-config` but NOT `libzmq3-dev`
 * *AND* zmq MUST be statically linked via `zeromq-src`
 * *AND* the glibc runtime libs MUST be collected via `cp -L` into `/glibc-rt/` and staged into the runtime image
+* *AND* the builder image tag MUST match the channel pinned in `rust-toolchain.toml` (`1.92`); the spec MUST NOT name a stale `1.91` builder that no longer matches the toolchain pin
 
 ### Scenario: Runtime stage is slim and self-sufficient
 
@@ -48,14 +49,6 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *WHEN* `/exaudf/exaudfclient` is invoked with no arguments inside the container
 * *THEN* it MUST print a usage message referencing `lang=rust`
 * *AND* it MUST exit with a non-zero code
-
-### Scenario: Alpine builder compiles the binary against musl
-
-* *GIVEN* a `Dockerfile.alpine` whose builder stage is `FROM rust:alpine`
-* *WHEN* the image is built
-* *THEN* the builder stage MUST install `zeromq-dev`, `protobuf-dev`, and `pkgconfig` via `apk`
-* *AND* it MUST compile `exaudfclient` for the `x86_64-unknown-linux-musl` target
-* *AND* the resulting binary MUST be a musl binary that runs on an `alpine:3` runtime without a glibc loader
 
 ### Scenario: Alpine runtime stage is slim and self-sufficient
 

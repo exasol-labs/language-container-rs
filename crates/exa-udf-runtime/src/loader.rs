@@ -110,14 +110,14 @@ impl LoadedUdf {
 
     /// The annotated input schema JSON embedded in the vtable, or `None` when
     /// the UDF was not annotated with `input(...)`.
-    pub fn annotated_input_schema(&self) -> Option<&str> {
+    pub(crate) fn annotated_input_schema(&self) -> Option<&str> {
         let vtable = unsafe { &*self.vtable };
         c_str_opt(vtable.annotated_input_schema)
     }
 
     /// The annotated output schema JSON embedded in the vtable, or `None` when
     /// the UDF was not annotated with `emits(...)`.
-    pub fn annotated_output_schema(&self) -> Option<&str> {
+    pub(crate) fn annotated_output_schema(&self) -> Option<&str> {
         let vtable = unsafe { &*self.vtable };
         c_str_opt(vtable.annotated_output_schema)
     }

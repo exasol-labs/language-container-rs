@@ -5,12 +5,6 @@ use exasol_udf_sdk::value::{Decimal, Value};
 
 /// SET UDF that issues a connect-back query (`SELECT CAST(42 AS BIGINT)`) and
 /// emits the first cell of the first result row.
-///
-/// Uses the FFI-safe `query()` API (returns SDK `Value`s) rather than
-/// `query_arrow()`: arrow arrays produced by the runtime cannot be downcast in
-/// UDF code because the `.so` links a separate copy of `arrow` with different
-/// `TypeId`s. BIGINT arrives as `Value::Numeric` (decimal string), so we parse
-/// it and re-emit it as Numeric (BIGINT EMITS columns travel as PB_NUMERIC).
 #[exasol_udf]
 pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // Drain the single FROM DUAL input row before opening the connect-back session.

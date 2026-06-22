@@ -16,11 +16,9 @@ members = [
     "test-udfs/annotated-fixture",
     "test-udfs/connect-back-query",
     "test-udfs/connect-back-scalar",
-    "test-udfs/annotated-double",
     "test-udfs/connect-back-insert",
     "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
-    "test-udfs/spike-connect",
     "test-udfs/resolv-udf",
     "test-udfs/emit-bulk",
     "test-udfs/connect-back-stream",
@@ -43,12 +41,10 @@ default-members = [
     "test-udfs/json-parse",
     "test-udfs/single-call-fixture",
     "test-udfs/annotated-fixture",
-    "test-udfs/annotated-double",
     "test-udfs/connect-back-query",
     "test-udfs/connect-back-insert",
     "test-udfs/connect-back-crunch",
     "test-udfs/connect-back-cluster-ip",
-    "test-udfs/spike-connect",
     "test-udfs/resolv-udf",
     "test-udfs/emit-bulk",
     "test-udfs/connect-back-stream",
@@ -58,7 +54,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 license = "MIT"
 repository = "https://github.com/exasol-labs/language-container-rs"
 homepage = "https://github.com/exasol-labs/language-container-rs"
@@ -66,11 +62,10 @@ homepage = "https://github.com/exasol-labs/language-container-rs"
 [workspace.dependencies]
 # Internal SDK, published to crates.io. The `version` here MUST track
 # [workspace.package].version so dependents publish against the matching release.
-exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.15.0" }
+exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.15.1" }
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"
-indexmap = ">=2.0, <2.14"
 zmq = "0.10"
 libloading = "0.8"
 libc = "0.2"

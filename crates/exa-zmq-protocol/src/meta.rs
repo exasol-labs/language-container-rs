@@ -3,7 +3,7 @@ use exa_proto::{ColumnType, ExascriptInfo, ExascriptMetadata, IterType as PbIter
 pub use exasol_udf_sdk::value::ExaType;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum IterType {
+pub(crate) enum IterType {
     ExactlyOnce,
     Multiple,
 }
@@ -20,16 +20,21 @@ pub struct ColumnMeta {
 
 #[derive(Debug, Clone)]
 pub struct UdfMeta {
-    pub input_iter: IterType,
-    pub output_iter: IterType,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) input_iter: IterType,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) output_iter: IterType,
     pub input_columns: Vec<ColumnMeta>,
     pub output_columns: Vec<ColumnMeta>,
     pub single_call_mode: bool,
     pub source_code: String,
     pub script_name: String,
-    pub session_id: u64,
-    pub node_id: u32,
-    pub node_count: u32,
+    #[allow(dead_code)]
+    pub(crate) session_id: u64,
+    #[allow(dead_code)]
+    pub(crate) node_id: u32,
+    #[allow(dead_code)]
+    pub(crate) node_count: u32,
     /// Connect-back credentials surfaced during the handshake, when the DB
     /// provided them (via an `MT_IMPORT` connection-information exchange).
     pub conn_info: Option<ConnInfo>,
@@ -82,7 +87,8 @@ impl ColumnMeta {
         }
     }
 
-    pub fn to_pb(&self) -> exa_proto::exascript_metadata::ColumnDefinition {
+    #[cfg(test)]
+    pub(crate) fn to_pb(&self) -> exa_proto::exascript_metadata::ColumnDefinition {
         let pb_type = match self.typ {
             ExaType::Double => ColumnType::PbDouble,
             ExaType::Int32 => ColumnType::PbInt32,
@@ -143,6 +149,7 @@ fn iter_from_pb(iter: PbIterType) -> IterType {
     }
 }
 
+#[cfg(test)]
 fn iter_to_pb(iter: &IterType) -> PbIterType {
     match iter {
         IterType::ExactlyOnce => PbIterType::PbExactlyOnce,
@@ -171,7 +178,8 @@ impl UdfMeta {
         })
     }
 
-    pub fn to_pb(&self) -> ExascriptMetadata {
+    #[cfg(test)]
+    pub(crate) fn to_pb(&self) -> ExascriptMetadata {
         ExascriptMetadata {
             input_iter_type: iter_to_pb(&self.input_iter) as i32,
             output_iter_type: iter_to_pb(&self.output_iter) as i32,

@@ -5,7 +5,7 @@ mod meta;
 mod transport;
 
 pub use error::ProtocolError;
-pub use loop_::{Phase, Protocol};
+pub use loop_::Protocol;
 pub use messages::{HostAction, HostEvent};
-pub use meta::{ColumnMeta, ConnInfo, ExaType, IterType, UdfMeta};
+pub use meta::{ColumnMeta, ConnInfo, ExaType, UdfMeta};
 pub use transport::ZmqTransport;

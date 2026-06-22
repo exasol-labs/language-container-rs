@@ -4,7 +4,7 @@ use crate::meta::UdfMeta;
 use exa_proto::{ExascriptRequest, ExascriptResponse, MessageType};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Phase {
+pub(crate) enum Phase {
     Handshake,
     Run,
     Cleanup,
@@ -157,11 +157,13 @@ impl Protocol {
         }
     }
 
-    pub fn connection_id(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn connection_id(&self) -> u64 {
         self.connection_id
     }
 
-    pub fn phase(&self) -> &Phase {
+    #[cfg(test)]
+    pub(crate) fn phase(&self) -> &Phase {
         &self.phase
     }
 
@@ -224,11 +226,6 @@ impl Protocol {
     /// Build an MT_DONE request (no more data to emit).
     pub fn done_request(&self) -> ExascriptRequest {
         self.base_request(MessageType::MtDone)
-    }
-
-    /// Build an MT_CLEANUP reply.
-    pub fn cleanup_reply(&self) -> ExascriptRequest {
-        self.base_request(MessageType::MtCleanup)
     }
 
     /// Build an MT_FINISHED reply.
