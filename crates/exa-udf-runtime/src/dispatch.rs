@@ -150,20 +150,20 @@ fn run_batch(
         let proto_cell = std::cell::RefCell::new(proto);
         let cell_ref = &proto_cell;
 
-        // Mid-run flusher: serialise the buffered rows, send MT_EMIT, await the
-        // ack, then clear the buffer so it does not grow unbounded. An empty
-        // buffer is a no-op (no zero-row MT_EMIT on the wire).
+        // Mid-run flusher: send one pre-built proto table as MT_EMIT. The
+        // serialise + clear step happens in the bridge's `emit()` (row path) or
+        // in `push_batch` (batch path) before the flusher is called, so the
+        // flusher only needs to send the table and await the ack. A zero-row
+        // table is a no-op (no zero-row MT_EMIT on the wire).
         let flusher: crate::rowset::EmitFlusher = Box::new(
-            move |emit_buf: &mut EmitBuffer| -> Result<(), exasol_udf_sdk::error::UdfError> {
-                if emit_buf.is_empty() {
+            move |table: exa_proto::ExascriptTableData| -> Result<(), exasol_udf_sdk::error::UdfError> {
+                if table.rows == 0 {
                     return Ok(());
                 }
-                let out = emit_buf.to_proto(&meta.output_columns);
                 let mut proto = cell_ref.borrow_mut();
-                let req = proto.emit_request(out);
+                let req = proto.emit_request(table);
                 request(transport, &mut proto, req)
                     .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-                emit_buf.clear();
                 Ok(())
             },
         );
@@ -193,6 +193,7 @@ fn run_batch(
             &mut input,
             &mut emit_buf,
             &meta.input_columns,
+            &meta.output_columns,
             flusher,
             meta.maximal_memory_limit,
             #[cfg(feature = "connect-back")]

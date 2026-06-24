@@ -129,6 +129,49 @@ pub trait UdfContext {
     ) -> Result<Box<dyn crate::connect_back::ExaConnection>, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
+
+    /// Emit a RecordBatch already serialised to Arrow IPC bytes. The host
+    /// deserialises and encodes it. Bytes — not Arrow types — cross the .so
+    /// boundary (Arrow is not ABI-stable across the cdylib boundary; see B-002).
+    /// Authors call `emit_batch` (the `EmitBatch` ext-trait), not this directly.
+    #[cfg(feature = "emit-arrow")]
+    fn emit_record_batch_ipc(&mut self, _ipc: &[u8]) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented("emit_record_batch_ipc".into()))
+    }
+}
+
+/// Ergonomic batch-emit extension for any [`UdfContext`].
+///
+/// The serialisation is monomorphised in the caller (UDF) crate, so the Arrow
+/// `RecordBatch` never crosses the `.so` boundary — only the IPC bytes do.
+#[cfg(feature = "emit-arrow")]
+pub trait EmitBatch {
+    /// Emit a whole Arrow `RecordBatch`. Serialised to Arrow IPC bytes in the
+    /// caller crate; only the bytes cross the `.so` boundary.
+    fn emit_batch(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<(), UdfError>;
+}
+
+#[cfg(feature = "emit-arrow")]
+impl<C: UdfContext + ?Sized> EmitBatch for C {
+    fn emit_batch(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<(), UdfError> {
+        let ipc = record_batch_to_ipc(batch)?;
+        self.emit_record_batch_ipc(&ipc)
+    }
+}
+
+/// Serialise a single `RecordBatch` to an Arrow IPC stream (schema + one batch).
+#[cfg(feature = "emit-arrow")]
+fn record_batch_to_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8>, UdfError> {
+    let mut buf = Vec::new();
+    {
+        let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
+            .map_err(|e| UdfError::Type(format!("emit_batch: IPC writer init: {e}")))?;
+        w.write(batch)
+            .map_err(|e| UdfError::Type(format!("emit_batch: IPC write: {e}")))?;
+        w.finish()
+            .map_err(|e| UdfError::Type(format!("emit_batch: IPC finish: {e}")))?;
+    }
+    Ok(buf)
 }
 
 /// Per-call lifecycle hooks — default implementations return Unimplemented for v1 single-call hooks
@@ -250,5 +293,28 @@ mod tests {
 
         let doc = DummyUdf::default_output_columns();
         assert!(matches!(doc, Err(UdfError::Unimplemented(_))));
+    }
+
+    #[cfg(feature = "emit-arrow")]
+    #[test]
+    fn default_emit_batch_unimplemented() {
+        use super::EmitBatch;
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let array = Arc::new(Int64Array::from(vec![1i64]));
+        let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+
+        // `emit_batch` (the EmitBatch ext-trait) serialises to IPC then calls
+        // the default `emit_record_batch_ipc`, which is unimplemented on a
+        // context that does not override it.
+        let mut ctx = DummyCtx;
+        assert!(matches!(
+            ctx.emit_batch(&batch),
+            Err(UdfError::Unimplemented(_))
+        ));
     }
 }

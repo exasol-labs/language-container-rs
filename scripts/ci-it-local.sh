@@ -88,6 +88,7 @@ cargo build --release \
   -p connect-back-crunch \
   -p resolv-udf \
   -p emit-bulk \
+  -p emit-arrow-batch \
   -p connect-back-stream \
   -p timestamp-add-second \
   -p timestamp-now \
