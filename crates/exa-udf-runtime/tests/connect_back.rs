@@ -2,29 +2,16 @@
 //!
 //! These exercise the `HostContextBridge` connect-back API without a live
 //! database: a mock `ConnRequester` closure replays fake credentials, and a
-//! mock connection implements the trait so `query_arrow` / `execute` plumbing
-//! can be verified deterministically.
+//! mock connection implements the trait so `query_for_each` / `execute`
+//! plumbing can be verified deterministically.
 
 #![cfg(feature = "connect-back")]
 
-use arrow::array::Int64Array;
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
 use exa_udf_runtime::{EmitBuffer, HostContextBridge, InputRowSet};
 use exa_zmq_protocol::{ColumnMeta, ConnInfo, ExaType};
 use exasol_udf_sdk::connect_back::{ConnectionObject, ExaConnection};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn one_int64_batch(value: i64) -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-    RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![value]))]).unwrap()
-}
 
 /// Build a minimal single-column bridge for tests that don't care about rows.
 fn empty_bridge_parts() -> (InputRowSet, EmitBuffer, Vec<ColumnMeta>) {
@@ -60,16 +47,20 @@ fn fake_conn_info() -> ConnInfo {
 // ---------------------------------------------------------------------------
 
 /// A mock connection that counts calls and echoes the call counter as an
-/// Arrow `Int64` scalar, so connection-reuse tests can assert shared state.
+/// `Int64` scalar, so connection-reuse tests can assert shared state.
 #[derive(Default)]
 struct MockConnection {
     calls: usize,
 }
 
 impl ExaConnection for MockConnection {
-    fn query_arrow(&mut self, _sql: &str) -> Result<Vec<RecordBatch>, UdfError> {
+    fn query_for_each(
+        &mut self,
+        _sql: &str,
+        f: &mut dyn FnMut(Vec<exasol_udf_sdk::value::Value>) -> Result<(), UdfError>,
+    ) -> Result<(), UdfError> {
         self.calls += 1;
-        Ok(vec![one_int64_batch(self.calls as i64)])
+        f(vec![exasol_udf_sdk::value::Value::Int64(self.calls as i64)])
     }
 
     fn execute(&mut self, _sql: &str) -> Result<u64, UdfError> {
@@ -142,21 +133,15 @@ fn connect_back_opens_from_connection_object() {
     }
 }
 
-/// A `Box<dyn ExaConnection>` returned from the mock correctly delivers Arrow
-/// record batches through the `ExaConnection` trait.
+/// A `Box<dyn ExaConnection>` returned from the mock correctly delivers rows
+/// through the `ExaConnection` trait via `query_for_each`.
 #[test]
-fn query_arrow_returns_record_batches() {
+fn query_for_each_streams_value_rows() {
     let mut conn: Box<dyn ExaConnection> = Box::new(MockConnection::default());
-    let batches = conn.query_arrow("SELECT 42").unwrap();
-    assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].num_rows(), 1);
-    let col = batches[0]
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    // First call: counter is 1.
-    assert_eq!(col.value(0), 1);
+    let rows = conn.query("SELECT 42").unwrap();
+    assert_eq!(rows.len(), 1);
+    // First call: counter is 1, delivered as Int64.
+    assert_eq!(rows[0], vec![exasol_udf_sdk::value::Value::Int64(1)]);
 }
 
 /// `connect_back` targets the address from the `ConnectionObject`, not the

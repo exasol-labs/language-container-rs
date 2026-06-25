@@ -110,19 +110,16 @@ pub trait UdfContext {
 
     /// Return the IP address of the cluster node that started this language container.
     /// The IP is parsed from the ZMQ endpoint; no network call is made.
-    #[cfg(feature = "connect-back")]
     fn cluster_ip(&self) -> Result<String, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
     /// Fetch raw credentials for a named Exasol CONNECTION object.
-    #[cfg(feature = "connect-back")]
     fn connection(&self, _name: &str) -> Result<crate::connect_back::ConnectionObject, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
     /// Open a live Exasol session using credentials from a `ConnectionObject`.
-    #[cfg(feature = "connect-back")]
     fn connect_back(
         &mut self,
         _conn: &crate::connect_back::ConnectionObject,
@@ -134,7 +131,6 @@ pub trait UdfContext {
     /// deserialises and encodes it. Bytes — not Arrow types — cross the .so
     /// boundary (Arrow is not ABI-stable across the cdylib boundary; see B-002).
     /// Authors call `emit_batch` (the `EmitBatch` ext-trait), not this directly.
-    #[cfg(feature = "emit-arrow")]
     fn emit_record_batch_ipc(&mut self, _ipc: &[u8]) -> Result<(), UdfError> {
         Err(UdfError::Unimplemented("emit_record_batch_ipc".into()))
     }

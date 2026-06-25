@@ -17,13 +17,14 @@ Connect-back opens a connection from inside the UDF sandbox back to Exasol (or a
 * *AND* the host MUST catch any panic from the async fetch or the conversion via `catch_unwind` and MUST return `UdfError::ConnectBack` for a panic or a query failure on any batch rather than unwinding across the FFI boundary
 * *AND* if the caller's `f` returns an error, `query_for_each` MUST stop fetching further batches and return that error, leaving no further rows processed
 
-### Scenario: Connect-back query returns Arrow batches to the UDF
+### Scenario: RuntimeExaConnection streams query results as Value rows
 
-* *GIVEN* a `RuntimeExaConnection` returned by `connect_back`
-* *WHEN* the UDF calls `query_arrow` with a SELECT statement
-* *THEN* the host MUST execute the query on the connect-back runtime and return the result as `Vec<RecordBatch>`
-* *AND* the host's `query` override MUST be expressed in terms of `query_for_each`, collecting the streamed rows into a `Vec<Vec<Value>>`, so the materializing and streaming paths share one conversion implementation and cannot diverge
-* *AND* a query failure MUST be returned as `UdfError::ConnectBack` rather than panicking
+* *GIVEN* a `RuntimeExaConnection` wrapping a live exarrow-rs session
+* *WHEN* a UDF calls `query_for_each(sql, callback)`
+* *THEN* the host MUST execute the query on the dedicated connect-back tokio runtime, obtain the streaming result, and drive it one `RecordBatch` at a time, converting each batch to rows with the single-batch `record_batch_to_rows` helper, invoking the caller's callback once per row with an owned `Vec<Value>`, then dropping the batch and its rows before fetching the next, so peak memory is bounded by one batch
+* *AND* the host MUST NOT implement or expose `query_arrow`; `RecordBatch` MUST NOT cross the `.so` boundary — Arrow is confined to the host, and only `Vec<Value>` rows are handed to the UDF (issue #26)
+* *AND* `query` MUST be served by the trait default (collecting `query_for_each` into `Vec<Vec<Value>>`), so the materialising and streaming paths share one conversion implementation and cannot diverge
+* *AND* the host MUST catch any panic from the async fetch or the conversion and return `UdfError` rather than unwinding across the FFI boundary; if the caller's callback returns an error, `query_for_each` MUST stop fetching further batches and return that error
 
 ### Scenario: Connect-back connects to the named connection address like an external client
 

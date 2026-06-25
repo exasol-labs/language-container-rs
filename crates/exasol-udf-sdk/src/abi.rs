@@ -1,7 +1,7 @@
 use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout changes
-pub const EXA_UDF_ABI_VERSION: u32 = 4;
+pub const EXA_UDF_ABI_VERSION: u32 = 5;
 
 /// The fingerprint string baked in at SDK build time; injected by build.rs.
 /// Format: "SDK_VERSION:RUSTC_HASH\0". The build script supplies the
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn abi_version_and_vtable_layout() {
-        assert_eq!(EXA_UDF_ABI_VERSION, 4);
+        assert_eq!(EXA_UDF_ABI_VERSION, 5);
         assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
         let _ = EXA_SDK_FINGERPRINT;
     }
@@ -182,10 +182,12 @@ mod tests {
         assert_eq!(s, "1", "the context pointer must be threaded to the slot");
     }
 
-    #[cfg(feature = "connect-back")]
     #[test]
-    fn connect_back_feature_compiles() {
-        // Verifies the crate compiles with the connect-back feature enabled.
-        assert_eq!(EXA_UDF_ABI_VERSION, 4);
+    fn connect_back_types_compile_unconditionally() {
+        // ConnectionObject and ExaConnection are always available — no feature gate.
+        // Naming the types here fails to compile if the connect_back module ever
+        // goes back behind a cargo feature (the #31 hazard).
+        let _ = std::mem::size_of::<crate::connect_back::ConnectionObject>();
+        fn _assert_trait_object(_: &dyn crate::connect_back::ExaConnection) {}
     }
 }

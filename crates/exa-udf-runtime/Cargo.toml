@@ -22,7 +22,7 @@ tokio = { workspace = true, optional = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
-connect-back = ["emit-arrow", "exasol-udf-sdk/connect-back", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
+connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 
 [dev-dependencies]
 zmq = { workspace = true }
