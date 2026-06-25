@@ -117,11 +117,17 @@ impl Harness {
             });
         }
 
+        // Pin the DB's internal RAM (default 4 GiB, env-overridable) instead of
+        // letting docker-db auto-size to the host — keeps benchmarks and CI
+        // reproducible. shm holds the UDF sandbox; 2 GiB matches ci-it-local.sh.
+        let db_mem = std::env::var("EXA_DB_MEM_SIZE").unwrap_or_else(|_| "4 GiB".to_string());
         let container = GenericImage::new(DB_IMAGE, &db_tag())
             .with_exposed_port(DB_PORT.tcp())
             .with_exposed_port(BUCKETFS_PORT.tcp())
             .with_wait_for(WaitFor::message_on_stdout("All stages finished."))
             .with_privileged(true)
+            .with_shm_size(2 * 1024 * 1024 * 1024)
+            .with_env_var("EXA_DB_MEM_SIZE", db_mem)
             .with_startup_timeout(Duration::from_secs(600))
             .start()
             .await

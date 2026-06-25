@@ -905,6 +905,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "emit-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "exarrow-rs",
+ "it",
+ "tokio",
+]
+
+[[package]]
+name = "emit-bench-udf"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "emit-bulk"
 version = "0.1.0"
 dependencies = [

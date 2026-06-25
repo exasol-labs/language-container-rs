@@ -1,0 +1,16 @@
+[package]
+name = "emit-bench"
+publish = false
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "emit-bench"
+path = "src/main.rs"
+
+[dependencies]
+it = { path = "../../crates/it", features = ["integration", "db-2026-1"] }
+exarrow-rs = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

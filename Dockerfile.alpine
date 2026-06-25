@@ -14,6 +14,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ ./crates/
 COPY test-udfs/ ./test-udfs/
+COPY benches/ ./benches/
 COPY targets/ ./targets/
 
 # The workspace toolchain pin and the image toolchain are both 1.92; drop the
