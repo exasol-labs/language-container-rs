@@ -1,29 +1,31 @@
 # Feature: connect-back
 
-Defines the connect-back surface of the author-facing SDK — the `ConnectionObject` credential struct, the `ExaConnection` trait, and the three `UdfContext` methods — that UDF crates depend on without linking the host runtime or exarrow-rs. The entire surface is feature-gated behind `connect-back`.
+Defines the connect-back surface of the author-facing SDK — the `ConnectionObject` credential struct, the `ExaConnection` trait, and the `UdfContext` connect-back methods. This delta removes the unsafe `query_arrow` (issue #26) and makes the connect-back types compile unconditionally so the `UdfContext` vtable can be feature-independent (issue #31).
 
 ## Background
 
-The connect-back surface exposes a public `ConnectionObject` credential struct, an `ExaConnection` trait (referencing no exarrow-rs type), and three `UdfContext` methods: `cluster_ip()` returns the originating cluster node IP, `connection(name)` returns the raw credentials of a named database `CONNECTION` object as a `ConnectionObject`, and `connect_back(&ConnectionObject)` opens a live external-client session. A `ConnectionObject` may also describe a foreign (non-Exasol) system the author drives with another driver. Every session returned by `connect_back` is a new external client session and a new transaction, independent of the invoking query. The `ExaConnection` trait now also exposes transaction control methods (`begin`, `commit`, `rollback`) with default implementations that return `UdfError::Unimplemented` so existing mock implementations continue to compile unchanged. The trait additionally exposes `execute_batch` with a default returning `UdfError::Unimplemented` so existing mock implementations continue to compile unchanged.
+The connect-back surface was gated behind a `connect-back` SDK feature, and `ExaConnection` exposed `query_arrow` returning `Vec<arrow::record_batch::RecordBatch>`. That signature is unsafe across the `.so` boundary: a UDF `.so` and the host each link their own static `arrow`, so downcasts on those arrays silently return `None` (mismatched `TypeId`/vtables) — wrong values, no error (issue #26).
+
+Removing `query_arrow` makes `ExaConnection` **arrow-free**, which lets the entire `connect_back` module (and `ConnectionObject`/`ExaConnection`) compile **unconditionally** — no SDK `connect-back` feature. That is the prerequisite for issue #31's fix: with the connect-back types always present, `UdfContext` can declare its `connection`/`connect_back` methods unconditionally, giving a feature-independent trait-object vtable. Arrow remains the host's internal transport (exarrow-rs → batches → `Vec<Value>`); UDFs only ever receive `Vec<Value>`.
 
 ## Scenarios
 
 ### Scenario: ConnectionObject is a public connect-back SDK type
 
-* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
+* *GIVEN* the `exasol-udf-sdk` crate
 * *WHEN* the `connect_back` module is referenced
-* *THEN* it MUST expose a public `ConnectionObject` struct with public `kind`, `address`, `user`, and `password` `String` fields
-* *AND* `ConnectionObject` MUST mirror the four fields of a database `CONNECTION` object so a UDF author can read or construct credentials for either an Exasol or a foreign target
-* *AND* the `ConnectionObject` type MUST NOT reference any transport-layer type (it MUST NOT re-export or alias `exa-zmq-protocol`'s internal `ConnInfo`)
+* *THEN* it MUST expose a public `ConnectionObject` struct with public `kind`, `address`, `user`, and `password` fields, available unconditionally (no feature gate)
+* *AND* the `ConnectionObject` type MUST NOT reference any transport-layer type (it MUST NOT re-export or alias exarrow-rs internals)
 
-### Scenario: ExaConnection trait is defined behind the connect-back feature
+### Scenario: ExaConnection trait is arrow-free and always compiled
 
-* *GIVEN* the `exasol-udf-sdk` crate built with the `connect-back` feature enabled
+* *GIVEN* the `exasol-udf-sdk` crate
 * *WHEN* the `connect_back` module is referenced
-* *THEN* it MUST expose an `ExaConnection` trait with `query_arrow`, `query`, `query_for_each`, `execute`, `begin`, `commit`, `rollback`, and `execute_batch` methods returning `Result<_, UdfError>`, none of which reference any `exarrow-rs` type in their public signature
-* *AND* `query_for_each` MUST take the SQL plus a row callback `F: FnMut(Vec<Value>) -> Result<(), UdfError>` and MUST have a default implementation that delegates to `query_arrow`, converting each batch's rows and invoking the callback, so a connection implementing only `query_arrow` streams without extra code; and `query` MUST have a default that calls `query_for_each` and collects into `Vec<Vec<Value>>`, sharing one code path
-* *AND* `begin`, `commit`, and `rollback` MUST each have a default implementation returning `UdfError::Unimplemented`, so connections that do not manage transactions (e.g. test mocks) continue to compile, and the module MUST NOT expose a `ConnectionKind` type because connection selection is expressed through `ConnectionObject`
-* *AND* `execute_batch` MUST accept `sql: &str` and `rows: &[Vec<Value>]` and MUST have a default implementation returning `UdfError::Unimplemented` so existing mock implementations that do not support batch execution continue to compile unchanged
+* *THEN* the `connect_back` module and the public `ConnectionObject` and `ExaConnection` items MUST compile **unconditionally** (no `#[cfg(feature = "connect-back")]` gate) and the crate MUST NOT define a `connect-back` cargo feature, because the trait no longer references any `arrow` type and so needs no optional dependency
+* *AND* `ExaConnection` MUST expose `query`, `query_for_each`, `execute`, `execute_batch`, `begin`, `commit`, and `rollback`, all returning `Result<_, UdfError>`, none of which reference any `arrow` or `exarrow-rs` type in their public signature
+* *AND* the trait MUST NOT declare `query_arrow` (or any method returning `Vec<RecordBatch>` / `Arc<dyn Array>` across the `.so` boundary), because that `repr(Rust)` Arrow type is not ABI-stable across two independently linked static `arrow` copies (issue #26)
+* *AND* `query_for_each` MUST be a required method taking the SQL plus a row callback `F: FnMut(Vec<Value>) -> Result<(), UdfError>`, and `query` MUST default to calling `query_for_each` and collecting into `Vec<Vec<Value>>`, so both share one code path and neither depends on a boundary-crossing Arrow type
+* *AND* `execute_batch` (accepting `sql: &str`, `rows: &[Vec<Value>]`), `begin`, `commit`, and `rollback` MUST each have a default implementation returning `UdfError::Unimplemented`, so mocks and connections that do not support them continue to compile unchanged
 
 ### Scenario: UdfContext connect-back methods are absent without the feature
 
@@ -79,3 +81,11 @@ The connect-back surface exposes a public `ConnectionObject` credential struct, 
 * *THEN* the call MUST return `Err(UdfError::Unimplemented(_))` from the trait default
 * *AND* the crate MUST compile with zero errors, confirming the default does not require the implementor to supply `execute_batch`
 * *AND* the `execute_batch` signature MUST be `fn execute_batch(&mut self, sql: &str, rows: &[Vec<Value>]) -> Result<u64, UdfError>` with no `exarrow-rs` type in the public signature
+
+### Scenario: query_arrow is removed from the cross-boundary trait surface
+
+* *GIVEN* the `exasol-udf-sdk` crate
+* *WHEN* a UDF or a mock references the `ExaConnection` trait
+* *THEN* the trait MUST NOT expose `query_arrow` (issue #26 footgun) nor any method handing back a `repr(Rust)` Arrow type across the `.so` boundary
+* *AND* tests and mocks that previously implemented `query_arrow` MUST instead implement `query_for_each` (now required) to supply their rows, so the trait stays object-safe and the `Value`-based default (`query`) keeps working
+* *AND* the SDK MUST document that connect-back results are delivered only as `Vec<Value>` rows; Arrow is the host's internal transport and never crosses to UDF code

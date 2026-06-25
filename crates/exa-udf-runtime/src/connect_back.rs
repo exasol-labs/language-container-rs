@@ -10,7 +10,6 @@
 //! thread is a plain OS thread (never itself inside a Tokio context), so
 //! `block_on` cannot trigger the "cannot block within a runtime" panic.
 
-use arrow::record_batch::RecordBatch;
 use exa_zmq_protocol::ConnInfo;
 use exarrow_rs::Parameter;
 use exarrow_rs::adbc::{Connection, Driver};
@@ -61,37 +60,6 @@ impl Drop for RuntimeExaConnection {
 }
 
 impl ExaConnection for RuntimeExaConnection {
-    fn query_arrow(&mut self, sql: &str) -> Result<Vec<RecordBatch>, UdfError> {
-        cb_log(&format!("[cb] query_arrow: '{sql}'"));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            connect_back_rt()
-                .block_on(self.inner.query(sql))
-                .map_err(|e| UdfError::ConnectBack(e.to_string()))
-        }));
-        cb_log("[cb] query_arrow: catch_unwind done");
-        match result {
-            Ok(Ok(batches)) => {
-                cb_log(&format!("[cb] query_arrow: ok, {} batches", batches.len()));
-                Ok(batches)
-            }
-            Ok(Err(e)) => {
-                cb_log(&format!("[cb] query_arrow: error: {e}"));
-                Err(e)
-            }
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
-                cb_log(&format!("[cb] query_arrow panic: {msg}"));
-                Err(UdfError::ConnectBack(format!(
-                    "panic in query_arrow: {msg}"
-                )))
-            }
-        }
-    }
-
     /// Override the default `query_for_each` so result batches are converted
     /// and consumed one at a time, in the runtime's own arrow-link context.
     ///
@@ -126,7 +94,7 @@ impl ExaConnection for RuntimeExaConnection {
                     .fetch_all()
                     .await
                     .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-                Ok::<Vec<RecordBatch>, UdfError>(batches)
+                Ok::<Vec<_>, UdfError>(batches)
             })
         }));
         cb_log("[cb] query_for_each: fetch done");
@@ -264,7 +232,7 @@ impl RuntimeExaConnection {
     /// Drive an async transaction control operation to completion on the shared
     /// connect-back runtime, mapping `QueryError` to [`UdfError::ConnectBack`]
     /// and catching any panic so it cannot cross the UDF FFI boundary — the same
-    /// contract as `query_arrow`/`execute`.
+    /// contract as `query_for_each`/`execute`.
     fn run_txn_op<'a, F, Fut>(&'a mut self, name: &str, op: F) -> Result<(), UdfError>
     where
         F: FnOnce(&'a mut Connection) -> Fut,

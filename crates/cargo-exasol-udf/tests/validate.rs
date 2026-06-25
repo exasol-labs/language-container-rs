@@ -231,8 +231,11 @@ fn validate_accepts_named_entries() {
     let fingerprint = compute_expected_fingerprint();
     // Fingerprint in the vtable is a C string, so append \0.
     let fingerprint_with_nul = format!("{}\0", fingerprint);
-    // abi_version 4 must match what cargo-exasol-udf was compiled against.
-    let src = two_named_entries_fixture_source(4, &fingerprint_with_nul);
+    // abi_version must match what cargo-exasol-udf was compiled against.
+    let src = two_named_entries_fixture_source(
+        exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION,
+        &fingerprint_with_nul,
+    );
     let so = compile_fixture(dir.path(), "two_named_entries", &src);
 
     let output = Command::new(cargo_exasol_udf_bin())
@@ -291,8 +294,12 @@ fn validate_rejects_abi_mismatch() {
 #[test]
 fn validate_rejects_fingerprint_mismatch() {
     let dir = tempdir();
-    // Wrong fingerprint — deliberately does not match the binary's RUNTIME_FINGERPRINT.
-    let src = named_entry_fixture_source(4, "0.0.0:definitely-wrong-fingerprint\0", "MY_UDF");
+    // Correct ABI version but wrong fingerprint — deliberately does not match the binary's RUNTIME_FINGERPRINT.
+    let src = named_entry_fixture_source(
+        exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION,
+        "0.0.0:definitely-wrong-fingerprint\0",
+        "MY_UDF",
+    );
     let so = compile_fixture(dir.path(), "fp_mismatch", &src);
 
     let output = Command::new(cargo_exasol_udf_bin())

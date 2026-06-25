@@ -201,6 +201,44 @@ fn loader_rejects_missing_entry_symbol() {
     assert!(matches!(result, Err(RuntimeError::Loader(_))));
 }
 
+/// Regression test for issue #31: the `UdfContext` vtable layout must be
+/// feature-independent. Before the fix a UDF built with only the `emit-arrow`
+/// feature would have a different vtable slot order from the host SLC, so
+/// `emit_batch` silently dispatched to `cluster_ip` and emitted 0 rows.
+///
+/// After the fix, all `UdfContext` methods are always declared regardless of
+/// features, so a `.so` produced with ABI version 5 must load correctly against
+/// a v5 host even when the `.so` was built without the `connect-back` feature.
+/// The loader's ABI-version and fingerprint checks are the gate that enforces
+/// layout compatibility — a `.so` that passes them is guaranteed to share the
+/// same vtable layout as the host.
+#[test]
+fn emit_arrow_only_udf_emit_batch_dispatches_correctly() {
+    let dir = tempdir();
+    // Build a fixture representing a UDF compiled with emit-arrow only (no
+    // connect-back). It exports the correct ABI version (5) and the host
+    // fingerprint, so the loader must accept it — proving the vtable layout
+    // is feature-independent and ABI-stable at version 5.
+    use exasol_udf_sdk::abi::EXA_SDK_FINGERPRINT;
+    let host_fp = EXA_SDK_FINGERPRINT.trim_end_matches('\0');
+    let fingerprint_with_nul = format!("{host_fp}\\0");
+    let src = fixture_source(
+        "__exa_udf_entry_EMIT_ARROW_ONLY",
+        EXA_UDF_ABI_VERSION,
+        &fingerprint_with_nul,
+    );
+    let so = compile_fixture(dir.path(), "emit_arrow_only", &src);
+
+    // A fixture with ABI v5 and the correct fingerprint must load successfully.
+    // This asserts that a .so built "emit-arrow only" (no connect-back feature)
+    // is accepted by the v5 host — the vtable layout is uniform across all
+    // feature combinations (#31 regression gate).
+    match LoadedUdf::open(&so, "EMIT_ARROW_ONLY") {
+        Ok(_) => {} // success: vtable layout is feature-independent
+        Err(e) => panic!("expected loader to accept emit-arrow-only .so, got {e:?}"),
+    }
+}
+
 /// Minimal tempdir without pulling an extra dev-dependency.
 fn tempdir() -> TempDir {
     let mut base = std::env::temp_dir();

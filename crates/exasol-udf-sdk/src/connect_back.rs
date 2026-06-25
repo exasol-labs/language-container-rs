@@ -1,16 +1,20 @@
 use crate::error::UdfError;
-use crate::value::{Decimal, Value};
+use crate::value::Value;
+
+#[cfg(feature = "emit-arrow")]
+use crate::value::Decimal;
+#[cfg(feature = "emit-arrow")]
 use arrow::array::{
     Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
     LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
     TimestampNanosecondArray, TimestampSecondArray,
 };
+#[cfg(feature = "emit-arrow")]
 use arrow::datatypes::{DataType, TimeUnit};
+#[cfg(feature = "emit-arrow")]
 use arrow::record_batch::RecordBatch;
-use chrono::NaiveDateTime;
 
 /// Credentials for a named Exasol CONNECTION object or any external system.
-#[cfg(feature = "connect-back")]
 #[derive(Debug, Clone)]
 pub struct ConnectionObject {
     pub kind: String,
@@ -24,27 +28,15 @@ pub struct ConnectionObject {
 /// The trait is object-safe so the runtime can hand back a
 /// `Box<dyn ExaConnection>`; the `Send` bound lets that box move across the
 /// call boundaries the runtime manages.
+///
+/// Only `Vec<Value>` row data crosses the `.so` boundary — no Arrow types.
+/// The `query_for_each` method is required; `query` provides a default that
+/// collects all rows by delegating to it.
 pub trait ExaConnection: Send {
-    /// Run a query and collect the result as Arrow record batches.
-    ///
-    /// **FFI hazard:** the returned `RecordBatch`/arrow arrays are produced by
-    /// the runtime's statically-linked `arrow`. A UDF `.so` links its own copy
-    /// of `arrow`, so `Array::as_any().downcast_ref::<…Array>()` in UDF code can
-    /// silently return `None` (the two copies have different `TypeId`s).
-    /// **UDF code must not downcast these arrays** — use [`ExaConnection::query`]
-    /// instead, which converts to the SDK's own [`Value`] enum on the runtime
-    /// side (where the downcast is consistent) and crosses the FFI boundary by
-    /// value. `query_arrow` is safe only within a single binary (e.g. tests).
-    fn query_arrow(&mut self, sql: &str) -> Result<Vec<RecordBatch>, UdfError>;
-
     /// Run a query and invoke `f` for each result row.
     ///
     /// Rows are delivered in batch-then-row order. Iteration stops immediately
     /// if `f` returns an error, and that error is propagated to the caller.
-    ///
-    /// The default delegates to [`ExaConnection::query_arrow`] +
-    /// [`record_batch_to_rows`]. The runtime may override this to avoid
-    /// materialising all batches at once.
     ///
     /// The callback is taken as `&mut dyn FnMut` so the method is object-safe
     /// and usable on `Box<dyn ExaConnection>`.
@@ -52,25 +44,14 @@ pub trait ExaConnection: Send {
         &mut self,
         sql: &str,
         f: &mut dyn FnMut(Vec<Value>) -> Result<(), UdfError>,
-    ) -> Result<(), UdfError> {
-        let batches = self.query_arrow(sql)?;
-        for batch in &batches {
-            for row in record_batch_to_rows(batch)? {
-                f(row)?;
-            }
-        }
-        Ok(())
-    }
+    ) -> Result<(), UdfError>;
 
     /// Run a query and return its rows as the SDK's own [`Value`] type.
     ///
-    /// This is the FFI-safe query API for UDFs: the arrow→`Value` conversion
-    /// runs entirely inside the runtime's arrow, and only plain `Value` data
-    /// (no arrow types, no `TypeId` downcasts) crosses the UDF boundary.
+    /// This is the FFI-safe query API for UDFs: only plain `Value` data
+    /// crosses the `.so` boundary (no arrow types, no `TypeId` downcasts).
     ///
-    /// The runtime overrides this with a conversion compiled in its own arrow
-    /// context; the default delegates to [`ExaConnection::query_for_each`] for
-    /// in-process callers (e.g. mock connections in unit tests).
+    /// The default collects all rows via [`ExaConnection::query_for_each`].
     fn query(&mut self, sql: &str) -> Result<Vec<Vec<Value>>, UdfError> {
         let mut rows = Vec::new();
         self.query_for_each(sql, &mut |row| {
@@ -134,6 +115,7 @@ pub trait ExaConnection: Send {
 /// Type mapping mirrors the input-row convention: Exasol `DECIMAL`/`BIGINT`
 /// (arrow `Decimal128`) becomes a typed [`Value::Numeric`] carrying the unscaled
 /// integer plus scale, matching how NUMERIC input columns are delivered.
+#[cfg(feature = "emit-arrow")]
 pub fn record_batch_to_rows(batch: &RecordBatch) -> Result<Vec<Vec<Value>>, UdfError> {
     let n_rows = batch.num_rows();
     let n_cols = batch.num_columns();
@@ -154,6 +136,7 @@ pub fn record_batch_to_rows(batch: &RecordBatch) -> Result<Vec<Vec<Value>>, UdfE
 /// batches (the runtime), so the per-type `downcast_ref` calls resolve. The
 /// resulting `Vec<Vec<Value>>` is plain owned data and crosses the UDF FFI
 /// boundary safely.
+#[cfg(feature = "emit-arrow")]
 pub fn record_batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<Vec<Value>>, UdfError> {
     let mut rows = Vec::new();
     for batch in batches {
@@ -163,6 +146,7 @@ pub fn record_batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<Vec<Value>>
 }
 
 /// Convert one arrow array cell to a [`Value`].
+#[cfg(feature = "emit-arrow")]
 fn cell_to_value(col: &dyn Array, row: usize) -> Result<Value, UdfError> {
     if col.is_null(row) {
         return Ok(Value::Null);
@@ -247,7 +231,12 @@ fn cell_to_value(col: &dyn Array, row: usize) -> Result<Value, UdfError> {
 /// Arrow timestamps are an `i64` count of `unit`s since the Unix epoch; we
 /// reinterpret them as wall-clock UTC (`naive_utc`) because Exasol's TIMESTAMP
 /// is timezone-naive. An out-of-range epoch value is a corrupt cell.
-fn timestamp_cell(col: &dyn Array, row: usize, unit: TimeUnit) -> Result<NaiveDateTime, UdfError> {
+#[cfg(feature = "emit-arrow")]
+fn timestamp_cell(
+    col: &dyn Array,
+    row: usize,
+    unit: TimeUnit,
+) -> Result<chrono::NaiveDateTime, UdfError> {
     let unexpected = |dt: &DataType| UdfError::ConnectBack(format!("unexpected arrow type {dt:?}"));
     let raw = match unit {
         TimeUnit::Second => col
@@ -279,4 +268,24 @@ fn timestamp_cell(col: &dyn Array, row: usize, unit: TimeUnit) -> Result<NaiveDa
     };
     dt.map(|dt| dt.naive_utc())
         .ok_or_else(|| UdfError::ConnectBack(format!("timestamp out of range: {raw} {unit:?}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_object_fields_public_unconditional() {
+        // ConnectionObject must be constructible and readable without any feature gate.
+        let obj = ConnectionObject {
+            kind: "EXA".into(),
+            address: "192.0.2.1:8563".into(),
+            user: "sys".into(),
+            password: "secret".into(),
+        };
+        assert_eq!(obj.kind, "EXA");
+        assert_eq!(obj.address, "192.0.2.1:8563");
+        assert_eq!(obj.user, "sys");
+        assert_eq!(obj.password, "secret");
+    }
 }

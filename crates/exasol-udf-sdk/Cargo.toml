@@ -14,4 +14,3 @@ arrow = { workspace = true, optional = true }
 
 [features]
 emit-arrow = ["dep:arrow"]
-connect-back = ["emit-arrow"]
