@@ -2,59 +2,60 @@
 
 How the pure-Rust Script Language Container is put together, how data flows through it,
 and the constraints that shape it. For *what* the software must do, see the spec library
-(`specs/`); for the project vision, see [`mission.md`](mission.md).
+(`specs/`); for the project vision, see [`mission.md`](mission.md). Design decisions and
+their rationale are recorded in [`decision-log.md`](decision-log.md).
 
 ## Overview
 
 ```
-                 ┌───────────────────────────────────────────────┐
-                 │                  EXASOL DB                      │
-                 │   (ZMQ ROUTER; drives the whole protocol)       │
-                 └───────────────┬───────────────────────────────┘
-        localzmq+protobuf control channel │   ▲          ▲
-        (ipc:// single-node, tcp:// multi) │   │ MT_*     │ connect-back:
-                                           ▼   │          │ separate TCP login
-                 ┌─────────────────────────────────────┐ │ to :8563 (Arrow/ADBC)
-                 │  exaudfclient (binary)               │ │
-                 │  argv: <ipc_socket> lang=rust        │ │
-                 │  └── drives a session, exit(0)       │ │
-                 └───────────────┬─────────────────────┘ │
-                                 ▼                        │
-       ┌──────────────────────────────────────────────┐  │
-       │  exa-udf-runtime (host)                       │  │
-       │  orchestrates: handshake → load → dispatch    │  │
-       │                                               │  │
-       │   ┌── exa-zmq-protocol ─────────────────────┐ │  │
-       │   │  pure state machine (no I/O):           │ │  │
-       │   │  ExascriptResponse → HostEvent          │ │  │
-       │   │  HostAction → ExascriptRequest          │ │  │
-       │   │   └── exa-proto (prost bindings)        │ │  │
-       │   └─────────────────────────────────────────┘ │  │
-       │                                               │  │
-       │   connect-back: OnceLock<tokio current_thread>│──┘
-       │   Arrow → Value conversion happens HERE (host)│
-       └───────────────┬───────────────────────────────┘
-                       │  the ONE ABI crossing:
-                       │  extern "C" __exa_udf_entry_<NAME>() -> *const ExaUdfVTable
-                       ▼
-       ┌──────────────────────────────────────────────┐
-       │  user libudf.so  (static musl cdylib)         │
-       │   built against exasol-udf-sdk                │
-       │   #[exasol_udf] (from exasol-udf-macros)       │
-       │   → UdfRun / UdfContext (trait objects        │
-       │      live host-side; only Value crosses)      │
-       └──────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│                      EXASOL DB                     │
+│           (ZMQ ROUTER; drives the protocol)        │
+└────────────────────────────────────────────────────┘
+                          │
+        localzmq+protobuf control channel
+        (ipc:// single-node · tcp:// multi-node)
+                          │
+                          ▼
+┌────────────────────────────────────────────────────┐
+│  exaudfclient (binary)                             │
+│  argv: <ipc_socket> lang=rust   →   exit(0)        │
+└────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌────────────────────────────────────────────────────┐
+│  exa-udf-runtime (host)                            │
+│  handshake → load → dispatch loop                  │
+│    · exa-zmq-protocol — pure state machine (no I/O)│
+│        ExascriptResponse ⇄ HostEvent / HostAction  │
+│        └ exa-proto — prost bindings                │
+│    · connect-back: tokio current_thread runtime    │
+│      (Arrow → Value conversion runs host-side)     │
+└────────────────────────────────────────────────────┘
+                          │
+   the ONE ABI crossing — one symbol per UDF:
+   extern "C" __exa_udf_entry_<NAME>() -> *const ExaUdfVTable
+                          │
+                          ▼
+┌────────────────────────────────────────────────────┐
+│  user libudf.so  (static musl cdylib)              │
+│  #[exasol_udf]  →  UdfRun / UdfContext             │
+│  trait objects stay host-side; only Value crosses  │
+└────────────────────────────────────────────────────┘
+
+Connect-back (optional) is a SEPARATE SQL login the host opens over TCP
+to <cluster-ip>:8563 via exarrow-rs, independent of the control channel.
 ```
 
 Crate dependency graph (strict acyclic):
 
 ```
 exaudfclient (binary)
-  └── exa-udf-runtime      (host: orchestrates protocol + loader + dispatch)
-        ├── exa-zmq-protocol   (pure state machine + ZMQ transport, fully unit-testable without I/O)
-        │     └── exa-proto    (prost bindings, no business logic)
-        └── exasol-udf-sdk  (ABI types shared with user .so)
-              └── exasol-udf-macros  (proc macro, re-exported)
+  └── exa-udf-runtime          host: orchestrates protocol + loader + dispatch
+        ├── exa-zmq-protocol   pure state machine + ZMQ transport, unit-testable without I/O
+        │     └── exa-proto    prost bindings, no business logic
+        └── exasol-udf-sdk     ABI types shared with the user .so
+              └── exasol-udf-macros   proc macro, re-exported
 ```
 
 ## Data flow
@@ -70,26 +71,6 @@ exaudfclient (binary)
   credentials via `MT_IMPORT`, then opens a *separate* SQL login over TCP to `:8563`
   using `exarrow-rs`; reads stream one Arrow batch at a time and are converted to
   `Value` rows host-side before crossing back to the UDF.
-
-## Key design decisions
-
-- `exa-zmq-protocol::Protocol` is a pure state machine (no I/O) that converts
-  `ExascriptResponse` → `HostEvent` and `HostAction` → `ExascriptRequest`. The ZMQ socket
-  lives only in the transport wrapper — this makes the protocol fully unit-testable with
-  fixtures.
-- The only ABI crossing is one `extern "C" fn __exa_udf_entry_<NAME>() -> *const ExaUdfVTable`
-  per UDF (`<NAME>` is the UPPER_SNAKE_CASE SQL script name); a single `.so` may export
-  several. Rich trait objects (`UdfRun`, `UdfContext`) never cross the boundary — they stay
-  in the host process; the `sdk_fingerprint` check enforces a matching toolchain at load time.
-- Connect-back uses a dedicated `OnceLock<tokio::runtime::Runtime>` (current_thread) so
-  async Exasol queries can be called from synchronous UDF code without runtime conflicts.
-  The Arrow→`Value` conversion runs on the host side, so only plain `Value` data crosses
-  the `.so` boundary.
-- `arrow` is pinned at the workspace level in `[workspace.dependencies]` to ensure a single
-  copy is shared between `exasol-udf-sdk` and `exarrow-rs`. An Arrow `RecordBatch` cannot
-  safely cross the cdylib boundary (`TypeId` is not stable across dynamic libraries), so the
-  `ExaConnection` trait is Arrow-free and `emit_batch` ships its `RecordBatch` as Arrow IPC
-  bytes that the host re-decodes.
 
 ## Project structure
 
