@@ -4,7 +4,7 @@ Provides the timestamp fixture UDF crates that prove timestamp arithmetic, named
 
 ## Background
 
-Each fixture is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds for the `x86_64-unknown-linux-musl` target. The three crates exercise the `Value::Timestamp` / `Value::TimestampTz` handling end-to-end and are consumed by the `integration/db-roundtrip` suite.
+Each fixture is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds for the `x86_64-unknown-linux-musl` target. The three crates exercise the `Value::Timestamp` / `Value::TimestampTz` handling end-to-end and are consumed by the live-DB integration suite.
 
 ## Scenarios
 
@@ -22,7 +22,7 @@ Each fixture is a standalone cdylib crate depending only on `exasol-udf-sdk` and
 * *WHEN* its `run` reads the current local wall-clock time (resolving the `TZ` env via the zoneinfo database) and emits it as a `Value::Timestamp` whose naive value reflects that local time
 * *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting the named entry point derived from the function identifier
 * *AND* the implementation MUST obtain local time through a mechanism (`chrono::Local` or `time` with a tz feature) that consults the IANA zoneinfo database for a named `TZ`, so the emitted wall-clock value is correct when `tzdata` is present and would be UTC when it is absent
-* *AND* the timezone resolution MUST be proven by the `integration/db-roundtrip` end-to-end scenario, not by a unit test, because zoneinfo resolution on a static-musl binary cannot be exercised in a host unit test
+* *AND* the timezone resolution MUST be proven by the live-DB integration end-to-end scenario, not by a unit test, because zoneinfo resolution on a static-musl binary cannot be exercised in a host unit test
 
 ### Scenario: timestamp-passthrough reads and re-emits a TIMESTAMP unchanged
 

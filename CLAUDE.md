@@ -4,11 +4,24 @@
 
 Project mission in: @specs/mission.md
 
+## Specs & issues
+
+- The spec library (`specs/`) holds the **business requirements** of the software — *what* it does, not *how* it's built, tested, or released. Build/CI/release/test-harness mechanics live in this file, not in specs.
+- Gaps and missing features are tracked as **GitHub issues** (`feature` label), not a backlog file.
+
+## Build & release
+
+- Pure Cargo workspace (no Bazel); shared deps centralized in `[workspace.dependencies]`.
+- `arrow` must stay pinned to the version `exarrow-rs` uses — one shared copy across the `.so` boundary.
+- Bump `[workspace.package].version` on every change (SemVer); the pinned `exasol-udf-sdk` entry in `[workspace.dependencies]` must track it, and commit the regenerated `Cargo.lock` in the same PR.
+- A pushed `vX.Y.Z` git tag (matching `Cargo.toml`) triggers the crates.io release; CI publishes in dependency order `exasol-udf-sdk` → `exasol-udf-macros` → `cargo-exasol-udf`, skipping versions already on the index (re-runs are idempotent). The publish is the only irreversible step — review + green CI before tagging.
+
 ## Exasol / tooling
 
 - Use Exasol Docker images to run Integration Tests and E2E tests
 - Use `exapump` for all Exasol interaction.
 - DSNs must include `validateservercertificate=0` (self-signed Docker cert).
+- Integration tests: `cargo test -p it --features integration`; they **fail** (not skip) if the Docker DB is unavailable. CI runs the version matrix `2025.1.11 / 2025.2.1 / 2026.1.0`.
 
 ## CI (Ubuntu 24.04 runners)
 

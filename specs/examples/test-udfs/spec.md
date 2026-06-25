@@ -4,7 +4,7 @@ Provides the canonical example UDF crates that demonstrate each SDK capability a
 
 ## Background
 
-Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), connect-back (query and DML), multi-entry-point crates, and Arrow batch emit. Timestamp fixtures are in `examples/test-udfs-timestamps`. The `emit-arrow-batch` fixture crate exercises the `emit-arrow` feature of `exasol-udf-sdk` in isolation (without `connect-back`), serving as the integration fixture for the `integration/db-roundtrip` suite's Arrow batch-emit path.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), connect-back (query and DML), multi-entry-point crates, and Arrow batch emit. Timestamp fixtures are in `examples/test-udfs-timestamps`. The `emit-arrow-batch` fixture crate exercises the `emit-arrow` feature of `exasol-udf-sdk` in isolation (without `connect-back`), serving as the fixture for the live-DB integration suite's Arrow batch-emit path.
 
 ## Scenarios
 
