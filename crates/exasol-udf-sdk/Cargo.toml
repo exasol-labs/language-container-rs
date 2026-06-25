@@ -13,4 +13,5 @@ chrono = { workspace = true }
 arrow = { workspace = true, optional = true }
 
 [features]
-connect-back = ["dep:arrow"]
+emit-arrow = ["dep:arrow"]
+connect-back = ["emit-arrow"]

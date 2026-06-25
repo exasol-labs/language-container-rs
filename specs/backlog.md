@@ -45,3 +45,29 @@ the SQL statement that failed. The runtime has the statement in hand
 `db_roundtrip_all_scenarios` is verified locally on `2026.1.0`. CI runs the
 `2025.1.11` / `2025.2.1` / `2026.1.0` matrix; a local sweep across all three
 (via `EXASOL_VERSION` / `EXASOL_DB_SERIES`) would catch version drift earlier.
+
+---
+
+## Performance
+
+### B-005: Raw per-column buffers for `emit_batch` instead of Arrow IPC
+
+**Raised by:** `add-emit-batch-arrow` (2026-06-24)
+**Severity:** low
+
+`emit_batch` serialises the UDF's `RecordBatch` to Arrow IPC bytes inside the
+`.so` and the host deserialises into its own `RecordBatch` before `push_batch`
+encodes it — because an Arrow `RecordBatch` cannot cross the cdylib boundary
+safely (same root cause as [B-002]; crossing it SIGSEGVs/yields garbage as two
+static `arrow` copies disagree on `Arc<dyn Array>` vtables and `TypeId`). IPC
+costs two bulk columnar copies (serialise + deserialise) but eliminates the
+per-cell downcast / per-`Value` alloc / per-row boundary crossing of row-based
+`emit`, so it already beats the row path.
+
+A faster-still variant skips the FlatBuffer framing **and** the host-side Arrow
+rebuild: the UDF passes raw per-column buffers (value buffer + validity bitmap +
+offsets for variable-width, with a small type tag) as `&[u8]` slices, and the
+host reads those bytes straight into the proto type blocks — one fewer copy and
+no `arrow-ipc` dependency on the hot path. Cost: we hand-roll and own a columnar
+wire format per supported type instead of leaning on `arrow-ipc`. Only worth it
+if profiling shows the IPC serialise/deserialise dominates for real batch sizes.

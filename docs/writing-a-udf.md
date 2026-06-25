@@ -255,7 +255,65 @@ SELECT my_schema.set_sum(v) EMITS (result BIGINT) FROM my_table;
 
 **Cluster distribution** — Exasol executes SET UDFs on every node in parallel. Grouping by [`IPROC()`](https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/iproc.htm) pins each group to the node that owns the data, saturating the full cluster with a single query.
 
-## 8. Connect-back
+## 8. Emitting Arrow batches
+
+If your UDF data is already in an Arrow `RecordBatch`, you can emit it directly without converting each row to `Value`. The runtime encodes the batch column-by-column according to the declared `EMITS` schema and applies the same 4 MB flush semantics as row-based `emit`.
+
+### Enable the feature
+
+```toml
+[dependencies]
+exasol-udf-sdk = { version = "0.11", features = ["emit-arrow"] }
+arrow = "58"
+```
+
+The `connect-back` feature implies `emit-arrow`, so you do not need to list it separately if you already enable `connect-back`.
+
+### The method
+
+```rust
+fn emit_batch(&mut self, batch: &RecordBatch) -> Result<(), UdfError>;
+```
+
+The declared `EMITS` schema — not the Arrow schema — dictates each column's Exasol type. If a column's Arrow type cannot be converted to the declared Exasol type, `emit_batch` returns `UdfError::Type`.
+
+### Example
+
+```rust
+use std::sync::Arc;
+
+use arrow::array::{Int64Array, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use exasol_udf_macros::exasol_udf;
+use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
+
+#[exasol_udf]
+pub fn emit_from_arrow(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    while ctx.next()? {}  // drain input rows (SET UDF)
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("label", DataType::Utf8, false),
+    ]));
+    let ids    = Arc::new(Int64Array::from(vec![1i64, 2, 3]));
+    let labels = Arc::new(StringArray::from(vec!["a", "b", "c"]));
+    let batch  = RecordBatch::try_new(schema, vec![ids, labels])
+        .map_err(|e| UdfError::User(e.to_string()))?;
+
+    ctx.emit_batch(&batch)
+}
+```
+
+```sql
+CREATE OR REPLACE RUST SET SCRIPT my_schema.emit_from_arrow(dummy BOOLEAN)
+EMITS (id BIGINT, label VARCHAR(1)) AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+```
+
+## 9. Connect-back
 
 Connect-back lets a UDF open a regular Exasol connection from inside `run()` and execute SQL. The connect-back session is an ordinary independent SQL login — Exasol treats it exactly like a connection from PyExasol, JDBC, or any other external client. It has its own session and its own transaction; it cannot access the invoking query's transaction.
 
@@ -416,7 +474,7 @@ pub fn node_ip(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
 Use the returned IP when constructing the `CONNECTION` object, or store it in a table as part of cluster administration.
 
-## 9. Build and deploy
+## 10. Build and deploy
 
 ```bash
 # Cross-compile to a musl .so (release profile, stripped)
@@ -437,7 +495,7 @@ RETURNS BIGINT AS
 
 `cargo exasol-udf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
 
-## 10. Unit testing
+## 11. Unit testing
 
 `UdfContext` is a trait. Implement a stub to test UDF logic without a live cluster:
 

@@ -4,7 +4,7 @@ Provides the canonical example UDF crates that demonstrate each SDK capability a
 
 ## Background
 
-Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), connect-back (query and DML), and multi-entry-point crates. Timestamp fixtures are in `examples/test-udfs-timestamps`.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), connect-back (query and DML), multi-entry-point crates, and Arrow batch emit. Timestamp fixtures are in `examples/test-udfs-timestamps`. The `emit-arrow-batch` fixture crate exercises the `emit-arrow` feature of `exasol-udf-sdk` in isolation (without `connect-back`), serving as the integration fixture for the `integration/db-roundtrip` suite's Arrow batch-emit path.
 
 ## Scenarios
 
@@ -66,3 +66,11 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 * *THEN* the single artifact MUST export both `__exa_udf_entry_ANNOTATED` and `__exa_udf_entry_ANNOTATED_DOUBLE`
 * *AND* each entry point MUST return its own `*const ExaUdfVTable` with the matching annotated schema
 * *AND* the build MUST succeed without a duplicate-symbol link error
+
+### Scenario: emit-arrow-batch emits a manually built Arrow RecordBatch
+
+* *GIVEN* the `emit-arrow-batch` crate built against `exasol-udf-sdk` with the `emit-arrow` feature, with a `#[exasol_udf]` SET entry point implementing `UdfRun`
+* *WHEN* its `run` drains the input rows, builds an `arrow` `RecordBatch` whose columns match the EMITS output schema (e.g. an `Int64` column and a `Utf8` column), and calls `ctx.emit_batch(&batch)` once
+* *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting the named entry point derived from the function identifier
+* *AND* the crate MUST enable only the `emit-arrow` feature on `exasol-udf-sdk` (NOT `connect-back`), proving Arrow batch emit works as a standalone capability
+* *AND* every row of the emitted `RecordBatch` MUST reach the output unchanged, in batch order, so the batch-emit path is observably equivalent to emitting the same rows via row-based `emit`

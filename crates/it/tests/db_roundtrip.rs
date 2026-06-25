@@ -25,6 +25,7 @@ const CB_INSERT_LIB: &str = "libconnect_back_insert.so";
 const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 const RESOLV_LIB: &str = "libresolv_udf.so";
 const EMIT_BULK_LIB: &str = "libemit_bulk.so";
+const EMIT_ARROW_LIB: &str = "libemit_arrow_batch.so";
 const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
 const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
 const TS_NOW_LIB: &str = "libtimestamp_now.so";
@@ -116,6 +117,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let emit_bulk_path = harness
         .upload_udf(EMIT_BULK_LIB, read_udf_artifact(EMIT_BULK_LIB)?)
         .await?;
+    let emit_arrow_path = harness
+        .upload_udf(EMIT_ARROW_LIB, read_udf_artifact(EMIT_ARROW_LIB)?)
+        .await?;
     let cb_stream_path = harness
         .upload_udf(CB_STREAM_LIB, read_udf_artifact(CB_STREAM_LIB)?)
         .await?;
@@ -150,6 +154,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
 
     emit_bulk_flushes_multiple_batches(&mut conn, &emit_bulk_path).await?;
     eprintln!("[it] scenario emit_bulk ok");
+
+    emit_arrow_batch_roundtrips(&mut conn, &emit_arrow_path).await?;
+    eprintln!("[it] scenario emit_arrow_batch ok");
 
     // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
@@ -741,6 +748,40 @@ async fn emit_bulk_flushes_multiple_batches(conn: &mut Connection, lib_path: &st
     let count: i64 = result.parse().map_err(|e| anyhow!("parse count: {e}"))?;
     if count != N {
         bail!("emit_bulk: expected {N} rows, got {count}");
+    }
+    Ok(())
+}
+
+/// Scenario: `emit_arrow_batch` — SET UDF that builds a 3-row Arrow RecordBatch
+/// and calls `ctx.emit_batch(&batch)` once. Asserts count == 3 and that the
+/// exact (id, label) pairs (1:a, 2:b, 3:c) arrive in order.
+async fn emit_arrow_batch_roundtrips(conn: &mut Connection, lib_path: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.emit_arrow_batch(dummy BOOLEAN) \
+         EMITS (id BIGINT, label VARCHAR(1)) AS\n\
+         %udf_object {lib_path};\n/"
+    ))
+    .await?;
+
+    let count = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT emit_arrow_batch(TRUE) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_arrow_batch count query returned NULL"))?;
+    if count != "3" {
+        bail!("emit_arrow_batch: expected 3 rows, got {count}");
+    }
+
+    let aggregated = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(TO_CHAR(id) || ':' || label ORDER BY id) \
+         FROM (SELECT emit_arrow_batch(TRUE) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_arrow_batch aggregation query returned NULL"))?;
+    if aggregated != "1:a,2:b,3:c" {
+        bail!("emit_arrow_batch: expected '1:a,2:b,3:c', got {aggregated:?}");
     }
     Ok(())
 }

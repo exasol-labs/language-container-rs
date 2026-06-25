@@ -281,6 +281,570 @@ impl EmitBuffer {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
+    /// Encode an Arrow `RecordBatch` into the emit stream, flushing ≤4 MB
+    /// slices directly to `flush` and materialising only the trailing <4 MB
+    /// tail into `self`.
+    ///
+    /// Algorithm (decision-log [6],[7]):
+    /// 1. Flush any pending Value rows first so the batch starts from an empty
+    ///    buffer.
+    /// 2. Validate each Arrow column's `DataType` against the declared
+    ///    `ExaType`; reject mismatches with `Err`.
+    /// 3. Compute a cheap per-row byte cost (no per-cell work: fixed widths for
+    ///    fixed-size types, offset-buffer prefix-sum for variable-width) and
+    ///    split at `EMIT_BUFFER_LIMIT_BYTES` row boundaries.
+    /// 4. For each full ≤4 MB slice: take a zero-copy `RecordBatch::slice`,
+    ///    encode it column-at-a-time (one downcast + one null-buffer read per
+    ///    column) preserving the row-major-interleaved dense layout `to_proto`
+    ///    produces, and call `flush`.
+    /// 5. Materialise the trailing <4 MB remainder into `self` via `push()`.
+    #[cfg(feature = "emit-arrow")]
+    pub fn push_batch(
+        &mut self,
+        batch: &arrow::record_batch::RecordBatch,
+        meta: &[ColumnMeta],
+        flush: &mut dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError>,
+    ) -> Result<(), UdfError> {
+        // Step 1: flush any pending Value rows so we start from an empty buffer.
+        if !self.is_empty() {
+            let table = self.to_proto(meta);
+            flush(table)?;
+            self.clear();
+        }
+
+        let n_rows = batch.num_rows();
+
+        if n_rows == 0 {
+            return Ok(());
+        }
+
+        // Step 2: validate and downcast all columns exactly once, fail fast
+        // before computing costs or touching any row data.
+        build_accessors(batch, meta)?;
+
+        // Step 3: compute cumulative per-row byte costs using the Arrow offset
+        // buffers for variable-width types (no per-cell work for bulk).
+        let row_costs = compute_row_costs(batch, meta);
+
+        // Step 4: split into ≤4 MB slices and flush each directly.
+        let mut running: usize = 0;
+        let mut slice_start: usize = 0;
+
+        for (r, &row_cost) in row_costs.iter().enumerate() {
+            running += row_cost;
+            if running >= EMIT_BUFFER_LIMIT_BYTES {
+                // Flush [slice_start, r+1).
+                let slice_len = r + 1 - slice_start;
+                let slice = batch.slice(slice_start, slice_len);
+                let table = encode_slice(&slice, meta)?;
+                flush(table)?;
+                slice_start = r + 1;
+                running = 0;
+            }
+        }
+
+        // Step 5: materialise the trailing <4 MB tail into self.
+        if slice_start < n_rows {
+            let tail_len = n_rows - slice_start;
+            let tail = batch.slice(slice_start, tail_len);
+            // Convert the tail to Value rows and push into the buffer.
+            let tail_rows = arrow_batch_to_value_rows(&tail, meta)?;
+            for row in tail_rows {
+                self.push(row);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// A typed accessor for one Arrow column that has been downcast exactly once.
+///
+/// Built by `build_accessors` before any row-level encoding begins. The inner
+/// reference borrows from the `RecordBatch` that owns the column buffers, so
+/// all accessor lifetimes are tied to the batch's lifetime.
+///
+/// The variant chosen records both the Arrow type (which determines how to
+/// extract a cell value) and — for the widening cases — the declared
+/// `ExaType` target (which determines which proto block the value lands in).
+/// The `ExaType` authority is the declared `ColumnMeta`; the Arrow type is
+/// used only for extraction.
+#[cfg(feature = "emit-arrow")]
+enum ColAccessor<'a> {
+    Int32(&'a arrow::array::Int32Array),
+    Int64(&'a arrow::array::Int64Array),
+    Float64(&'a arrow::array::Float64Array),
+    Boolean(&'a arrow::array::BooleanArray),
+    Utf8(&'a arrow::array::StringArray),
+    LargeUtf8(&'a arrow::array::LargeStringArray),
+    Date32(&'a arrow::array::Date32Array),
+    TsSecond(&'a arrow::array::TimestampSecondArray),
+    TsMillisecond(&'a arrow::array::TimestampMillisecondArray),
+    TsMicrosecond(&'a arrow::array::TimestampMicrosecondArray),
+    TsNanosecond(&'a arrow::array::TimestampNanosecondArray),
+    Decimal128(&'a arrow::array::Decimal128Array, i8),
+    /// Int32/Int64/Float64 Arrow column declared as `ExaType::Numeric` (BIGINT
+    /// widening): extract value as the natural type; `encode_slice` stringifies
+    /// it into the string block via `value_to_block_string`.
+    NumericFromInt32(&'a arrow::array::Int32Array),
+    NumericFromInt64(&'a arrow::array::Int64Array),
+    NumericFromFloat64(&'a arrow::array::Float64Array),
+    Unsupported,
+}
+
+/// Downcast each column of `batch` to its concrete Arrow array type exactly
+/// once, validate the (Arrow type, declared ExaType) combination, and return
+/// a per-column `ColAccessor` vec.
+///
+/// Validation and downcast are merged into one pass so the row-level encoding
+/// loop has no validation branches and no `unreachable!` arms.
+#[cfg(feature = "emit-arrow")]
+fn build_accessors<'a>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    meta: &[ColumnMeta],
+) -> Result<Vec<ColAccessor<'a>>, UdfError> {
+    use arrow::array::{
+        Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
+        LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
+    };
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    if batch.num_columns() != meta.len() {
+        return Err(UdfError::Type(format!(
+            "emit_batch: batch has {} columns but EMITS declared {} columns",
+            batch.num_columns(),
+            meta.len()
+        )));
+    }
+
+    let mut accessors = Vec::with_capacity(meta.len());
+
+    for (c, col_meta) in meta.iter().enumerate() {
+        let col = batch.column(c);
+        let dt = col.data_type();
+        let typ = &col_meta.typ;
+
+        let acc = match (dt, typ) {
+            (DataType::Int32, ExaType::Int32) => {
+                ColAccessor::Int32(col.as_any().downcast_ref::<Int32Array>().unwrap())
+            }
+            (DataType::Int64, ExaType::Int64) => {
+                ColAccessor::Int64(col.as_any().downcast_ref::<Int64Array>().unwrap())
+            }
+            (DataType::Float64, ExaType::Double) => {
+                ColAccessor::Float64(col.as_any().downcast_ref::<Float64Array>().unwrap())
+            }
+            (DataType::Boolean, ExaType::Boolean) => {
+                ColAccessor::Boolean(col.as_any().downcast_ref::<BooleanArray>().unwrap())
+            }
+            (DataType::Utf8, typ) if is_string_family_exatype(typ) => {
+                ColAccessor::Utf8(col.as_any().downcast_ref::<StringArray>().unwrap())
+            }
+            (DataType::LargeUtf8, typ) if is_string_family_exatype(typ) => {
+                ColAccessor::LargeUtf8(col.as_any().downcast_ref::<LargeStringArray>().unwrap())
+            }
+            (DataType::Date32, ExaType::Date) => {
+                ColAccessor::Date32(col.as_any().downcast_ref::<Date32Array>().unwrap())
+            }
+            (DataType::Timestamp(unit, _), ExaType::Timestamp | ExaType::TimestampTz) => match unit
+            {
+                TimeUnit::Second => ColAccessor::TsSecond(
+                    col.as_any().downcast_ref::<TimestampSecondArray>().unwrap(),
+                ),
+                TimeUnit::Millisecond => ColAccessor::TsMillisecond(
+                    col.as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap(),
+                ),
+                TimeUnit::Microsecond => ColAccessor::TsMicrosecond(
+                    col.as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap(),
+                ),
+                TimeUnit::Nanosecond => ColAccessor::TsNanosecond(
+                    col.as_any()
+                        .downcast_ref::<TimestampNanosecondArray>()
+                        .unwrap(),
+                ),
+            },
+            (DataType::Decimal128(_, scale), ExaType::Numeric { .. }) => ColAccessor::Decimal128(
+                col.as_any().downcast_ref::<Decimal128Array>().unwrap(),
+                *scale,
+            ),
+            (DataType::Int32, ExaType::Numeric { .. }) => {
+                ColAccessor::NumericFromInt32(col.as_any().downcast_ref::<Int32Array>().unwrap())
+            }
+            (DataType::Int64, ExaType::Numeric { .. }) => {
+                ColAccessor::NumericFromInt64(col.as_any().downcast_ref::<Int64Array>().unwrap())
+            }
+            (DataType::Float64, ExaType::Numeric { .. }) => ColAccessor::NumericFromFloat64(
+                col.as_any().downcast_ref::<Float64Array>().unwrap(),
+            ),
+            (_, ExaType::Unsupported) => ColAccessor::Unsupported,
+            _ => {
+                return Err(UdfError::Type(format!(
+                    "emit_batch: Arrow column {c} of type {dt:?} cannot feed declared ExaType {typ:?}"
+                )));
+            }
+        };
+        accessors.push(acc);
+    }
+
+    Ok(accessors)
+}
+
+/// Returns true for any `ExaType` that maps to the string proto block.
+#[cfg(feature = "emit-arrow")]
+fn is_string_family_exatype(typ: &ExaType) -> bool {
+    matches!(
+        typ,
+        ExaType::Numeric { .. }
+            | ExaType::Date
+            | ExaType::Timestamp
+            | ExaType::TimestampTz
+            | ExaType::String { .. }
+            | ExaType::Char { .. }
+            | ExaType::Geometry
+            | ExaType::HashType
+            | ExaType::IntervalYearToMonth
+            | ExaType::IntervalDayToSecond
+    )
+}
+
+/// Compute a per-row byte cost vector for the batch using Arrow's columnar
+/// layout for efficiency (no per-cell work for fixed-width types; offset-buffer
+/// prefix-sum for variable-width; same fixed estimates as `value_byte_cost`).
+#[cfg(feature = "emit-arrow")]
+fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMeta]) -> Vec<usize> {
+    use arrow::array::{Array, LargeStringArray, StringArray};
+    use arrow::datatypes::DataType;
+
+    let n_rows = batch.num_rows();
+    let mut costs = vec![0usize; n_rows];
+
+    for (c, _col_meta) in meta.iter().enumerate() {
+        let col = batch.column(c);
+        let dt = col.data_type();
+        let null_buf = col.nulls();
+
+        // For each row r: add the per-cell byte cost to costs[r].
+        // NULL cells cost 0 (no type-block slot, matching value_byte_cost).
+        // Iterate via enumerate so we don't trigger needless_range_loop.
+        match dt {
+            DataType::Int32 => {
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 4;
+                    }
+                }
+            }
+            DataType::Int64 => {
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 8;
+                    }
+                }
+            }
+            DataType::Float64 => {
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 8;
+                    }
+                }
+            }
+            DataType::Boolean => {
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 1;
+                    }
+                }
+            }
+            DataType::Date32 => {
+                // DATE renders to "YYYY-MM-DD" (10 chars)
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 10;
+                    }
+                }
+            }
+            DataType::Timestamp(_, _) => {
+                // TIMESTAMP renders to "YYYY-MM-DD HH:MM:SS.nnnnnnnnn" (29 chars)
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += 29;
+                    }
+                }
+            }
+            DataType::Decimal128(_, scale) => {
+                // Numeric: 40 + scale chars (matches value_byte_cost)
+                let fixed_cost = 40 + (*scale as usize);
+                for (r, cost) in costs.iter_mut().enumerate() {
+                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                        *cost += fixed_cost;
+                    }
+                }
+            }
+            DataType::Utf8 => {
+                // Variable width: use the string value's byte length.
+                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                    for (r, cost) in costs.iter_mut().enumerate() {
+                        if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                            *cost += arr.value(r).len();
+                        }
+                    }
+                }
+            }
+            DataType::LargeUtf8 => {
+                if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
+                    for (r, cost) in costs.iter_mut().enumerate() {
+                        if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
+                            *cost += arr.value(r).len();
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Unsupported: cost 0 (type validation ran before this call).
+            }
+        }
+    }
+
+    costs
+}
+
+/// Encode a (possibly sliced) `RecordBatch` into one `ExascriptTableData`,
+/// preserving the dense row-major-interleaved layout `to_proto` produces.
+///
+/// Each Arrow column array is downcast to its concrete type exactly once via
+/// `build_accessors`; its validity (null) buffer is read once in bulk per
+/// column. The row-major loop then reads `accessor.value(r)` with no further
+/// downcast per cell. A NULL cell occupies no type-block slot — only the
+/// row-major bitmap is updated — so the encoding stays byte-identical to
+/// `to_proto` for arbitrary EMITS schemas including multiple columns sharing
+/// one block type and any null pattern.
+#[cfg(feature = "emit-arrow")]
+fn encode_slice(
+    batch: &arrow::record_batch::RecordBatch,
+    meta: &[ColumnMeta],
+) -> Result<exa_proto::ExascriptTableData, UdfError> {
+    use arrow::array::Array;
+
+    let accessors = build_accessors(batch, meta)?;
+    let n_rows = batch.num_rows();
+    let n_cols = meta.len();
+
+    let mut data_string: Vec<String> = Vec::new();
+    let mut data_bool: Vec<bool> = Vec::new();
+    let mut data_int32: Vec<i32> = Vec::new();
+    let mut data_int64: Vec<i64> = Vec::new();
+    let mut data_double: Vec<f64> = Vec::new();
+    let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
+
+    // Pre-capture per-column null buffers once (bulk null read, not per cell).
+    let null_bufs: Vec<_> = (0..n_cols)
+        .map(|c| batch.column(c).nulls().cloned())
+        .collect();
+
+    // Row-major encoding: for r in 0..n_rows, for c in 0..n_cols.
+    // Matches `to_proto`'s loop order so same-ExaType columns interleave
+    // identically and `from_proto` reads back the correct values.
+    for r in 0..n_rows {
+        for (c, acc) in accessors.iter().enumerate() {
+            let is_null = null_bufs[c].as_ref().is_some_and(|nb| nb.is_null(r));
+            if is_null {
+                data_nulls[null_index(r, c, n_cols)] = true;
+                continue;
+            }
+
+            match acc {
+                ColAccessor::Int32(arr) => data_int32.push(arr.value(r)),
+                ColAccessor::Int64(arr) => data_int64.push(arr.value(r)),
+                ColAccessor::Float64(arr) => data_double.push(arr.value(r)),
+                ColAccessor::Boolean(arr) => data_bool.push(arr.value(r)),
+                ColAccessor::Utf8(arr) => data_string.push(arr.value(r).to_string()),
+                ColAccessor::LargeUtf8(arr) => data_string.push(arr.value(r).to_string()),
+                ColAccessor::Date32(arr) => {
+                    let days = arr.value(r);
+                    let date = chrono::NaiveDate::from_num_days_from_ce_opt(
+                        days + 719163, // Arrow epoch: 1970-01-01 = day 719163 in CE days
+                    )
+                    .unwrap_or_default();
+                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Date(
+                        date,
+                    )));
+                }
+                ColAccessor::TsSecond(arr) => {
+                    let ts = chrono::DateTime::from_timestamp(arr.value(r), 0)
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default();
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Timestamp(ts),
+                    ));
+                }
+                ColAccessor::TsMillisecond(arr) => {
+                    let ts = chrono::DateTime::from_timestamp_millis(arr.value(r))
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default();
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Timestamp(ts),
+                    ));
+                }
+                ColAccessor::TsMicrosecond(arr) => {
+                    let ts = chrono::DateTime::from_timestamp_micros(arr.value(r))
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default();
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Timestamp(ts),
+                    ));
+                }
+                ColAccessor::TsNanosecond(arr) => {
+                    let ns = arr.value(r);
+                    let ts = chrono::DateTime::from_timestamp(
+                        ns / 1_000_000_000,
+                        (ns % 1_000_000_000) as u32,
+                    )
+                    .map(|dt| dt.naive_utc())
+                    .unwrap_or_default();
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Timestamp(ts),
+                    ));
+                }
+                ColAccessor::Decimal128(arr, scale) => {
+                    let d = exasol_udf_sdk::value::Decimal {
+                        unscaled: arr.value(r),
+                        scale: *scale as u8,
+                    };
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Numeric(d),
+                    ));
+                }
+                ColAccessor::NumericFromInt32(arr) => {
+                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Int32(
+                        arr.value(r),
+                    )));
+                }
+                ColAccessor::NumericFromInt64(arr) => {
+                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Int64(
+                        arr.value(r),
+                    )));
+                }
+                ColAccessor::NumericFromFloat64(arr) => {
+                    data_string.push(value_to_block_string(
+                        &exasol_udf_sdk::value::Value::Double(arr.value(r)),
+                    ));
+                }
+                ColAccessor::Unsupported => {}
+            }
+        }
+    }
+
+    Ok(exa_proto::ExascriptTableData {
+        rows: n_rows as u64,
+        rows_in_group: 0,
+        data_string,
+        data_nulls,
+        data_bool,
+        data_int32,
+        data_int64,
+        data_double,
+        row_number: vec![],
+    })
+}
+
+/// Convert a (possibly sliced) RecordBatch into a `Vec<Vec<Value>>` for tail
+/// materialisation into the shared `EmitBuffer`.
+///
+/// Uses the same `build_accessors` downcast-once path as `encode_slice` so
+/// both functions share a single downcast site. The resulting `Value` payload
+/// for each cell matches what the row path's `push` + `to_proto` would produce
+/// (same `value_to_block_string` rendering for string-block types), so
+/// subsequent `emit` calls and the end-of-`run` tail flush are coherent.
+#[cfg(feature = "emit-arrow")]
+fn arrow_batch_to_value_rows(
+    batch: &arrow::record_batch::RecordBatch,
+    meta: &[ColumnMeta],
+) -> Result<Vec<Vec<exasol_udf_sdk::value::Value>>, UdfError> {
+    use arrow::array::Array;
+    use exasol_udf_sdk::value::Value;
+
+    let accessors = build_accessors(batch, meta)?;
+    let n_rows = batch.num_rows();
+    let n_cols = meta.len();
+
+    let null_bufs: Vec<_> = (0..n_cols)
+        .map(|c| batch.column(c).nulls().cloned())
+        .collect();
+
+    let mut result = Vec::with_capacity(n_rows);
+
+    for r in 0..n_rows {
+        let mut row = Vec::with_capacity(n_cols);
+        for (c, acc) in accessors.iter().enumerate() {
+            let is_null = null_bufs[c].as_ref().is_some_and(|nb| nb.is_null(r));
+            if is_null {
+                row.push(Value::Null);
+                continue;
+            }
+
+            let v = match acc {
+                ColAccessor::Int32(arr) => Value::Int32(arr.value(r)),
+                ColAccessor::Int64(arr) => Value::Int64(arr.value(r)),
+                ColAccessor::Float64(arr) => Value::Double(arr.value(r)),
+                ColAccessor::Boolean(arr) => Value::Bool(arr.value(r)),
+                ColAccessor::Utf8(arr) => Value::String(arr.value(r).to_string()),
+                ColAccessor::LargeUtf8(arr) => Value::String(arr.value(r).to_string()),
+                ColAccessor::Date32(arr) => {
+                    let date = chrono::NaiveDate::from_num_days_from_ce_opt(
+                        arr.value(r) + 719163, // Arrow epoch: 1970-01-01 = day 719163 in CE days
+                    )
+                    .unwrap_or_default();
+                    Value::Date(date)
+                }
+                ColAccessor::TsSecond(arr) => Value::Timestamp(
+                    chrono::DateTime::from_timestamp(arr.value(r), 0)
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default(),
+                ),
+                ColAccessor::TsMillisecond(arr) => Value::Timestamp(
+                    chrono::DateTime::from_timestamp_millis(arr.value(r))
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default(),
+                ),
+                ColAccessor::TsMicrosecond(arr) => Value::Timestamp(
+                    chrono::DateTime::from_timestamp_micros(arr.value(r))
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default(),
+                ),
+                ColAccessor::TsNanosecond(arr) => {
+                    let ns = arr.value(r);
+                    Value::Timestamp(
+                        chrono::DateTime::from_timestamp(
+                            ns / 1_000_000_000,
+                            (ns % 1_000_000_000) as u32,
+                        )
+                        .map(|dt| dt.naive_utc())
+                        .unwrap_or_default(),
+                    )
+                }
+                ColAccessor::Decimal128(arr, scale) => {
+                    Value::Numeric(exasol_udf_sdk::value::Decimal {
+                        unscaled: arr.value(r),
+                        scale: *scale as u8,
+                    })
+                }
+                ColAccessor::NumericFromInt32(arr) => Value::Int32(arr.value(r)),
+                ColAccessor::NumericFromInt64(arr) => Value::Int64(arr.value(r)),
+                ColAccessor::NumericFromFloat64(arr) => Value::Double(arr.value(r)),
+                ColAccessor::Unsupported => Value::Null,
+            };
+            row.push(v);
+        }
+        result.push(row);
+    }
+
+    Ok(result)
 }
 
 /// Wire formats for the string-block temporal types. The DB serialises DATE as
@@ -469,19 +1033,29 @@ fn first_nonloopback_ipv4() -> Result<String, exasol_udf_sdk::error::UdfError> {
 pub type ConnRequester<'a> =
     Box<dyn Fn(&str) -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>;
 
-/// Flushes the accumulated emit buffer to the DB mid-run. Receives `&mut
-/// EmitBuffer` so it can serialise the rows (`to_proto`), send the `MT_EMIT`
-/// exchange, and then `clear` the buffer. Feature-independent: mid-run flushing
-/// is not gated on `connect-back`.
-pub type EmitFlusher<'a> = Box<dyn FnMut(&mut EmitBuffer) -> Result<(), UdfError> + 'a>;
+/// Flushes one pre-built proto table to the DB mid-run. Receives the
+/// already-serialised `ExascriptTableData` so both the row path (which calls
+/// `to_proto` + `clear` before invoking the flusher) and the batch path (which
+/// encodes slices directly without touching the `Vec<Value>` buffer) share the
+/// same wire-send logic. Feature-independent: mid-run flushing is not gated on
+/// `connect-back`.
+pub type EmitFlusher<'a> =
+    Box<dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError> + 'a>;
 
 pub struct HostContextBridge<'a> {
     input: &'a mut InputRowSet,
     emit_buf: &'a mut EmitBuffer,
     input_cols: &'a [ColumnMeta],
+    /// Declared EMITS output schema — used by `emit_batch` to choose the target
+    /// proto block for each Arrow column. Threaded in by `dispatch::run_batch`
+    /// alongside `input_cols` because the bridge previously held only the input
+    /// columns and `emit_batch` needs the output schema at encoding time.
+    output_meta: &'a [ColumnMeta],
     started: bool,
-    /// Sends the buffered emit rows to the DB when the buffer crosses its byte
-    /// threshold, keeping a single batch's output bounded. Invoked from `emit`.
+    /// Sends one pre-built proto table to the DB when the buffer crosses its byte
+    /// threshold, keeping a single batch's output bounded. Invoked from `emit`
+    /// (after serialising + clearing the buffer) and from `push_batch` (after
+    /// encoding each full ≤4 MB slice directly).
     flusher: EmitFlusher<'a>,
     /// Last error captured from a UDF context method. Surfaced through
     /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
@@ -499,6 +1073,7 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
+        output_meta: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
         memory_limit: u64,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
@@ -507,6 +1082,7 @@ impl<'a> HostContextBridge<'a> {
             input,
             emit_buf,
             input_cols,
+            output_meta,
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
@@ -537,6 +1113,7 @@ impl<'a> HostContextBridge<'a> {
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
         input_cols: &'a [ColumnMeta],
+        output_meta: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
         memory_limit: u64,
         conn_requester: ConnRequester<'a>,
@@ -545,6 +1122,7 @@ impl<'a> HostContextBridge<'a> {
             input,
             emit_buf,
             input_cols,
+            output_meta,
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
@@ -604,7 +1182,36 @@ impl UdfContext for HostContextBridge<'_> {
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
         self.emit_buf.push(values.to_vec());
         if self.emit_buf.should_flush() {
-            (self.flusher)(self.emit_buf)?;
+            let table = self.emit_buf.to_proto(self.output_meta);
+            (self.flusher)(table)?;
+            self.emit_buf.clear();
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "emit-arrow")]
+    fn emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError> {
+        // Resolve the disjoint borrow: take references to fields we need
+        // separately so the borrow checker sees them as independent borrows.
+        let emit_buf = &mut *self.emit_buf;
+        let flusher = &mut self.flusher;
+        let meta = self.output_meta;
+        // Deserialise into a host-owned RecordBatch (single arrow copy on this
+        // side of the .so boundary), then replay the existing push_batch path.
+        let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None)
+            .map_err(|e| UdfError::Type(format!("emit_batch: IPC reader init: {e}")))?;
+        for batch in reader {
+            let batch = batch.map_err(|e| UdfError::Type(format!("emit_batch: IPC read: {e}")))?;
+            emit_buf.push_batch(&batch, meta, &mut |table| (flusher)(table))?;
+        }
+        // After push_batch returns, at most one <4 MB tail is buffered.
+        // Apply the same should_flush check as emit() so a tail that itself
+        // crosses the threshold is flushed immediately (possible if many
+        // interleaved push calls accumulated bytes before this batch).
+        if emit_buf.should_flush() {
+            let table = emit_buf.to_proto(meta);
+            (flusher)(table)?;
+            emit_buf.clear();
         }
         Ok(())
     }
@@ -778,7 +1385,8 @@ mod tests {
             input,
             emit,
             cols,
-            Box::new(|_buf: &mut EmitBuffer| Ok(())),
+            cols, // output_meta: reuse the same schema for test simplicity
+            Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
             0,
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
@@ -1216,7 +1824,8 @@ mod tests {
             &mut rs,
             &mut emit,
             &meta,
-            Box::new(|_buf: &mut EmitBuffer| Ok(())),
+            &meta, // output_meta
+            Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
             limit_bytes,
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
@@ -1226,5 +1835,511 @@ mod tests {
             }),
         );
         assert_eq!(bridge.memory_limit(), limit_bytes);
+    }
+
+    // -----------------------------------------------------------------------
+    // emit-arrow unit tests (task 2.5)
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "emit-arrow")]
+    mod arrow_tests {
+        use super::*;
+        // `emit_batch` on the bridge resolves to the EmitBatch ext-trait, which
+        // serialises to IPC bytes then calls `emit_record_batch_ipc`. The whole
+        // round-trip runs in-process with one arrow copy, so it works in tests.
+        use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use exasol_udf_sdk::context::EmitBatch;
+        use std::sync::Arc;
+
+        /// Build a simple 4-column RecordBatch: Int64, Utf8, Float64, Boolean
+        fn make_batch(
+            ints: &[i64],
+            strs: &[Option<&str>],
+            floats: &[f64],
+            bools: &[bool],
+        ) -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Int64, false),
+                Field::new("b", DataType::Utf8, true),
+                Field::new("c", DataType::Float64, false),
+                Field::new("d", DataType::Boolean, false),
+            ]));
+            let int_arr: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(ints.to_vec()));
+            let str_arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(strs.to_vec()));
+            let float_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(Float64Array::from(floats.to_vec()));
+            let bool_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(BooleanArray::from(bools.to_vec()));
+            RecordBatch::try_new(schema, vec![int_arr, str_arr, float_arr, bool_arr]).unwrap()
+        }
+
+        fn mixed_meta() -> Vec<ColumnMeta> {
+            vec![
+                col("a", ExaType::Int64),
+                col("b", ExaType::String { size: None }),
+                col("c", ExaType::Double),
+                col("d", ExaType::Boolean),
+            ]
+        }
+
+        /// Test: push_batch produces byte-identical output to the row path
+        #[test]
+        fn push_batch_equals_row_push() {
+            let meta = mixed_meta();
+            let batch = make_batch(
+                &[10, 20],
+                &[Some("x"), Some("y")],
+                &[1.5, 2.5],
+                &[true, false],
+            );
+
+            // Row path
+            let mut row_buf = EmitBuffer::new();
+            row_buf.push(vec![
+                Value::Int64(10),
+                Value::String("x".into()),
+                Value::Double(1.5),
+                Value::Bool(true),
+            ]);
+            row_buf.push(vec![
+                Value::Int64(20),
+                Value::String("y".into()),
+                Value::Double(2.5),
+                Value::Bool(false),
+            ]);
+            let row_table = row_buf.to_proto(&meta);
+
+            // Batch path — batch fits in one slice (< 4MB), so no mid-batch
+            // flush; the whole thing lands in the tail.
+            let mut batch_buf = EmitBuffer::new();
+            let mut flushed_tables: Vec<exa_proto::ExascriptTableData> = Vec::new();
+            batch_buf
+                .push_batch(&batch, &meta, &mut |t| {
+                    flushed_tables.push(t);
+                    Ok(())
+                })
+                .unwrap();
+            // No split expected for 2 small rows.
+            assert!(
+                flushed_tables.is_empty(),
+                "no flush expected for tiny batch"
+            );
+            // Tail is now in batch_buf.
+            let batch_table = batch_buf.to_proto(&meta);
+
+            // The two tables must be byte-identical.
+            assert_eq!(row_table.data_int64, batch_table.data_int64, "int64 block");
+            assert_eq!(
+                row_table.data_string, batch_table.data_string,
+                "string block"
+            );
+            assert_eq!(
+                row_table.data_double, batch_table.data_double,
+                "double block"
+            );
+            assert_eq!(row_table.data_bool, batch_table.data_bool, "bool block");
+            assert_eq!(row_table.data_nulls, batch_table.data_nulls, "null bitmap");
+            assert_eq!(row_table.rows, batch_table.rows, "row count");
+
+            // Also decode the batch-path result and verify values.
+            let rs = InputRowSet::from_proto(&batch_table, &meta);
+            assert_eq!(
+                rs.row(0).unwrap(),
+                &[
+                    Value::Int64(10),
+                    Value::String("x".into()),
+                    Value::Double(1.5),
+                    Value::Bool(true),
+                ]
+            );
+            assert_eq!(
+                rs.row(1).unwrap(),
+                &[
+                    Value::Int64(20),
+                    Value::String("y".into()),
+                    Value::Double(2.5),
+                    Value::Bool(false),
+                ]
+            );
+        }
+
+        /// Test: two string-family columns interleave row-major in data_string.
+        #[test]
+        fn push_batch_shared_block_type_interleaved() {
+            // Two Utf8 columns both declared String → data_string is row-major.
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("s1", DataType::Utf8, false),
+                Field::new("s2", DataType::Utf8, false),
+            ]));
+            let a: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["A0", "A1"]));
+            let b: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["B0", "B1"]));
+            let batch = RecordBatch::try_new(schema, vec![a, b]).unwrap();
+
+            let meta = vec![
+                col("s1", ExaType::String { size: None }),
+                col("s2", ExaType::String { size: None }),
+            ];
+
+            let mut buf = EmitBuffer::new();
+            buf.push_batch(&batch, &meta, &mut |_| Ok(())).unwrap();
+            let table = buf.to_proto(&meta);
+
+            // Row-major: row0(s1,s2), row1(s1,s2)
+            assert_eq!(table.data_string, vec!["A0", "B0", "A1", "B1"]);
+        }
+
+        /// Test: NULL cells occupy no type-block slot, only the bitmap.
+        #[test]
+        fn push_batch_null_bitmap() {
+            // Row 0: (10, "hello", 1.0, true), Row 1: (NULL int64, NULL str, NULL float, NULL bool)
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Int64, true),
+                Field::new("b", DataType::Utf8, true),
+                Field::new("c", DataType::Float64, true),
+                Field::new("d", DataType::Boolean, true),
+            ]));
+            let int_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(Int64Array::from(vec![Some(10i64), None]));
+            let str_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(StringArray::from(vec![Some("hello"), None]));
+            let float_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(Float64Array::from(vec![Some(1.0f64), None]));
+            let bool_arr: Arc<dyn arrow::array::Array> =
+                Arc::new(BooleanArray::from(vec![Some(true), None]));
+            let batch =
+                RecordBatch::try_new(schema, vec![int_arr, str_arr, float_arr, bool_arr]).unwrap();
+
+            let meta = vec![
+                col("a", ExaType::Int64),
+                col("b", ExaType::String { size: None }),
+                col("c", ExaType::Double),
+                col("d", ExaType::Boolean),
+            ];
+
+            let mut buf = EmitBuffer::new();
+            buf.push_batch(&batch, &meta, &mut |_| Ok(())).unwrap();
+            let table = buf.to_proto(&meta);
+
+            // Only row0's non-null values are in the type blocks.
+            assert_eq!(table.data_int64, vec![10i64]);
+            assert_eq!(table.data_string, vec!["hello"]);
+            assert_eq!(table.data_double, vec![1.0f64]);
+            assert_eq!(table.data_bool, vec![true]);
+
+            // Null bitmap: 2 rows × 4 cols = 8 entries.
+            // Row 0: all false (non-null). Row 1: all true (null).
+            assert_eq!(
+                table.data_nulls,
+                vec![false, false, false, false, true, true, true, true]
+            );
+
+            // Round-trip via from_proto.
+            let rs = InputRowSet::from_proto(&table, &meta);
+            assert_eq!(
+                rs.row(0).unwrap(),
+                &[
+                    Value::Int64(10),
+                    Value::String("hello".into()),
+                    Value::Double(1.0),
+                    Value::Bool(true),
+                ]
+            );
+            assert_eq!(
+                rs.row(1).unwrap(),
+                &[Value::Null, Value::Null, Value::Null, Value::Null]
+            );
+        }
+
+        /// Test: cumulative byte cost of push_batch matches the row path's byte_estimate.
+        #[test]
+        fn push_batch_byte_estimate_parity() {
+            let meta = mixed_meta();
+            let s = "hello"; // 5 bytes per row
+
+            // Row path: push 10 rows and check byte_estimate.
+            let mut row_buf = EmitBuffer::new();
+            for _ in 0..10 {
+                row_buf.push(vec![
+                    Value::Int64(42),
+                    Value::String(s.to_string()),
+                    Value::Double(1.0),
+                    Value::Bool(true),
+                ]);
+            }
+            let row_estimate = row_buf.byte_estimate;
+
+            // Batch path: push the same 10 rows as a batch.
+            let strs = vec![Some(s); 10];
+            let batch = make_batch(&[42i64; 10], &strs, &[1.0f64; 10], &[true; 10]);
+            let mut batch_buf = EmitBuffer::new();
+            batch_buf
+                .push_batch(&batch, &meta, &mut |_| Ok(()))
+                .unwrap();
+            let batch_estimate = batch_buf.byte_estimate;
+
+            // The byte estimates must be equal so should_flush fires at the same threshold.
+            assert_eq!(
+                row_estimate, batch_estimate,
+                "batch byte estimate ({batch_estimate}) must match row estimate ({row_estimate})"
+            );
+        }
+
+        /// Test: a batch whose cost > 4MB splits into N>1 flushes.
+        #[test]
+        fn push_batch_splits_oversized_batch() {
+            // Each row has a ~1000-byte string. We need enough rows to exceed 4MB.
+            // 4_000_000 / 1000 = 4000 rows needed. Use 5000 to guarantee > 1 flush.
+            let n_rows = 5000usize;
+            let s = "x".repeat(1000);
+
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+            let arr: Arc<dyn arrow::array::Array> =
+                Arc::new(StringArray::from(vec![s.as_str(); n_rows]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+            let meta = vec![col("v", ExaType::String { size: None })];
+
+            let mut flush_count = 0usize;
+            let mut total_flushed_rows = 0u64;
+            let mut buf = EmitBuffer::new();
+            buf.push_batch(&batch, &meta, &mut |t| {
+                // Each flushed slice must have at least 1 row.
+                assert!(t.rows > 0, "flushed table must have rows");
+                total_flushed_rows += t.rows;
+                flush_count += 1;
+                Ok(())
+            })
+            .unwrap();
+
+            // At least 1 flush must have happened (oversized batch).
+            assert!(
+                flush_count >= 1,
+                "expected ≥1 flush for oversized batch, got {flush_count}"
+            );
+
+            // Tail rows plus flushed rows must equal total batch rows.
+            let tail_rows = buf.len() as u64;
+            assert_eq!(
+                total_flushed_rows + tail_rows,
+                n_rows as u64,
+                "flushed({total_flushed_rows}) + tail({tail_rows}) must equal batch rows({n_rows})"
+            );
+        }
+
+        /// Test: the tail after an oversized push_batch is < 4MB.
+        #[test]
+        fn push_batch_slice_zero_copy_tail_bounded() {
+            let n_rows = 5000usize;
+            let s = "x".repeat(1000);
+
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+            let arr: Arc<dyn arrow::array::Array> =
+                Arc::new(StringArray::from(vec![s.as_str(); n_rows]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+            let meta = vec![col("v", ExaType::String { size: None })];
+
+            let mut buf = EmitBuffer::new();
+            buf.push_batch(&batch, &meta, &mut |_| Ok(())).unwrap();
+
+            // The residual byte estimate must be < 4MB.
+            assert!(
+                buf.byte_estimate < EMIT_BUFFER_LIMIT_BYTES,
+                "tail byte estimate {} must be < 4MB",
+                buf.byte_estimate
+            );
+        }
+
+        /// Test: a column whose Arrow type cannot feed the declared ExaType returns Err.
+        #[test]
+        fn push_batch_type_mismatch_errors() {
+            // Utf8 column declared as Int64 → incompatible.
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+            let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["hello"]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+            let meta = vec![col("v", ExaType::Int64)];
+
+            let mut buf = EmitBuffer::new();
+            let result = buf.push_batch(&batch, &meta, &mut |_| Ok(()));
+            assert!(
+                matches!(result, Err(UdfError::Type(_))),
+                "Utf8 declared as Int64 must return Err(Type)"
+            );
+
+            // Date32 declared as Boolean → incompatible.
+            use arrow::array::Date32Array;
+            let schema2 = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, false)]));
+            let arr2: Arc<dyn arrow::array::Array> = Arc::new(Date32Array::from(vec![0i32]));
+            let batch2 = RecordBatch::try_new(schema2, vec![arr2]).unwrap();
+            let meta2 = vec![col("d", ExaType::Boolean)];
+
+            let mut buf2 = EmitBuffer::new();
+            let result2 = buf2.push_batch(&batch2, &meta2, &mut |_| Ok(()));
+            assert!(
+                matches!(result2, Err(UdfError::Type(_))),
+                "Date32 declared as Boolean must return Err(Type)"
+            );
+        }
+
+        /// A `BIGINT` EMITS column arrives as `ExaType::Numeric` (string block),
+        /// so an Arrow `Int64` column must feed it — stringified exactly as the
+        /// row path's `value_to_block_string(Value::Int64)`. This is the
+        /// `emit-arrow-batch` fixture's `id BIGINT` case.
+        #[test]
+        fn push_batch_int64_into_numeric_block() {
+            let meta = vec![col(
+                "id",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            )];
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+            let arr: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(vec![1i64, 2, 3]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+            // Row path: the same values as Value::Int64 into a Numeric column.
+            let mut row_buf = EmitBuffer::new();
+            for n in [1i64, 2, 3] {
+                row_buf.push(vec![Value::Int64(n)]);
+            }
+            let row_table = row_buf.to_proto(&meta);
+
+            let mut batch_buf = EmitBuffer::new();
+            batch_buf
+                .push_batch(&batch, &meta, &mut |_| Ok(()))
+                .expect("Int64 must feed a NUMERIC column");
+            let batch_table = batch_buf.to_proto(&meta);
+
+            assert_eq!(batch_table.data_string, vec!["1", "2", "3"]);
+            assert_eq!(row_table.data_string, batch_table.data_string);
+            assert!(batch_table.data_int64.is_empty(), "ints go to string block");
+        }
+
+        // -----------------------------------------------------------------------
+        // Bridge tests
+        // -----------------------------------------------------------------------
+
+        /// Build a bridge with a flush counter for emit-arrow tests.
+        fn make_emit_bridge_with_counter<'a>(
+            input: &'a mut InputRowSet,
+            emit: &'a mut EmitBuffer,
+            meta: &'a [ColumnMeta],
+            flush_count: &'a std::cell::Cell<usize>,
+        ) -> HostContextBridge<'a> {
+            HostContextBridge::new(
+                input,
+                emit,
+                meta,
+                meta,
+                Box::new(move |t: exa_proto::ExascriptTableData| {
+                    if t.rows > 0 {
+                        flush_count.set(flush_count.get() + 1);
+                    }
+                    Ok(())
+                }),
+                0,
+                #[cfg(feature = "connect-back")]
+                Box::new(|_name| {
+                    Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                        "no credential fetcher in test".into(),
+                    ))
+                }),
+            )
+        }
+
+        /// Test: a small batch under the threshold buffers without a mid-flush.
+        #[test]
+        fn bridge_emit_batch_buffers_and_flushes() {
+            let meta = mixed_meta();
+            let batch = make_batch(
+                &[1, 2],
+                &[Some("a"), Some("b")],
+                &[0.1, 0.2],
+                &[true, false],
+            );
+            let empty_table = ExascriptTableData {
+                rows: 0,
+                ..Default::default()
+            };
+            let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+            let mut emit = EmitBuffer::new();
+            let flush_count = std::cell::Cell::new(0usize);
+            {
+                let mut bridge =
+                    make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
+                bridge.emit_batch(&batch).unwrap();
+                // No mid-batch flush for a tiny batch.
+                assert_eq!(flush_count.get(), 0, "no flush expected for tiny batch");
+            }
+            // The tail is in the emit buffer after the bridge is dropped.
+            assert_eq!(emit.len(), 2, "tail must have 2 rows");
+        }
+
+        /// Test: a batch whose Arrow type cannot feed the declared ExaType makes
+        /// emit_batch return Err after the host deserialises and runs push_batch.
+        #[test]
+        fn bridge_emit_batch_error_propagates() {
+            // A Utf8 array declared as ExaType::Int64 — incompatible.
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+            let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["hello"]));
+            let bad_batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+            let meta = vec![col("v", ExaType::Int64)];
+            let empty_table = ExascriptTableData {
+                rows: 0,
+                ..Default::default()
+            };
+            let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+            let mut emit = EmitBuffer::new();
+            let flush_count = std::cell::Cell::new(0usize);
+            let mut bridge = make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
+            let result = bridge.emit_batch(&bad_batch);
+            assert!(
+                matches!(result, Err(UdfError::Type(_))),
+                "Utf8 declared as Int64 must return Err(Type)"
+            );
+        }
+
+        /// Test: interleaved emit() and emit_batch() share the same buffer.
+        #[test]
+        fn bridge_mixed_emit_styles_share_buffer() {
+            let meta = vec![col("v", ExaType::Int64)];
+            let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+            let arr: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(vec![2i64, 3]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+            let empty_table = ExascriptTableData {
+                rows: 0,
+                ..Default::default()
+            };
+            let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+            let mut emit = EmitBuffer::new();
+            let flush_count = std::cell::Cell::new(0usize);
+            {
+                let mut bridge =
+                    make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
+                // Row-based emit: 1 row
+                bridge.emit(&[Value::Int64(1)]).unwrap();
+                // Batch-based emit: 2 rows. push_batch flushes the pending row
+                // first (decision-log [7] step 1) to preserve FIFO order, then
+                // the 2 batch rows land in the tail as they're under threshold.
+                bridge.emit_batch(&batch).unwrap();
+                // 1 flush for the pending row that was displaced by the batch.
+                assert_eq!(
+                    flush_count.get(),
+                    1,
+                    "pending row flushed before batch tail"
+                );
+            }
+            // The 2 batch rows are in the tail buffer (the flushed row was sent to the flusher).
+            assert_eq!(emit.len(), 2, "batch tail must have 2 rows");
+
+            // Verify the tail values (the 2 batch rows).
+            let table = emit.to_proto(&meta);
+            let rs2 = InputRowSet::from_proto(&table, &meta);
+            assert_eq!(rs2.row(0).unwrap(), &[Value::Int64(2)]);
+            assert_eq!(rs2.row(1).unwrap(), &[Value::Int64(3)]);
+        }
     }
 }

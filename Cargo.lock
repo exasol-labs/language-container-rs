@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "exasol-udf-sdk",
  "libloading",
@@ -896,6 +896,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
+name = "emit-arrow-batch"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "emit-bulk"
 version = "0.1.0"
 dependencies = [
@@ -953,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -962,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -983,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -995,9 +1004,9 @@ dependencies = [
 
 [[package]]
 name = "exarrow-rs"
-version = "0.12.8"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4193d2e6555dc1a5c4c39701d96ee6876179d83fb61dff4e87c4baff11734d4c"
+checksum = "d434e563d3cbe7775c361509b1fec245b564774d5c18a694674457efa2dad560"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1028,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1039,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1048,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -1762,7 +1771,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "arrow",
