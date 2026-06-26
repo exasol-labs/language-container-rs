@@ -1,7 +1,7 @@
 use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout changes
-pub const EXA_UDF_ABI_VERSION: u32 = 5;
+pub const EXA_UDF_ABI_VERSION: u32 = 6;
 
 /// The fingerprint string baked in at SDK build time; injected by build.rs.
 /// Format: "SDK_VERSION:RUSTC_HASH\0". The build script supplies the
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn abi_version_and_vtable_layout() {
-        assert_eq!(EXA_UDF_ABI_VERSION, 5);
+        assert_eq!(EXA_UDF_ABI_VERSION, 6);
         assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
         let _ = EXA_SDK_FINGERPRINT;
     }

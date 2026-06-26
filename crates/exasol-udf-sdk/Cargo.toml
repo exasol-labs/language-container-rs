@@ -10,6 +10,7 @@ description = "SDK for writing Exasol UDFs in Rust: UdfRun/UdfContext traits, Va
 [dependencies]
 thiserror = { workspace = true }
 chrono = { workspace = true }
+tracing = { workspace = true }
 arrow = { workspace = true, optional = true }
 
 [features]

@@ -171,6 +171,40 @@ fn value_byte_cost(v: &Value) -> usize {
     }
 }
 
+/// Read process RSS (resident set size) from `/proc/self/statm` field 2.
+///
+/// Returns kilobytes (pages × 4096 / 1024 = pages × 4).  Falls back to 0 on
+/// any I/O or parse error so telemetry never panics.
+///
+/// `/proc/self/statm` format: `size resident shared text lib data dt`
+/// Field 1 (0-indexed) is the resident page count.
+/// Page size is 4096 on x86_64; hardcoded here to avoid a syscall on every
+/// telemetry checkpoint — the 4 KiB page is universal on the Linux targets
+/// this SLC runs on.
+// ponytail: hardcoded 4096 page size; sysconf(SC_PAGESIZE) would be more
+// correct but costs a syscall per checkpoint.
+fn read_rss_kb() -> u64 {
+    let Ok(contents) = std::fs::read_to_string("/proc/self/statm") else {
+        return 0;
+    };
+    contents
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|pages| pages * 4) // pages × 4096 bytes / 1024 = pages × 4 KiB
+        .unwrap_or(0)
+}
+
+/// The session's resolved verbosity level, read from the process-global
+/// `LevelFilter` that `Runtime::run`'s `on_level_resolved` hook adjusted after
+/// parsing `%udf_debug_level`. Maps `OFF` (the pre-handshake default) to `INFO`
+/// so UDF code gets a sensible default before the level is applied.
+fn current_debug_level() -> tracing::Level {
+    tracing::level_filters::LevelFilter::current()
+        .into_level()
+        .unwrap_or(tracing::Level::INFO)
+}
+
 /// Accumulates emitted output rows, serialising to a proto batch on flush.
 #[derive(Default)]
 pub struct EmitBuffer {
@@ -178,6 +212,12 @@ pub struct EmitBuffer {
     /// Running approximate serialised size of the buffered rows. Incremented in
     /// `push`, reset in `clear`; read by `should_flush`.
     byte_estimate: usize,
+    /// Total bytes emitted across all flushes (running sum, never reset).
+    cumulative_bytes: usize,
+    /// Total rows emitted across all flushes (running sum, never reset).
+    cumulative_rows: u64,
+    /// Number of `MT_EMIT` flushes performed.
+    flush_count: u64,
 }
 
 impl EmitBuffer {
@@ -185,8 +225,32 @@ impl EmitBuffer {
         EmitBuffer::default()
     }
 
+    /// Emit a periodic RSS + full-state checkpoint every this many cumulative rows.
+    // ponytail: 10_000 rows per checkpoint; a long 60M-row UDF emits ~6000
+    // checkpoint lines — noisy but bearable at debug level.
+    const TELEMETRY_ROW_CHECKPOINT: u64 = 10_000;
+
     pub fn push(&mut self, values: Vec<Value>) {
-        self.byte_estimate += values.iter().map(value_byte_cost).sum::<usize>();
+        let row_cost = values.iter().map(value_byte_cost).sum::<usize>();
+        self.byte_estimate += row_cost;
+        self.cumulative_bytes += row_cost;
+        self.cumulative_rows += 1;
+        // Per-push debug event: bytes buffered and running cost for this row.
+        // Automatic tracing-level gating suppresses this at INFO or coarser.
+        tracing::debug!(
+            target: "emit_push",
+            bytes_buffered = self.byte_estimate,
+            row_cost,
+            cumulative_rows = self.cumulative_rows,
+            "emit row buffered"
+        );
+        // Periodic full-state checkpoint with RSS (task 5.2).
+        if self
+            .cumulative_rows
+            .is_multiple_of(Self::TELEMETRY_ROW_CHECKPOINT)
+        {
+            self.record_flush_telemetry();
+        }
         self.rows.push(values);
     }
 
@@ -270,6 +334,7 @@ impl EmitBuffer {
     }
 
     pub fn clear(&mut self) {
+        self.flush_count += 1;
         self.rows.clear();
         self.byte_estimate = 0;
     }
@@ -280,6 +345,28 @@ impl EmitBuffer {
 
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+
+    /// Emit a `debug!` event with RSS, buffer state, and cumulative counters.
+    ///
+    /// Called at `MT_EMIT` flush points (threshold flush and end-of-run flush)
+    /// and at row-count checkpoints from `push`. At flush points this is called
+    /// before `clear()`, so `flush_count` reflects completed flushes; the event
+    /// reports `flush_count + 1` — the 1-indexed number of the flush about to
+    /// happen. At checkpoint calls the `+ 1` anticipates the next flush, which is
+    /// the same convention (the checkpoint fires mid-accumulation, not on a flush).
+    /// Suppressed automatically when the resolved tracing level is above `debug`.
+    pub fn record_flush_telemetry(&self) {
+        tracing::debug!(
+            target: "emit_flush",
+            rss_kb = read_rss_kb(),
+            byte_estimate = self.byte_estimate,
+            cumulative_bytes = self.cumulative_bytes,
+            cumulative_rows = self.cumulative_rows,
+            flush_count = self.flush_count + 1,
+            buffered_rows = self.rows.len(),
+            "MT_EMIT flush"
+        );
     }
 
     /// Encode an Arrow `RecordBatch` into the emit stream, flushing ≤4 MB
@@ -1172,6 +1259,10 @@ impl UdfContext for HostContextBridge<'_> {
         self.memory_limit
     }
 
+    fn debug_level(&self) -> tracing::Level {
+        current_debug_level()
+    }
+
     fn get(&self, col: usize) -> Result<&Value, UdfError> {
         self.input
             .current_row()
@@ -1182,7 +1273,13 @@ impl UdfContext for HostContextBridge<'_> {
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
         self.emit_buf.push(values.to_vec());
         if self.emit_buf.should_flush() {
+            self.emit_buf.record_flush_telemetry();
             let table = self.emit_buf.to_proto(self.output_meta);
+            tracing::debug!(
+                target: "emit_flush",
+                rows = table.rows,
+                "MT_EMIT sending"
+            );
             (self.flusher)(table)?;
             self.emit_buf.clear();
         }
@@ -1307,6 +1404,10 @@ impl UdfContext for SingleCallContext<'_> {
         0
     }
 
+    fn debug_level(&self) -> tracing::Level {
+        current_debug_level()
+    }
+
     fn get(&self, _col: usize) -> Result<&Value, UdfError> {
         Err(UdfError::Unimplemented(
             "single-call mode has no input columns".into(),
@@ -1362,6 +1463,88 @@ impl UdfContext for SingleCallContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify that `debug_level()` on both bridges reads the process-global
+    /// `LevelFilter` and never panics (including when the filter is `OFF`).
+    ///
+    /// The implementation is `LevelFilter::current().into_level().unwrap_or(INFO)`.
+    /// We cannot set the global level in a unit test without a subscriber, so
+    /// we verify the weaker property: the method returns a valid `Level` value
+    /// (one of the five known variants) and maps `OFF` to `INFO` by checking
+    /// directly with `LevelFilter::OFF.into_level()`.
+    #[test]
+    fn host_bridge_debug_level_returns_valid_level() {
+        use exa_proto::ExascriptTableData;
+
+        let meta = vec![ColumnMeta {
+            name: "a".to_string(),
+            typ: ExaType::Int64,
+            type_name: String::new(),
+            size: None,
+            precision: None,
+            scale: None,
+        }];
+        let table = ExascriptTableData {
+            rows: 0,
+            ..Default::default()
+        };
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        let bridge = HostContextBridge::new(
+            &mut rs,
+            &mut emit,
+            &meta,
+            &meta,
+            Box::new(|_| Ok(())),
+            0,
+            #[cfg(feature = "connect-back")]
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher".into(),
+                ))
+            }),
+        );
+
+        // The bridge must not panic and must return a valid Level variant.
+        let level = bridge.debug_level();
+        assert!(
+            level == tracing::Level::ERROR
+                || level == tracing::Level::WARN
+                || level == tracing::Level::INFO
+                || level == tracing::Level::DEBUG
+                || level == tracing::Level::TRACE,
+            "unexpected level {level}"
+        );
+
+        // The OFF fallback is encoded in the implementation, not the global
+        // state; verify the expression directly.
+        let off_mapped = tracing::level_filters::LevelFilter::OFF
+            .into_level()
+            .unwrap_or(tracing::Level::INFO);
+        assert_eq!(off_mapped, tracing::Level::INFO, "OFF must map to INFO");
+    }
+
+    #[test]
+    fn single_call_context_debug_level_returns_valid_level() {
+        #[cfg(feature = "connect-back")]
+        let ctx = SingleCallContext::new(Box::new(|_name| {
+            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                "no credential fetcher".into(),
+            ))
+        }));
+        #[cfg(not(feature = "connect-back"))]
+        let ctx = SingleCallContext::new();
+
+        let level = ctx.debug_level();
+        assert!(
+            level == tracing::Level::ERROR
+                || level == tracing::Level::WARN
+                || level == tracing::Level::INFO
+                || level == tracing::Level::DEBUG
+                || level == tracing::Level::TRACE,
+            "unexpected level {level}"
+        );
+    }
 
     fn col(name: &str, typ: ExaType) -> ColumnMeta {
         ColumnMeta {
@@ -1835,6 +2018,152 @@ mod tests {
             }),
         );
         assert_eq!(bridge.memory_limit(), limit_bytes);
+    }
+
+    // -----------------------------------------------------------------------
+    // Telemetry tests (tasks 2.15 — 5.4)
+    // -----------------------------------------------------------------------
+
+    /// Serialises tests that install tracing subscribers via `with_default`.
+    ///
+    /// Any `tracing::subscriber::with_default` call that installs a
+    /// DEBUG-level subscriber can, upon first use of a `debug!` callsite,
+    /// trigger `rebuild_interest_cache` which updates the process-global
+    /// `MAX_LEVEL` atomic.  Concurrent tests that also assert on captured
+    /// debug output may see the wrong `MAX_LEVEL` and have their events
+    /// silently dropped by the macro fast-path check.  Holding this lock for
+    /// the full duration of any such test eliminates the race.
+    static GLOBAL_LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A `MakeWriter` that appends to a shared `Mutex<Vec<u8>>`.
+    ///
+    /// Used by the telemetry tests to capture `tracing` output without a global
+    /// subscriber.  Each call to `make_writer` clones the `Arc` so the subscriber
+    /// can hold it across events.
+    #[cfg(test)]
+    struct LockedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LockedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LockedWriter {
+        type Writer = LockedWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            LockedWriter(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    /// Verify telemetry events appear at `debug` level and are absent at `info`.
+    ///
+    /// Scenario: `telemetry_emitted_at_debug_level_only` (plan task 5.4).
+    ///
+    /// Uses a `Mutex<Vec<u8>>` capture writer and `tracing::subscriber::with_default`
+    /// with a `reload::Layer` so `filter_handle.modify` triggers
+    /// `rebuild_interest_cache()`, which resets any previously cached callsite
+    /// interests.  Holds `GLOBAL_LEVEL_LOCK` to prevent concurrent tests from
+    /// racing on the global `MAX_LEVEL` atomic.
+    #[test]
+    fn telemetry_emitted_at_debug_level_only() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+        use tracing_subscriber::reload;
+
+        let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let capture_with_level = |level: tracing::Level| -> String {
+            let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+            let initial = tracing_subscriber::EnvFilter::new("info");
+            let (filter_layer, filter_handle) = reload::Layer::new(initial);
+            let sub = tracing_subscriber::registry().with(filter_layer).with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(LockedWriter(Arc::clone(&buf)))
+                    .with_ansi(false),
+            );
+            tracing::subscriber::with_default(sub, || {
+                // Force rebuild_interest_cache() so previously-cached callsites are reset.
+                let _ = filter_handle
+                    .modify(|f| *f = tracing_subscriber::EnvFilter::new(level.as_str()));
+
+                let mut emit = EmitBuffer::new();
+                // Push enough rows to trigger a flush (each ~1000 bytes).
+                let rows_to_flush = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000) + 1;
+                for _ in 0..rows_to_flush {
+                    emit.push(vec![Value::String("x".repeat(1000))]);
+                    if emit.should_flush() {
+                        emit.record_flush_telemetry();
+                        emit.clear();
+                    }
+                }
+                if !emit.is_empty() {
+                    emit.record_flush_telemetry();
+                    emit.clear();
+                }
+            });
+            let captured = buf.lock().unwrap();
+            String::from_utf8_lossy(&captured).into_owned()
+        };
+
+        let debug_output = capture_with_level(tracing::Level::DEBUG);
+        // Restore to INFO before capturing the info output.
+        let info_output = capture_with_level(tracing::Level::INFO);
+
+        assert!(
+            debug_output.contains("emit_flush"),
+            "debug output must contain emit_flush telemetry, got: {debug_output:?}"
+        );
+        assert!(
+            !info_output.contains("emit_flush"),
+            "info output must not contain emit_flush telemetry, got: {info_output:?}"
+        );
+    }
+
+    /// Verify that `debug!` events around `push` are recorded at debug level.
+    ///
+    /// Uses a `reload::Layer`-based subscriber and calls `filter_handle.modify`
+    /// to trigger `rebuild_interest_cache()`, which resets any previously cached
+    /// callsite interests (avoiding the "event permanently cached as never"
+    /// failure mode when another test registered the callsite first without a
+    /// debug-level subscriber installed).
+    ///
+    /// Scenario: `emit_flush_path_instrumented` (plan task 5.4).
+    #[test]
+    fn emit_flush_path_instrumented() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+        use tracing_subscriber::reload;
+
+        let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let initial = tracing_subscriber::EnvFilter::new("info");
+        let (filter_layer, filter_handle) = reload::Layer::new(initial);
+        let sub = tracing_subscriber::registry().with(filter_layer).with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(LockedWriter(Arc::clone(&buf)))
+                .with_ansi(false),
+        );
+
+        tracing::subscriber::with_default(sub, || {
+            // Force rebuild_interest_cache() to reset any stale callsite cache entries.
+            let _ = filter_handle.modify(|f| *f = tracing_subscriber::EnvFilter::new("debug"));
+
+            let mut emit = EmitBuffer::new();
+            emit.push(vec![Value::String("hello".to_string())]);
+        });
+
+        let captured = buf.lock().unwrap();
+        let output = String::from_utf8_lossy(&captured);
+        assert!(
+            output.contains("emit_push") || output.contains("bytes_buffered"),
+            "debug output must contain push instrumentation, got: {output:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,5 +1,6 @@
 use exa_udf_runtime::Runtime;
 use tracing::error;
+use tracing_subscriber::{EnvFilter, prelude::*, reload};
 
 fn main() {
     // Must happen before any library code that might read HOME.
@@ -16,17 +17,27 @@ fn main() {
         ),
     );
 
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
-        )
+    // The filter starts at INFO (or RUST_LOG if set). After the handshake
+    // delivers %udf_debug_level from the script source, Runtime::run() calls
+    // the on_level_resolved hook which modifies this handle in-place — no
+    // reload crate feature needed, reload is always available in tracing-subscriber.
+    let initial_filter = EnvFilter::from_default_env().add_directive("info".parse().unwrap());
+    let (filter_layer, filter_handle) = reload::Layer::new(initial_filter);
+    // stderr flushes per write: std::io::stderr() is an unbuffered fd-level
+    // write (no userspace BufWriter), so every tracing event is visible to the
+    // DB's fd-2 redirect immediately.
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     let args: Vec<String> = std::env::args().collect();
 
-    match run(&args) {
+    match run(&args, |level| {
+        // Apply %udf_debug_level resolved from the script source post-handshake.
+        let new_filter = EnvFilter::new(level.as_str());
+        let _ = filter_handle.modify(|f| *f = new_filter);
+    }) {
         Ok(()) => {
             // Force immediate process exit. The reference C++ exaudfclient_main
             // does `return 0` from a function whose caller immediately exits; the OS
@@ -58,7 +69,7 @@ impl Exit {
     }
 }
 
-fn run(args: &[String]) -> Result<(), Exit> {
+fn run(args: &[String], on_level_resolved: impl Fn(tracing::Level)) -> Result<(), Exit> {
     if args.len() < 3 {
         return Err(Exit::new(
             1,
@@ -88,7 +99,7 @@ fn run(args: &[String]) -> Result<(), Exit> {
     let client_name = endpoint.clone();
     let runtime = Runtime::new(endpoint.clone(), client_name);
     runtime
-        .run()
+        .run(on_level_resolved)
         .map_err(|e| Exit::new(1, format!("F-UDF-CL-RUST-0001: {}", e)))
 }
 
@@ -120,7 +131,7 @@ mod tests {
 
     #[test]
     fn too_few_args_returns_exit_code_1() {
-        let result = run(&args(&["exaudfclient", "tcp://localhost:1234"]));
+        let result = run(&args(&["exaudfclient", "tcp://localhost:1234"]), |_| {});
         let exit = result.unwrap_err();
         assert_eq!(exit.code, 1);
         assert!(exit.message.contains("F-UDF-CL-RUST-0003"));
@@ -128,11 +139,10 @@ mod tests {
 
     #[test]
     fn unsupported_lang_returns_exit_code_2() {
-        let result = run(&args(&[
-            "exaudfclient",
-            "tcp://localhost:1234",
-            "lang=python",
-        ]));
+        let result = run(
+            &args(&["exaudfclient", "tcp://localhost:1234", "lang=python"]),
+            |_| {},
+        );
         let exit = result.unwrap_err();
         assert_eq!(exit.code, 2);
         assert!(exit.message.contains("F-UDF-CL-RUST-0002"));

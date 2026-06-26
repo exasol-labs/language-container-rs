@@ -108,6 +108,15 @@ pub trait UdfContext {
         0
     }
 
+    /// The resolved verbosity level for this UDF invocation.  UDF code uses this
+    /// to decide whether to write a log line via `udf_log!`.  The host bridge
+    /// overrides this to return the session-level resolved by `%udf_debug_level`;
+    /// the default (`INFO`) keeps existing UDFs that do not override the method
+    /// compiling and behaving unchanged.
+    fn debug_level(&self) -> tracing::Level {
+        tracing::Level::INFO
+    }
+
     /// Return the IP address of the cluster node that started this language container.
     /// The IP is parsed from the ZMQ endpoint; no network call is made.
     fn cluster_ip(&self) -> Result<String, UdfError> {
@@ -278,6 +287,12 @@ mod tests {
     fn default_memory_limit_is_zero() {
         let ctx = DummyCtx;
         assert_eq!(ctx.memory_limit(), 0);
+    }
+
+    #[test]
+    fn default_debug_level_is_info() {
+        let ctx = DummyCtx;
+        assert_eq!(ctx.debug_level(), tracing::Level::INFO);
     }
 
     #[test]

@@ -10,3 +10,4 @@
 | [Writing a Rust UDF](writing-a-udf.md) | Scaffold, macro, UdfContext API, Value types, Decimal, ExaType, UdfError, scalar & SET UDFs, connect-back, build & deploy, unit testing |
 | [The Exasol UDF protocol](protocol.md) | ZMQ REQ/REP control channel, message types, handshake→run→cleanup lifecycle, MT_IMPORT credentials |
 | [Cargo ecosystem](cargo-ecosystem.md) | Workspace crates, feature flags, cargo-exasol-udf subcommands, integration tests |
+| [Debugging Rust UDFs](debugging.md) | `SET SESSION SCRIPT OUTPUT ADDRESS`, `%udf_debug_level`, `udf_log!`, `ctx.debug_level()` |

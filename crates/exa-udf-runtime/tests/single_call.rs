@@ -84,7 +84,7 @@ fn handshake(server: &zmq::Socket, conn_id: u64, source: &str) {
 fn spawn_runtime(
     endpoint: String,
 ) -> std::thread::JoinHandle<Result<(), exa_udf_runtime::RuntimeError>> {
-    std::thread::spawn(move || Runtime::new(endpoint, "test-client".into()).run())
+    std::thread::spawn(move || Runtime::new(endpoint, "test-client".into()).run(|_| {}))
 }
 
 fn endpoint_for(tag: &str) -> String {
