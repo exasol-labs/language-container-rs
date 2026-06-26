@@ -9,14 +9,12 @@ edition = "2024"
 name = "emit_bench_udf"
 crate-type = ["cdylib"]
 
-# Must match the host SLC's SDK feature set exactly. The host (exaudfclient →
-# runtime "connect-back") compiles UdfContext with BOTH connect-back and
-# emit-arrow, which places the cfg-gated `emit_record_batch_ipc` after the
-# connect-back methods in the trait-object vtable. A UDF built with emit-arrow
-# only would put `emit_record_batch_ipc` at a lower index → emit_batch silently
-# dispatches to the host's `cluster_ip` and emits nothing. So enable connect-back
-# here too (it implies emit-arrow) for vtable parity.
+# Only `emit-arrow` is needed: the UDF uses `ctx.emit_batch` (the `EmitBatch`
+# ext-trait + arrow `RecordBatch`). The former `connect-back` feature — enabled
+# here purely for trait-object vtable parity with the host — is gone: the
+# `UdfContext` vtable is now feature-independent (#31), so a feature mismatch can
+# no longer misdispatch `emit_batch`.
 [dependencies]
-exasol-udf-sdk = { path = "../../crates/exasol-udf-sdk", features = ["emit-arrow", "connect-back"] }
+exasol-udf-sdk = { path = "../../crates/exasol-udf-sdk", features = ["emit-arrow"] }
 exasol-udf-macros = { path = "../../crates/exasol-udf-macros" }
 arrow = { workspace = true }
