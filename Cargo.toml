@@ -26,6 +26,8 @@ members = [
     "test-udfs/timestamp-add-second",
     "test-udfs/timestamp-now",
     "test-udfs/timestamp-passthrough",
+    "benches/emit-bench",
+    "benches/emit-bench-udf",
 ]
 # `it` requires a live Exasol container; build/test it explicitly:
 # `cargo test -p it --features integration`
