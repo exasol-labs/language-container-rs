@@ -66,7 +66,7 @@ fn scalar_dispatch_full_protocol() {
     let source = format!("%udf_object {}", so.display());
 
     let ep = endpoint.clone();
-    let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run());
+    let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run(|_| {}));
 
     // 1. MT_CLIENT -> MT_INFO
     let req = recv_req(&server);
@@ -166,7 +166,7 @@ fn annotated_schema_mismatch_closes_session() {
     let source = format!("%udf_object {}", so.display());
 
     let ep = endpoint.clone();
-    let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run());
+    let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run(|_| {}));
 
     // Handshake.
     let req = recv_req(&server);

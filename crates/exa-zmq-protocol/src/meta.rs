@@ -29,12 +29,11 @@ pub struct UdfMeta {
     pub single_call_mode: bool,
     pub source_code: String,
     pub script_name: String,
-    #[allow(dead_code)]
     pub(crate) session_id: u64,
-    #[allow(dead_code)]
     pub(crate) node_id: u32,
     #[allow(dead_code)]
     pub(crate) node_count: u32,
+    pub(crate) vm_id: u64,
     /// Bytes, per-UDF-instance resident-memory limit.
     pub maximal_memory_limit: u64,
     /// Connect-back credentials surfaced during the handshake, when the DB
@@ -176,9 +175,25 @@ impl UdfMeta {
             session_id: info.session_id,
             node_id: info.node_id,
             node_count: info.node_count,
+            vm_id: info.vm_id,
             maximal_memory_limit: info.maximal_memory_limit,
             conn_info: None,
         })
+    }
+
+    /// Session ID of the current Exasol session.
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    /// Node ID (0-based) of the cluster node running this UDF instance.
+    pub fn node_id(&self) -> u32 {
+        self.node_id
+    }
+
+    /// Long unique ID of the VM / UDF process instance.
+    pub fn vm_id(&self) -> u64 {
+        self.vm_id
     }
 
     #[cfg(test)]

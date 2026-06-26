@@ -27,3 +27,4 @@ connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 [dev-dependencies]
 zmq = { workspace = true }
 prost = { workspace = true }
+tracing-subscriber = { workspace = true }

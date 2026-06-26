@@ -354,19 +354,19 @@ pub extern "C" fn __exa_udf_entry_TESTABI() -> *const ExaUdfVTable {{
     // ---------------------------------------------------------------------------
 
     /// A `.so` built against ABI version 4 (the pre-#31-fix vtable layout) must
-    /// be rejected by the v5 loader with `AbiMismatch` — not loaded and silently
+    /// be rejected by the v6 loader with `AbiMismatch` — not loaded and silently
     /// misdispatched, which was the failure mode #31 was designed to prevent.
     #[test]
-    fn abi_version_5_rejects_v4_so() {
+    fn abi_version_6_rejects_v4_so() {
         let dir = make_tempdir();
         let so = compile_vtable_fixture(dir.path(), "v4_fixture", 4);
         match LoadedUdf::open(&so, "TESTABI") {
             Err(RuntimeError::AbiMismatch { expected, found }) => {
-                assert_eq!(expected, EXA_UDF_ABI_VERSION, "host must be ABI v5");
+                assert_eq!(expected, EXA_UDF_ABI_VERSION, "host must be ABI v6");
                 assert_eq!(found, 4, "fixture must present as ABI v4");
             }
             Err(other) => panic!("expected AbiMismatch, got {other:?}"),
-            Ok(_) => panic!("loader must not accept a v4 .so against a v5 host"),
+            Ok(_) => panic!("loader must not accept a v4 .so against a v6 host"),
         }
     }
 

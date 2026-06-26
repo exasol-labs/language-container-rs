@@ -8,7 +8,7 @@ mod rowset;
 mod schema_check;
 mod single_call;
 
-pub use artifact::parse_udf_object_path;
+pub use artifact::{parse_debug_level, parse_udf_object_path};
 pub use error::RuntimeError;
 pub use loader::LoadedUdf;
 pub use rowset::{EmitBuffer, HostContextBridge, InputRowSet};
@@ -42,13 +42,45 @@ impl Runtime {
     /// → load → dispatch → close. On any error the message is serialised into
     /// the protocol close path with the `F-UDF-CL-RUST-` prefix and `destroy`
     /// is invoked before returning.
-    pub fn run(&self) -> Result<(), RuntimeError> {
+    ///
+    /// `on_level_resolved` is called once immediately after the handshake, with
+    /// the log level parsed from the script's `%udf_debug_level` directive (or
+    /// `INFO` when absent). The caller uses this to adjust the subscriber's
+    /// effective filter — typically by modifying a `tracing_subscriber::reload`
+    /// handle that was installed in `main()`. Calling `reload::Handle::modify`
+    /// internally invokes `rebuild_interest_cache()`, which updates the
+    /// process-global `MAX_LEVEL` atomic that `LevelFilter::current()` reads —
+    /// so `ctx.debug_level()` (which reads `current()`) observes the resolved
+    /// level after the hook returns.
+    pub fn run(&self, on_level_resolved: impl Fn(tracing::Level)) -> Result<(), RuntimeError> {
         let transport = ZmqTransport::connect(&self.endpoint)?;
         let mut proto = Protocol::new();
 
         transport.send(&proto.client_request(&self.client_name))?;
 
         let meta = self.handshake(&transport, &mut proto)?;
+
+        // Parse %udf_debug_level from the script source and apply it via the
+        // caller-supplied hook. This must happen after the handshake delivers
+        // source_code; lines emitted before this point use the initial INFO level.
+        on_level_resolved(parse_debug_level(&meta.source_code));
+
+        // Root span: tag every subsequent log line with the VM's identity so
+        // multi-node output can be de-interleaved. pid is always present;
+        // node_id/session_id/vm_id come from the handshake metadata.
+        // vm_id is 0 when the DB did not supply one (single-node deployments).
+        // ERROR level ensures the span is entered and its fields appear in the
+        // output even when the resolved level is WARN or ERROR — an INFO-level
+        // span would be filtered out and its tags lost at those settings.
+        let _root = tracing::error_span!(
+            "udf",
+            pid = std::process::id(),
+            session_id = meta.session_id(),
+            node_id = meta.node_id(),
+            vm_id = meta.vm_id(),
+        )
+        .entered();
+
         tracing::debug!(
             source_len = meta.source_code.len(),
             input_cols = meta.input_columns.len(),
