@@ -6,6 +6,8 @@
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
+[![crates.io](https://img.shields.io/crates/v/exasol-udf-sdk.svg)](https://crates.io/crates/exasol-udf-sdk)
+[![docs.rs](https://img.shields.io/docsrs/exasol-udf-sdk)](https://docs.rs/exasol-udf-sdk)
 
 A pure-Rust Exasol Language Container that executes precompiled `.so` UDFs from BucketFS.
 
