@@ -138,3 +138,12 @@ The handshake `Info` response (`exascript_info`) carries the per-UDF-instance re
 * *THEN* the `HostEvent::Meta` MUST carry that value on `UdfMeta::maximal_memory_limit` as an unsigned byte count, decoded verbatim from `exascript_info.maximal_memory_limit` (field 11, `required uint64`), alongside the script source, connection id, and `node_count`
 * *AND* the value MUST be interpreted as the per-UDF-instance resident-memory limit in bytes that the database enforces, and MUST NOT be rescaled into any other unit
 * *AND* because the proto field is `required`, an `Info` response that omits it MUST yield `UdfMeta::maximal_memory_limit` of `0` (the proto default, denoting "no limit reported") rather than a protocol error
+
+### Scenario: Transient EAGAIN on recv/send is retried until the 120 s backstop
+
+* *GIVEN* a connected `ZmqTransport` whose `RCVTIMEO`/`SNDTIMEO` is set to 1 s (a poll interval, not a deadline)
+* *WHEN* `recv` or `send` returns a ZMQ `EAGAIN` error because the 1 s poll interval elapsed before a frame arrived or was queued
+* *THEN* the transport MUST retry the operation rather than propagating the `EAGAIN` as a fatal error, preserving the REQ/REP lock-step exchange
+* *AND* retries MUST continue as long as the total elapsed time since the call began is less than 120 s (`MAX_TOTAL_WAIT`)
+* *AND* once 120 s of continuous `EAGAIN` responses have elapsed, the transport MUST return a timeout `ProtocolError` to the caller
+* *AND* any non-`EAGAIN` socket error (genuine failure) MUST propagate immediately without waiting for the backstop
