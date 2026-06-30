@@ -4,7 +4,7 @@ Orchestrates driving the scalar/set run loop over the wire protocol — covering
 
 ## Background
 
-The runtime drives dispatch via the pure protocol state machine after a `.so` has been loaded. JIT compilation remains unsupported in v2 (`compiler.rs` returns `UnsupportedFeature`). The rowset codec (`InputRowSet`/`EmitBuffer`) switches from column-major packing with NULL placeholders to row-major packing where NULL cells occupy no slot in their type block, and output values are packed by declared column `ExaType` rather than by runtime `Value` variant.
+The runtime drives dispatch via the pure protocol state machine after a `.so` has been loaded. The `HostContextBridge` adapts the host-internal `UdfMeta` and rowset codec into the `&dyn UdfContext` the UDF sees, threading handshake metadata (memory limit and the `exascript_info` identity/origin fields) in at construction so the bridge can override the SDK's defaulted accessors with live values.
 
 The rowset codec (`InputRowSet`/`EmitBuffer`) packs output values by declared column `ExaType` rather than by runtime `Value` variant. The decode path parses TIMESTAMP via `%.f` (0..9 fractional digits, lossless), but the emit path historically hardcoded exactly 6 fractional digits (`%.6f`) — capping `TIMESTAMP(7/8/9)` columns at microseconds. The Exasol engine truncates an emitted timestamp to the output column's declared precision on receipt (`SWIGResultHandler::setTimestamp` parses `YYYY-MM-DD HH24:MI:SS.FF9` and applies `trunc_to_fractional_seconds_precision(value, m_types[col].prec)`, verified in `../db/Engine/src/exscript/pluggable/swigcontainers_int.h:1064-1082` and `zmqcontainer.cc:675`). Therefore emitting MORE fractional digits than the column declares is safe (the engine truncates); emitting FEWER loses precision. This delta makes the emit always carry the full available nanosecond precision (`%.9f`) so the engine's own truncation yields the exact declared precision — the SLC does not truncate client-side and does not need the output column metadata threaded into the encoder. This concerns the **emit/output** path only; it lets UDF-*generated* sub-microsecond values (wall-clock, connect-back data) reach an output column at up to nanosecond precision. It does NOT widen UDF *input*: the engine delivers every input column at microsecond precision (`SWIGTableData::getTimestamp` formats `...FF6`, `swigcontainers_int.h:779-781`), so an input→output round-trip through a UDF is capped at microseconds regardless of this emit format.
 
@@ -135,3 +135,11 @@ This feature also adds an opt-in Arrow batch-emit path behind the `emit-arrow` f
 * *WHEN* the UDF returns from `run`
 * *THEN* rows from both emit styles MUST accumulate into the same `EmitBuffer`, so the two styles are interchangeable and produce one coherent output stream
 * *AND* the dispatch loop's existing tail flush MUST send any rows still buffered from either style, so no emitted row is lost even when the threshold was never reached
+
+### Scenario: Bridge surfaces handshake identity and origin metadata to the UDF
+
+* *GIVEN* a `HostContextBridge` constructed from a `UdfMeta` whose `exascript_info`-derived fields (`session_id`, `statement_id`, `node_id`, `node_count`, `vm_id`, `database_name`, `database_version`, `script_name`, `script_schema`, `current_user`, `current_schema`, `scope_user`) carry live values
+* *WHEN* a UDF calls the corresponding `UdfContext` handshake accessors
+* *THEN* the bridge MUST override each defaulted accessor to return the exact value carried on the originating `UdfMeta` field, performing no rescaling or reinterpretation
+* *AND* the bridge MUST return the optional accessors (`current_user`, `current_schema`, `scope_user`) as `Some(value)` when the proto field was present and `None` when it was absent
+* *AND* the bridge MUST source every value from `UdfMeta` threaded in at construction time, not from any per-call protocol exchange
