@@ -6,7 +6,7 @@
 //! and `udf_log_macro_writes_to_stderr_when_permitted`.
 
 use exa_proto::ExascriptTableData;
-use exa_udf_runtime::{EmitBuffer, HostContextBridge, InputRowSet};
+use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
 use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
@@ -69,7 +69,7 @@ fn make_bridge<'a>(
         cols,
         cols,
         Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-        0,
+        HandshakeMeta::default(),
         #[cfg(feature = "connect-back")]
         Box::new(|_name| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(

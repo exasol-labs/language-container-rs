@@ -6,7 +6,7 @@
 #![cfg(feature = "emit-arrow")]
 
 use exa_proto::ExascriptTableData;
-use exa_udf_runtime::{EmitBuffer, HostContextBridge, InputRowSet, LoadedUdf};
+use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet, LoadedUdf};
 use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
@@ -59,7 +59,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
             &input_cols,
             &output_meta,
             Box::new(|_t: ExascriptTableData| Ok(())),
-            0,
+            HandshakeMeta::default(),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(

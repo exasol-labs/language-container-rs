@@ -1148,11 +1148,56 @@ pub struct HostContextBridge<'a> {
     /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
     /// because `connection()` records errors through a shared `&self` borrow.
     last_error: std::cell::Cell<Option<String>>,
-    /// Maximum memory the DB has allocated for this UDF invocation, in bytes.
-    /// Sourced from `UdfMeta::maximal_memory_limit` at bridge construction time.
-    memory_limit: u64,
+    /// Handshake metadata (`exascript_info` identity/origin fields plus the
+    /// memory limit) threaded in at construction so the bridge can override the
+    /// SDK's defaulted `UdfContext` accessors with the live DB-supplied values.
+    handshake: HandshakeMeta,
     #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
+}
+
+/// Owned snapshot of the handshake metadata the bridge surfaces to UDF code.
+///
+/// Bundles the `exascript_info` identity/origin fields and the memory limit so
+/// they thread through the bridge constructors as one argument. Strings are
+/// owned (not borrowed) because the corresponding `UdfContext` accessors return
+/// owned `String`/`Option<String>` across the `.so` vtable boundary. Built from
+/// a `&UdfMeta` via `From`; `Default` yields the all-neutral value tests use.
+#[derive(Debug, Clone, Default)]
+pub struct HandshakeMeta {
+    pub session_id: u64,
+    pub statement_id: u32,
+    pub node_id: u32,
+    pub node_count: u32,
+    pub vm_id: u64,
+    pub memory_limit: u64,
+    pub database_name: String,
+    pub database_version: String,
+    pub script_name: String,
+    pub script_schema: String,
+    pub current_user: Option<String>,
+    pub current_schema: Option<String>,
+    pub scope_user: Option<String>,
+}
+
+impl From<&exa_zmq_protocol::UdfMeta> for HandshakeMeta {
+    fn from(meta: &exa_zmq_protocol::UdfMeta) -> Self {
+        HandshakeMeta {
+            session_id: meta.session_id(),
+            statement_id: meta.statement_id(),
+            node_id: meta.node_id(),
+            node_count: meta.node_count(),
+            vm_id: meta.vm_id(),
+            memory_limit: meta.maximal_memory_limit,
+            database_name: meta.database_name.clone(),
+            database_version: meta.database_version.clone(),
+            script_name: meta.script_name.clone(),
+            script_schema: meta.script_schema.clone(),
+            current_user: meta.current_user.clone(),
+            current_schema: meta.current_schema.clone(),
+            scope_user: meta.scope_user.clone(),
+        }
+    }
 }
 
 impl<'a> HostContextBridge<'a> {
@@ -1162,7 +1207,7 @@ impl<'a> HostContextBridge<'a> {
         input_cols: &'a [ColumnMeta],
         output_meta: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
-        memory_limit: u64,
+        handshake: HandshakeMeta,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -1173,7 +1218,7 @@ impl<'a> HostContextBridge<'a> {
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
-            memory_limit,
+            handshake,
             #[cfg(feature = "connect-back")]
             conn_requester,
         }
@@ -1202,7 +1247,7 @@ impl<'a> HostContextBridge<'a> {
         input_cols: &'a [ColumnMeta],
         output_meta: &'a [ColumnMeta],
         flusher: EmitFlusher<'a>,
-        memory_limit: u64,
+        handshake: HandshakeMeta,
         conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
@@ -1213,7 +1258,7 @@ impl<'a> HostContextBridge<'a> {
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
-            memory_limit,
+            handshake,
             conn_requester,
         }
     }
@@ -1256,7 +1301,55 @@ impl UdfContext for HostContextBridge<'_> {
     }
 
     fn memory_limit(&self) -> u64 {
-        self.memory_limit
+        self.handshake.memory_limit
+    }
+
+    fn session_id(&self) -> u64 {
+        self.handshake.session_id
+    }
+
+    fn statement_id(&self) -> u32 {
+        self.handshake.statement_id
+    }
+
+    fn node_id(&self) -> u32 {
+        self.handshake.node_id
+    }
+
+    fn node_count(&self) -> u32 {
+        self.handshake.node_count
+    }
+
+    fn vm_id(&self) -> u64 {
+        self.handshake.vm_id
+    }
+
+    fn database_name(&self) -> String {
+        self.handshake.database_name.clone()
+    }
+
+    fn database_version(&self) -> String {
+        self.handshake.database_version.clone()
+    }
+
+    fn script_name(&self) -> String {
+        self.handshake.script_name.clone()
+    }
+
+    fn script_schema(&self) -> String {
+        self.handshake.script_schema.clone()
+    }
+
+    fn current_user(&self) -> Option<String> {
+        self.handshake.current_user.clone()
+    }
+
+    fn current_schema(&self) -> Option<String> {
+        self.handshake.current_schema.clone()
+    }
+
+    fn scope_user(&self) -> Option<String> {
+        self.handshake.scope_user.clone()
     }
 
     fn debug_level(&self) -> tracing::Level {
@@ -1496,7 +1589,7 @@ mod tests {
             &meta,
             &meta,
             Box::new(|_| Ok(())),
-            0,
+            HandshakeMeta::default(),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
@@ -1570,7 +1663,7 @@ mod tests {
             cols,
             cols, // output_meta: reuse the same schema for test simplicity
             Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-            0,
+            HandshakeMeta::default(),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
@@ -2009,7 +2102,10 @@ mod tests {
             &meta,
             &meta, // output_meta
             Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-            limit_bytes,
+            HandshakeMeta {
+                memory_limit: limit_bytes,
+                ..Default::default()
+            },
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
@@ -2018,6 +2114,65 @@ mod tests {
             }),
         );
         assert_eq!(bridge.memory_limit(), limit_bytes);
+    }
+
+    #[test]
+    fn bridge_returns_handshake_metadata() {
+        let meta = vec![col("a", ExaType::Int64)];
+        let table = ExascriptTableData {
+            rows: 0,
+            ..Default::default()
+        };
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        // A present optional (current_user) and absent optionals (current_schema,
+        // scope_user) prove the bridge mirrors the proto present/absent distinction.
+        let handshake = HandshakeMeta {
+            session_id: 4242,
+            statement_id: 9,
+            node_id: 1,
+            node_count: 4,
+            vm_id: 777777,
+            memory_limit: 256 * 1024 * 1024,
+            database_name: "EXADB".to_string(),
+            database_version: "2026.1.0".to_string(),
+            script_name: "MY_SCRIPT".to_string(),
+            script_schema: "MY_SCHEMA".to_string(),
+            current_user: Some("ALICE".to_string()),
+            current_schema: None,
+            scope_user: None,
+        };
+        let bridge = HostContextBridge::new(
+            &mut rs,
+            &mut emit,
+            &meta,
+            &meta,
+            Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+            handshake,
+            #[cfg(feature = "connect-back")]
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
+        );
+
+        // Numeric accessors return the exact UdfMeta values, no rescaling.
+        assert_eq!(bridge.session_id(), 4242);
+        assert_eq!(bridge.statement_id(), 9);
+        assert_eq!(bridge.node_id(), 1);
+        assert_eq!(bridge.node_count(), 4);
+        assert_eq!(bridge.vm_id(), 777777);
+        assert_eq!(bridge.memory_limit(), 256 * 1024 * 1024);
+        // Owned-string accessors return the exact values.
+        assert_eq!(bridge.database_name(), "EXADB");
+        assert_eq!(bridge.database_version(), "2026.1.0");
+        assert_eq!(bridge.script_name(), "MY_SCRIPT");
+        assert_eq!(bridge.script_schema(), "MY_SCHEMA");
+        // Optionals: Some when present, None when absent.
+        assert_eq!(bridge.current_user(), Some("ALICE".to_string()));
+        assert_eq!(bridge.current_schema(), None);
+        assert_eq!(bridge.scope_user(), None);
     }
 
     // -----------------------------------------------------------------------
@@ -2567,7 +2722,7 @@ mod tests {
                     }
                     Ok(())
                 }),
-                0,
+                HandshakeMeta::default(),
                 #[cfg(feature = "connect-back")]
                 Box::new(|_name| {
                     Err(exasol_udf_sdk::error::UdfError::ConnectBack(

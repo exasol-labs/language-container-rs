@@ -195,7 +195,7 @@ fn run_batch(
             &meta.input_columns,
             &meta.output_columns,
             flusher,
-            meta.maximal_memory_limit,
+            crate::rowset::HandshakeMeta::from(meta),
             #[cfg(feature = "connect-back")]
             conn_requester,
         );

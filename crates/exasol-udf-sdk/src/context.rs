@@ -108,6 +108,81 @@ pub trait UdfContext {
         0
     }
 
+    /// Session ID of the current Exasol session, from the handshake metadata.
+    /// Returns `0` on a context that does not override this method.
+    fn session_id(&self) -> u64 {
+        0
+    }
+
+    /// Statement number within the current session, from the handshake metadata.
+    /// Returns `0` on a context that does not override this method.
+    fn statement_id(&self) -> u32 {
+        0
+    }
+
+    /// 0-based ID of the cluster node running this UDF instance, from the
+    /// handshake metadata.  Returns `0` on a context that does not override this.
+    fn node_id(&self) -> u32 {
+        0
+    }
+
+    /// Number of nodes in the Exasol cluster, from the handshake metadata.
+    /// Returns `0` on a context that does not override this method.
+    fn node_count(&self) -> u32 {
+        0
+    }
+
+    /// Long unique ID of the VM / UDF process instance, from the handshake
+    /// metadata.  Returns `0` on a context that does not override this method.
+    fn vm_id(&self) -> u64 {
+        0
+    }
+
+    /// Name of the database, from the handshake metadata.  Returns an empty
+    /// string on a context that does not override this method.
+    fn database_name(&self) -> String {
+        String::new()
+    }
+
+    /// Version of the database, from the handshake metadata.  Returns an empty
+    /// string on a context that does not override this method.
+    fn database_version(&self) -> String {
+        String::new()
+    }
+
+    /// Name of the running script, from the handshake metadata.  Returns an
+    /// empty string on a context that does not override this method.
+    fn script_name(&self) -> String {
+        String::new()
+    }
+
+    /// Schema of the running script, from the handshake metadata.  Returns an
+    /// empty string on a context that does not override this method.
+    fn script_schema(&self) -> String {
+        String::new()
+    }
+
+    /// Current user reported by the DB, from the handshake metadata.  Returns
+    /// `None` when the DB did not report it (proto `optional`) or on a context
+    /// that does not override this method.
+    fn current_user(&self) -> Option<String> {
+        None
+    }
+
+    /// Current schema reported by the DB, from the handshake metadata.  Returns
+    /// `None` when the DB did not report it (proto `optional`) or on a context
+    /// that does not override this method.
+    fn current_schema(&self) -> Option<String> {
+        None
+    }
+
+    /// Scope user reported by the DB, from the handshake metadata.  Returns
+    /// `None` when the DB did not report it (proto `optional`) or on a context
+    /// that does not override this method.
+    fn scope_user(&self) -> Option<String> {
+        None
+    }
+
     /// The resolved verbosity level for this UDF invocation.  UDF code uses this
     /// to decide whether to write a log line via `udf_log!`.  The host bridge
     /// overrides this to return the session-level resolved by `%udf_debug_level`;
@@ -287,6 +362,26 @@ mod tests {
     fn default_memory_limit_is_zero() {
         let ctx = DummyCtx;
         assert_eq!(ctx.memory_limit(), 0);
+    }
+
+    #[test]
+    fn default_handshake_metadata_is_neutral() {
+        let ctx = DummyCtx;
+        // Numeric accessors default to 0 ("not reported").
+        assert_eq!(ctx.session_id(), 0u64);
+        assert_eq!(ctx.statement_id(), 0u32);
+        assert_eq!(ctx.node_id(), 0u32);
+        assert_eq!(ctx.node_count(), 0u32);
+        assert_eq!(ctx.vm_id(), 0u64);
+        // Owned-string accessors default to the empty string.
+        assert_eq!(ctx.database_name(), "");
+        assert_eq!(ctx.database_version(), "");
+        assert_eq!(ctx.script_name(), "");
+        assert_eq!(ctx.script_schema(), "");
+        // Optional accessors default to None (mirroring proto `optional`).
+        assert_eq!(ctx.current_user(), None);
+        assert_eq!(ctx.current_schema(), None);
+        assert_eq!(ctx.scope_user(), None);
     }
 
     #[test]

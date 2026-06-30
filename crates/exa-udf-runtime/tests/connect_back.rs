@@ -7,7 +7,7 @@
 
 #![cfg(feature = "connect-back")]
 
-use exa_udf_runtime::{EmitBuffer, HostContextBridge, InputRowSet};
+use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
 use exa_zmq_protocol::{ColumnMeta, ConnInfo, ExaType};
 use exasol_udf_sdk::connect_back::{ConnectionObject, ExaConnection};
 use exasol_udf_sdk::context::UdfContext;
@@ -84,7 +84,7 @@ fn connection_fetches_credentials_via_mt_import() {
         &cols,
         &cols,
         Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-        0,
+        HandshakeMeta::default(),
         Box::new(|name: &str| {
             assert_eq!(name, "CB_SELF");
             Ok(fake_conn_info())
@@ -115,7 +115,7 @@ fn connect_back_opens_from_connection_object() {
         &cols,
         &cols,
         Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-        0,
+        HandshakeMeta::default(),
         Box::new(|_| Ok(fake_conn_info())),
     );
 
@@ -194,7 +194,7 @@ fn connect_back_dsn_built_only_from_connection_object() {
         &cols,
         &cols,
         Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
-        0,
+        HandshakeMeta::default(),
         Box::new(|_| Ok(fake_conn_info())),
     );
     // Either outcome is acceptable: a ConnectBack error (no live DB) or a
