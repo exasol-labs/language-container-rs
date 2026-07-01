@@ -35,3 +35,21 @@ Notable sound deviation from the plan: the implementer grouped the 12 handshake 
 Minor/informational (no action taken): speculative `Clone` derive on `HandshakeMeta` (harmless); mixed accessor/direct field reads in `HandshakeMeta::from` (forced by `UdfMeta` field visibility, not a defect); `meta_info` proto field 12 intentionally out of scope per plan.
 
 ## Ready for: `/speq:record add-udfcontext-handshake-metadata`
+
+## Post-record amendment (2026-07-01): CI-only IT failure
+
+The original verification (step 5.5) ran the integration suite **locally**, where `cargo test -p it` builds every fixture `.so` via the workspace `default-members`. That masked a gap: the CI "Build UDF .so artifacts (release)" step in `.github/workflows/ci.yml` builds fixtures from an **explicit `-p` allowlist**, and Task 2.8 added the `test-udfs/handshake-meta` fixture crate + the `handshake_metadata_udf_emits_session_and_node` IT scenario without adding the fixture to that allowlist.
+
+Result: PR #40 was green everywhere except the IT matrix, which failed on all three DB versions (2025.1.11 / 2025.2.1 / 2026.1.0) with:
+
+```
+test db_roundtrip_all_scenarios ... FAILED
+Error: reading UDF artifact .../target/release/libhandshake_meta.so
+    No such file or directory (os error 2)
+```
+
+Fix (Phase 6):
+- `.github/workflows/ci.yml` — added `-p handshake-meta` to the "Build UDF .so artifacts (release)" step so `libhandshake_meta.so` is built and uploaded for the integration matrix to download.
+- `CLAUDE.md` (CI section) — added a guardrail so future `test-udfs/*` fixtures are wired into the CI allowlist, preventing a recurrence of this local-passes / CI-fails split.
+
+No spec deltas: this is a build/CI mechanic, which per CLAUDE.md lives in `ci.yml`/`CLAUDE.md`, not the spec library.

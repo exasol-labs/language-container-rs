@@ -21,3 +21,7 @@
 - [x] 5.4 Format (cargo fmt --check) — clean
 - [x] 5.5 Integration tests (cargo test -p it --features integration) — 0 failures
 - [x] 5.6 E2E tests — green
+
+## Phase 6: Post-record fix (CI wiring — missed in original plan)
+- [x] 6.1 Wire the new `handshake-meta` fixture into the CI "Build UDF .so artifacts (release)" `-p` allowlist (`.github/workflows/ci.yml`). Missed by Task 2.8, which added the fixture crate + IT scenario but not the CI build entry, so IT passed locally (`.so` built via `default-members`) yet failed on the CI matrix with `reading UDF artifact .../libhandshake_meta.so: No such file or directory`.
+- [x] 6.2 Add a CLAUDE.md guardrail: adding a `test-udfs/*` fixture requires adding it to the CI `-p` allowlist (CI does not use `default-members`).

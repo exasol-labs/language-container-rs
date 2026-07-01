@@ -27,6 +27,7 @@ Project mission in: @specs/mission.md
 
 - Run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` before `docker run` of the Exasol DB.
 - Otherwise every UDF reports `Internal error: VM crashed` (SQL state 22002) — AppArmor strips `CAP_SYS_ADMIN` from `nschroot` even under `--privileged`. It is **not** memory/disk/kernel/glibc/UDF code. Green locally on Debian; confirm on the runner via `sudo dmesg` (`apparmor="DENIED" ... comm="nschroot" capability=21`).
+- **Adding a `test-udfs/*` fixture requires wiring it into CI.** The "Build UDF .so artifacts (release)" step in `.github/workflows/ci.yml` builds fixtures via an explicit `-p <crate>` allowlist (NOT `default-members`), then uploads `target/release/lib*.so` for the integration matrix to download. A new fixture that an IT scenario `dlopen`s must be added to that `-p` list, or IT fails CI-only with `reading UDF artifact .../lib<name>.so: No such file or directory` while passing locally (local `cargo test -p it` builds the `.so` via `default-members`).
 
 ## Connect-back
 
