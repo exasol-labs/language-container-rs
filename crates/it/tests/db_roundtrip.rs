@@ -31,6 +31,7 @@ const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
 const TS_NOW_LIB: &str = "libtimestamp_now.so";
 const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
 const ANNOTATED_FIXTURE_LIB: &str = "libannotated_fixture.so";
+const HANDSHAKE_LIB: &str = "libhandshake_meta.so";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -138,9 +139,14 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
             read_udf_artifact(ANNOTATED_FIXTURE_LIB)?,
         )
         .await?;
+    let handshake_path = harness
+        .upload_udf(HANDSHAKE_LIB, read_udf_artifact(HANDSHAKE_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
+    handshake_metadata_udf_emits_session_and_node(&mut conn, &handshake_path).await?;
+    eprintln!("[it] scenario handshake_metadata ok");
     annotated_fixture_two_entries_from_one_so(&mut conn, &annotated_fixture_path).await?;
     eprintln!("[it] scenario annotated_fixture_two_entries ok");
     set_filter_emits_positive_only(&mut conn, &set_path).await?;
@@ -341,6 +347,76 @@ async fn annotated_fixture_two_entries_from_one_so(
         bail!(
             "annotated_double(21) returned {doubled:?}, expected 42 — the second \
              named entry point in the same .so did not resolve correctly"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: live handshake metadata reaches UDF code through the `UdfContext`
+/// accessors. The `handshake_meta` SCALAR fixture emits one pipe-delimited
+/// string built from `ctx.session_id()`, `ctx.node_id()`, `ctx.node_count()`,
+/// and `ctx.script_name()`. We assert the values are LIVE, not the neutral
+/// defaults the accessors return on a context that does not override them:
+///
+///  - `session_id` is non-deterministic but a real session always has a
+///    non-zero ID, so the neutral `0` default would fail this gate.
+///  - `node_id` is 0-based, so on single-node Docker it is legitimately `0`;
+///    we assert only that it parses as a valid u32 (present), not non-zero.
+///  - `node_count` is `>= 1` for any live cluster, so the neutral `0` default
+///    would fail — this is the node-metadata liveness gate.
+///  - `script_name` must match the registered script name. Exasol upper-cases
+///    unquoted identifiers, so we compare case-insensitively and require the
+///    registered `handshake_meta` name to appear (the neutral default is the
+///    empty string).
+async fn handshake_metadata_udf_emits_session_and_node(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT handshake_meta() RETURNS VARCHAR(2000) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(conn, "SELECT TO_CHAR(handshake_meta())").await?;
+    let summary = got.ok_or_else(|| anyhow!("handshake_meta returned NULL"))?;
+
+    let parts: Vec<&str> = summary.split('|').collect();
+    if parts.len() != 4 {
+        bail!("handshake_meta emitted {summary:?}, expected 4 pipe-delimited fields");
+    }
+
+    let session_id: u64 = parts[0]
+        .parse()
+        .map_err(|e| anyhow!("session_id {:?} not a u64: {e}", parts[0]))?;
+    if session_id == 0 {
+        bail!(
+            "handshake_meta session_id is 0 (the neutral default) — live handshake \
+             metadata did not reach the UDF: {summary:?}"
+        );
+    }
+
+    // node_id is 0-based; single-node Docker is node 0, so liveness is proven by
+    // node_count, not node_id. Assert node_id is present/valid only.
+    parts[1]
+        .parse::<u32>()
+        .map_err(|e| anyhow!("node_id {:?} not a u32: {e}", parts[1]))?;
+
+    let node_count: u32 = parts[2]
+        .parse()
+        .map_err(|e| anyhow!("node_count {:?} not a u32: {e}", parts[2]))?;
+    if node_count == 0 {
+        bail!(
+            "handshake_meta node_count is 0 (the neutral default) — live node \
+             metadata did not reach the UDF: {summary:?}"
+        );
+    }
+
+    let script_name = parts[3];
+    if !script_name.to_ascii_uppercase().contains("HANDSHAKE_META") {
+        bail!(
+            "handshake_meta script_name {script_name:?} does not match the \
+             registered script name HANDSHAKE_META: {summary:?}"
         );
     }
     Ok(())

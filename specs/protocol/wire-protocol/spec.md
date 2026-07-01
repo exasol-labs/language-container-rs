@@ -8,7 +8,7 @@ The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a
 
 v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_UNDEFINED_CALL`) carrying a `SingleCallFunctionId`, and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response for connect-back. The error close path continues to use the prefix `F-UDF-CL-RUST-####`. In single-call mode the DB acknowledges the container's `MT_RETURN` result by echoing `MT_RETURN`; the state machine surfaces this as `HostEvent::SingleCallAck` so the dispatch loop can close the run with `MT_DONE`. In non-single-call mode, `MT_RETURN` in the run phase remains a protocol error.
 
-The handshake `Info` response (`exascript_info`) carries the per-UDF-instance resident-memory limit in `maximal_memory_limit` (field 11, `required uint64`, bytes), which the database enforces on each VM. `UdfMeta` surfaces this alongside the existing `node_count`/`node_id` and connection-information fields so UDF code can size in-process memory to the sandbox limit.
+The handshake surfaces `exascript_info` metadata on `UdfMeta` (session/node/vm identity, the memory limit, and DB/script/user fields). Connect-back credentials, by contrast, are resolved on demand per CONNECTION name via the live `MT_IMPORT` exchange and are NOT buffered onto `UdfMeta`.
 
 ## Scenarios
 
@@ -147,3 +147,11 @@ The handshake `Info` response (`exascript_info`) carries the per-UDF-instance re
 * *AND* retries MUST continue as long as the total elapsed time since the call began is less than 120 s (`MAX_TOTAL_WAIT`)
 * *AND* once 120 s of continuous `EAGAIN` responses have elapsed, the transport MUST return a timeout `ProtocolError` to the caller
 * *AND* any non-`EAGAIN` socket error (genuine failure) MUST propagate immediately without waiting for the backstop
+
+### Scenario: Handshake metadata carries no buffered connect-back credentials
+
+* *GIVEN* a `Protocol` completing the handshake where the DB may deliver a `HostEvent::ConnInfo` before the `MT_META` that ends the handshake
+* *WHEN* the host assembles the `UdfMeta` surfaced by `HostEvent::Meta`
+* *THEN* `UdfMeta` MUST NOT carry a buffered connection-information field, because connect-back credentials are resolved on demand per CONNECTION name via the live `MT_IMPORT` exchange rather than captured during the handshake
+* *AND* the `ConnInfo` type and the `HostEvent::ConnInfo` event MUST remain available, because the on-demand connect-back path still decodes credentials through them
+* *AND* the handshake loop MUST NOT buffer a `HostEvent::ConnInfo` into `UdfMeta`, leaving the on-demand resolver as the single credential path

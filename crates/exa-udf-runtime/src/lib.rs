@@ -11,7 +11,7 @@ mod single_call;
 pub use artifact::{parse_debug_level, parse_udf_object_path};
 pub use error::RuntimeError;
 pub use loader::LoadedUdf;
-pub use rowset::{EmitBuffer, HostContextBridge, InputRowSet};
+pub use rowset::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
 
 use exa_zmq_protocol::{HostAction, HostEvent, Protocol, ProtocolError, UdfMeta, ZmqTransport};
 
@@ -150,9 +150,9 @@ impl Runtime {
         transport: &ZmqTransport,
         proto: &mut Protocol,
     ) -> Result<UdfMeta, RuntimeError> {
-        // Connect-back credentials may arrive (via MT_IMPORT) before the
-        // MT_META that ends the handshake; buffer them and attach to the meta.
-        let mut conn_info = None;
+        // Connect-back credentials are resolved on demand per CONNECTION name via
+        // the live MT_IMPORT exchange, not buffered onto the handshake meta. A
+        // `HostEvent::ConnInfo` arriving here is simply ignored.
         loop {
             let resp = transport.recv()?;
             let (event, action) = proto.step(resp)?;
@@ -162,11 +162,9 @@ impl Runtime {
                 _ => {}
             }
             match event {
-                HostEvent::Meta(mut m) => {
-                    m.conn_info = conn_info.take();
+                HostEvent::Meta(m) => {
                     return Ok(m);
                 }
-                HostEvent::ConnInfo(ci) => conn_info = Some(ci),
                 HostEvent::Pending | HostEvent::Ping(_) => continue,
                 HostEvent::Close(msg) => {
                     return Err(RuntimeError::Protocol(ProtocolError::Protocol(

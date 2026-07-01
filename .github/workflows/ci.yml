@@ -76,6 +76,7 @@ jobs:
             -p timestamp-add-second \
             -p timestamp-now \
             -p timestamp-passthrough \
+            -p handshake-meta \
             -p annotated-fixture
 
       - name: Build IT test binary (compile once)

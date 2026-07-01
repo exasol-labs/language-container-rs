@@ -10,39 +10,7 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 
 ## Scenarios
 
-### Scenario: Value and ExaType cover the v1 column types
-
-* *GIVEN* the SDK `value` module
-* *WHEN* a UDF reads or emits a column
-* *THEN* it MUST provide strongly typed variants for `Null`, `Double`, `Int32`, `Int64`, `Numeric`, `Bool`, `String`, `Date`, and `Timestamp`, where `Numeric` carries a `Decimal` newtype and `Date`/`Timestamp` carry `NaiveDate`/`NaiveDateTime` (NOT `i64`)
-* *AND* the single canonical `ExaType` MUST live in the SDK `value` module and provide matching descriptors including `precision` and `scale`
-* *AND* MUST re-use the SDK `ExaType` rather than defining its own duplicate enum
-
-### Scenario: Decimal is constructible from string without precision loss
-
-* *GIVEN* the SDK `Decimal` newtype
-* *WHEN* a UDF or the runtime constructs a decimal from the proto wire form
-* *THEN* `Decimal::try_from(&str)` MUST parse a signed decimal literal such as `"-1.000000000000000001"` into `unscaled` and `scale` with no precision loss for up to 38 significant digits
-* *AND* `TryFrom<&str>` MUST be provided as the canonical construction path, returning a `UdfError::Type` for malformed input
-* *AND* `Decimal::to_string` MUST round-trip back to the canonical decimal wire form so emit serialization is lossless
-* *AND* a value whose `scale` is `0` MUST render with no decimal point
-
-### Scenario: UdfContext exposes typed accessors and row iteration
-
-* *GIVEN* the `UdfContext` trait
-* *WHEN* a UDF inspects and reads its input
-* *THEN* the trait MUST provide `num_columns`, `get`, `emit`, and `next` as required methods
-* *AND* it MUST provide typed accessors `get_value`, `get_i64`, `get_f64`, `get_string`, `get_bool`, `get_decimal`, `get_date`, and `get_timestamp`, each returning `Result<Option<T>, UdfError>` where a SQL NULL maps to `Ok(None)` and a matching cell maps to `Ok(Some(…))`
-* *AND* `get_i64` MUST additionally accept an integral `Numeric` cell (because Exasol delivers `BIGINT` as `PB_NUMERIC`), returning `Err(UdfError::Type)` only when the decimal has a non-zero fractional part
-* *AND* a typed accessor invoked on a column whose `Value` variant does not match the requested type (and is not the documented `Numeric`→`i64` case) MUST return `Err(UdfError::Type)` rather than silently coercing
-
-### Scenario: UdfRun default single-call hooks return Unimplemented
-
-* *GIVEN* a struct that implements `UdfRun` providing only `run`
-* *WHEN* a single-call hook (`default_output_columns`, `generate_sql_for_import_spec`, `generate_sql_for_export_spec`, `virtual_schema_adapter_call`) is invoked
-* *THEN* the default implementation MUST return `UdfError::Unimplemented`
-* *AND* the trait MUST compile without the author providing those hooks
-
+<!-- DELTA:NEW -->
 ### Scenario: UdfContext exposes handshake identity and origin metadata
 
 * *GIVEN* the `UdfContext` trait
@@ -51,7 +19,9 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 * *AND* every accessor MUST be a provided (defaulted) trait method, mirroring `memory_limit()`, so existing `UdfContext` implementations continue to compile without supplying it
 * *AND* the numeric accessors MUST default to `0`, the owned-string accessors MUST default to the empty string, and the optional accessors MUST default to `None`, each denoting "not reported"
 * *AND* none of the accessors MAY be gated behind the `connect-back` feature, because handshake metadata is plain DB-supplied context rather than a connect-back capability
+<!-- /DELTA:NEW -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: UdfContext exposes the per-instance memory limit
 
 * *GIVEN* the `UdfContext` trait
@@ -60,3 +30,4 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 * *AND* the accessor MUST be a provided (defaulted) trait method returning `0` (denoting "no limit reported") so existing `UdfContext` implementations continue to compile without supplying it, mirroring how the SDK keeps the data-access surface backward compatible
 * *AND* the accessor MUST NOT be gated behind the `connect-back` feature, because the limit is plain handshake metadata rather than a connect-back capability
 * *AND* the accessor MUST follow the same defaulted-accessor pattern as the identity and origin metadata accessors, with the host context bridge overriding the default to return the exact byte value carried on `UdfMeta::maximal_memory_limit`
+<!-- /DELTA:CHANGED -->

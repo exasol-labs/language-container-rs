@@ -29,16 +29,22 @@ pub struct UdfMeta {
     pub single_call_mode: bool,
     pub source_code: String,
     pub script_name: String,
+    pub script_schema: String,
+    pub database_name: String,
+    pub database_version: String,
     pub(crate) session_id: u64,
+    pub(crate) statement_id: u32,
     pub(crate) node_id: u32,
-    #[allow(dead_code)]
     pub(crate) node_count: u32,
     pub(crate) vm_id: u64,
+    /// Current user reported by the DB, when present (proto `optional`).
+    pub current_user: Option<String>,
+    /// Current schema reported by the DB, when present (proto `optional`).
+    pub current_schema: Option<String>,
+    /// Scope user reported by the DB, when present (proto `optional`).
+    pub scope_user: Option<String>,
     /// Bytes, per-UDF-instance resident-memory limit.
     pub maximal_memory_limit: u64,
-    /// Connect-back credentials surfaced during the handshake, when the DB
-    /// provided them (via an `MT_IMPORT` connection-information exchange).
-    pub conn_info: Option<ConnInfo>,
 }
 
 /// Connection credentials returned by the DB in response to an MT_IMPORT
@@ -172,12 +178,18 @@ impl UdfMeta {
             single_call_mode: meta.single_call_mode,
             source_code: info.source_code.clone(),
             script_name: info.script_name.clone(),
+            script_schema: info.script_schema.clone(),
+            database_name: info.database_name.clone(),
+            database_version: info.database_version.clone(),
             session_id: info.session_id,
+            statement_id: info.statement_id,
             node_id: info.node_id,
             node_count: info.node_count,
             vm_id: info.vm_id,
+            current_user: info.current_user.clone(),
+            current_schema: info.current_schema.clone(),
+            scope_user: info.scope_user.clone(),
             maximal_memory_limit: info.maximal_memory_limit,
-            conn_info: None,
         })
     }
 
@@ -186,9 +198,19 @@ impl UdfMeta {
         self.session_id
     }
 
+    /// Statement number within the current session.
+    pub fn statement_id(&self) -> u32 {
+        self.statement_id
+    }
+
     /// Node ID (0-based) of the cluster node running this UDF instance.
     pub fn node_id(&self) -> u32 {
         self.node_id
+    }
+
+    /// Number of nodes in the Exasol cluster.
+    pub fn node_count(&self) -> u32 {
+        self.node_count
     }
 
     /// Long unique ID of the VM / UDF process instance.
@@ -340,6 +362,43 @@ mod tests {
         // PbExactlyOnce (the first variant) via unwrap_or(IterType::default()),
         // so Default::default() is equivalent to the previous explicit form.
         ExascriptMetadata::default()
+    }
+
+    #[test]
+    fn from_pb_decodes_handshake_metadata_without_conn_info() {
+        let info = ExascriptInfo {
+            database_name: "EXADB".to_string(),
+            database_version: "2026.1.0".to_string(),
+            script_name: "MY_SCRIPT".to_string(),
+            script_schema: "MY_SCHEMA".to_string(),
+            session_id: 1234567890,
+            statement_id: 7,
+            node_count: 3,
+            node_id: 2,
+            vm_id: 9876543210,
+            maximal_memory_limit: 64 * 1024 * 1024,
+            // Present optional: decodes to Some; absent ones stay None.
+            current_user: Some("ALICE".to_string()),
+            current_schema: None,
+            scope_user: Some("BOB".to_string()),
+            ..Default::default()
+        };
+        let udf = UdfMeta::from_pb(&make_meta(), &info).unwrap();
+
+        assert_eq!(udf.database_name, "EXADB");
+        assert_eq!(udf.database_version, "2026.1.0");
+        assert_eq!(udf.script_name, "MY_SCRIPT");
+        assert_eq!(udf.script_schema, "MY_SCHEMA");
+        assert_eq!(udf.session_id(), 1234567890);
+        assert_eq!(udf.statement_id(), 7);
+        assert_eq!(udf.node_count(), 3);
+        assert_eq!(udf.node_id(), 2);
+        assert_eq!(udf.vm_id(), 9876543210);
+        assert_eq!(udf.maximal_memory_limit, 64 * 1024 * 1024);
+        // Optionals mirror the proto present/absent distinction verbatim.
+        assert_eq!(udf.current_user, Some("ALICE".to_string()));
+        assert_eq!(udf.current_schema, None);
+        assert_eq!(udf.scope_user, Some("BOB".to_string()));
     }
 
     #[test]
