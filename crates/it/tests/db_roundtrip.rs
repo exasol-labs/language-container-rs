@@ -666,7 +666,8 @@ async fn single_call_adapter_surfaces_live_handshake_metadata(
     // So the adapter script MUST be named `single_call_udf`. An earlier scenario
     // registered a SCALAR script of that name; drop it first so the ADAPTER
     // script can take the name cleanly.
-    conn.execute("DROP SCRIPT IF EXISTS single_call_udf").await?;
+    conn.execute("DROP SCRIPT IF EXISTS single_call_udf")
+        .await?;
     conn.execute(&format!(
         "CREATE OR REPLACE RUST ADAPTER SCRIPT single_call_udf AS\n\
          %udf_object {udf_object};\n/"
