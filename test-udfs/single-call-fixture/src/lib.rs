@@ -6,7 +6,8 @@
 //! dispatcher can be tested against a real `.so` boundary. The other two hooks
 //! are left `None` to verify the runtime replies `MT_UNDEFINED_CALL` for them.
 
-use std::ffi::{CStr, CString, c_char};
+use exasol_udf_sdk::context::UdfContext;
+use std::ffi::{CString, c_char};
 
 /// Hand a Rust string to the runtime through a `libc::malloc`-backed buffer.
 ///
@@ -37,18 +38,31 @@ unsafe extern "C" fn default_output_columns(result: *mut *mut c_char) -> i32 {
 }
 
 unsafe extern "C" fn virtual_schema_adapter_call(
-    _ctx: *mut std::ffi::c_void,
-    json_arg: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    _json_arg: *const c_char,
     result: *mut *mut c_char,
 ) -> i32 {
     unsafe {
-        let arg = if json_arg.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr(json_arg).to_string_lossy().into_owned()
-        };
-        write_result(&format!(r#"{{"echo":{arg}}}"#), result);
-        0
+        // Restore the host context via the ABI's double indirection. The runtime
+        // builds `ctx` as `&mut (&mut dyn UdfContext) as *mut _ as *mut c_void`
+        // (see `invoke_vs_adapter_call` in exa-udf-runtime/src/single_call.rs and
+        // the `call_ctx_arg_hook` contract in loader.rs), so we cast back to
+        // `*mut &mut dyn UdfContext` and dereference twice.
+        let ctx: &mut dyn UdfContext = &mut **(ctx as *mut &mut dyn UdfContext);
+        // Surface the live handshake metadata through the deliberate-error
+        // channel: the runtime reads this string off the `result` out-pointer
+        // when the hook returns a non-zero code.
+        write_result(
+            &format!(
+                "HANDSHAKE_META node_count={} node_id={} session_id={} script_name={}",
+                ctx.node_count(),
+                ctx.node_id(),
+                ctx.session_id(),
+                ctx.script_name(),
+            ),
+            result,
+        );
+        1
     }
 }
 

@@ -169,6 +169,8 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario single_call_default_output_columns ok");
     single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_unimplemented ok");
+    single_call_adapter_surfaces_live_handshake_metadata(&mut conn, &sc_path).await?;
+    eprintln!("[it] scenario single_call_adapter_handshake_metadata ok");
 
     connect_back_cluster_ip_emits_node_ip(&mut conn, &cb_cluster_ip_path).await?;
     eprintln!("[it] scenario connect_back_cluster_ip ok");
@@ -620,6 +622,100 @@ async fn single_call_unimplemented_returns_undefined(
     _conn: &mut Connection,
     _udf_object: &str,
 ) -> Result<()> {
+    Ok(())
+}
+
+/// Extract the digits following `<key>=` in the adapter error text and parse
+/// them as a `u64`. The text is embedded in a wrapped SQL error, so we locate
+/// the `key=` marker and consume the contiguous run of ASCII digits after it.
+fn parse_meta_u64(haystack: &str, key: &str) -> Result<u64> {
+    let marker = format!("{key}=");
+    let start = haystack
+        .find(&marker)
+        .ok_or_else(|| anyhow!("{key} not present in adapter error text: {haystack:?}"))?
+        + marker.len();
+    let digits: String = haystack[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        bail!("{key} has no numeric value in adapter error text: {haystack:?}");
+    }
+    digits
+        .parse::<u64>()
+        .map_err(|e| anyhow!("{key} {digits:?} not a u64: {e}"))
+}
+
+/// Scenario: a `createVirtualSchema` adapter single-call
+/// (`SC_FN_VIRTUAL_SCHEMA_ADAPTER_CALL`) sees live handshake metadata.
+///
+/// The `single-call-fixture` adapter shim reads the live `UdfContext` handshake
+/// accessors and returns rc=1 with an error string of the form
+/// `HANDSHAKE_META node_count=<n> node_id=<n> session_id=<n> script_name=<s>`,
+/// so the `CREATE VIRTUAL SCHEMA` is expected to FAIL with that metadata in the
+/// surfaced error text. A non-zero `node_count` proves the fix for issue #41 —
+/// the single-call accessors previously returned the neutral default `0` for a
+/// cluster of any size. Mirrors `handshake_metadata_udf_emits_session_and_node`:
+/// same neutral-default gate, same parse-and-check style.
+async fn single_call_adapter_surfaces_live_handshake_metadata(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    // The fixture exports a single entry point, `__exa_udf_entry_SINGLE_CALL_UDF`,
+    // and the loader resolves the entry point from the (uppercased) script name.
+    // So the adapter script MUST be named `single_call_udf`. An earlier scenario
+    // registered a SCALAR script of that name; drop it first so the ADAPTER
+    // script can take the name cleanly.
+    conn.execute("DROP SCRIPT IF EXISTS single_call_udf").await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST ADAPTER SCRIPT single_call_udf AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let result = conn
+        .execute("CREATE VIRTUAL SCHEMA vs_handshake_meta USING it_rust.single_call_udf")
+        .await;
+    let summary = match result {
+        Ok(_) => {
+            // The shim always returns rc=1, so a successful create means the live
+            // metadata never reached the adapter hook. Best-effort cleanup.
+            let _ = conn
+                .execute("DROP VIRTUAL SCHEMA IF EXISTS vs_handshake_meta CASCADE")
+                .await;
+            bail!(
+                "CREATE VIRTUAL SCHEMA unexpectedly succeeded — the adapter shim \
+                 should have failed with live handshake metadata in the error text"
+            );
+        }
+        Err(e) => e.to_string(),
+    };
+
+    if !summary.contains("HANDSHAKE_META") {
+        bail!("adapter error did not carry the HANDSHAKE_META marker: {summary:?}");
+    }
+
+    // Core assertion: node_count != 0 proves live handshake metadata reached the
+    // virtual-schema adapter call (the neutral default is 0).
+    let node_count = parse_meta_u64(&summary, "node_count")?;
+    if node_count == 0 {
+        bail!(
+            "adapter node_count is 0 (the neutral default) — live handshake \
+             metadata did not reach the virtual-schema adapter call: {summary:?}"
+        );
+    }
+
+    // node_id is 0-based (single-node Docker is node 0), so only assert it is
+    // present and parseable; session_id likewise must be present and parseable.
+    parse_meta_u64(&summary, "node_id")?;
+    parse_meta_u64(&summary, "session_id")?;
+
+    if !summary.to_ascii_uppercase().contains("SINGLE_CALL_UDF") {
+        bail!(
+            "adapter error text does not contain the registered script name \
+             SINGLE_CALL_UDF: {summary:?}"
+        );
+    }
     Ok(())
 }
 

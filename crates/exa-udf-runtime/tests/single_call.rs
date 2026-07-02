@@ -142,8 +142,15 @@ fn dispatch_invokes_default_output_columns() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
+/// The `virtual_schema_adapter_call` hook restores the live `UdfContext` off the
+/// ABI double-indirection and deliberately fails (rc=1), writing the live
+/// handshake metadata into the error out-pointer. The runtime surfaces a hook
+/// error by closing the wire with MT_CLOSE (F-UDF-CL-RUST-9001) carrying that
+/// text and returning `Err` from `run()`. The mock controls the handshake
+/// values (all numerics default to 0, `script_name` = "SINGLE_CALL_UDF"), so we
+/// assert the exact echoed metadata rather than a non-zero gate.
 #[test]
-fn dispatch_invokes_virtual_schema_adapter_call() {
+fn dispatch_surfaces_adapter_hook_error() {
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -172,22 +179,42 @@ fn dispatch_invokes_virtual_schema_adapter_call() {
         ),
     );
 
+    // The hook returns rc=1, so the runtime does not reply MT_RETURN; it closes
+    // the wire with an MT_CLOSE carrying the fixture's HANDSHAKE_META error text
+    // (prefixed with the F-UDF-CL-RUST-9001 close code).
     let req = recv_req(&server);
     assert_eq!(
         req.r#type,
-        MessageType::MtReturn as i32,
-        "expected MT_RETURN"
+        MessageType::MtClose as i32,
+        "adapter hook error must close the wire with MT_CLOSE"
     );
-    let result = req.call_result.expect("call_result").result;
-    assert_eq!(result, r#"{"echo":{}}"#, "VS adapter echoes the json_arg");
-    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("F-UDF-CL-RUST-9001"),
+        "close carries the UDF error close code: {close_msg:?}"
+    );
+    assert!(
+        close_msg.contains(
+            "HANDSHAKE_META node_count=0 node_id=0 session_id=0 script_name=SINGLE_CALL_UDF"
+        ),
+        "close echoes the live handshake metadata read off the ctx pointer: {close_msg:?}"
+    );
 
-    let req = recv_req(&server);
-    assert_eq!(req.r#type, MessageType::MtFinished as i32);
-    send_resp(&server, &response(MessageType::MtFinished, conn_id));
-
+    // The runtime surfaces the same error to the caller and does not wait for a
+    // reply to the close; the client thread ends with Err.
     let result = client.join().expect("client thread panicked");
-    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+    let err = result.expect_err("adapter hook error must surface as Err");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains(
+            "HANDSHAKE_META node_count=0 node_id=0 session_id=0 script_name=SINGLE_CALL_UDF"
+        ),
+        "runtime error surfaces the live handshake metadata: {err_msg:?}"
+    );
 }
 
 #[test]
@@ -262,14 +289,17 @@ fn mt_return_ack_terminates_session() {
     let client = spawn_runtime(endpoint.clone());
     handshake(&server, conn_id, &source);
 
+    // Use the always-succeeding `default_output_columns` hook so the container
+    // produces an MT_RETURN to ack; the VS-adapter hook now deliberately fails
+    // (rc=1), which would close the wire instead of returning.
     let req = recv_req(&server);
     assert_eq!(req.r#type, MessageType::MtRun as i32);
     send_resp(
         &server,
         &call_response(
             conn_id,
-            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
-            Some("{}"),
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
         ),
     );
 
