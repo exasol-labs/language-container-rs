@@ -22,8 +22,13 @@ pub fn run_single_call(
     transport: &ZmqTransport,
     proto: &mut Protocol,
     udf: &LoadedUdf,
-    _meta: &UdfMeta,
+    meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
+    // Snapshot the handshake metadata once so every single-call hook that
+    // receives a `SingleCallContext` (the virtual-schema adapter call) surfaces
+    // the same live `exascript_info` values the streaming `HostContextBridge`
+    // does, instead of the trait's neutral defaults.
+    let handshake = crate::rowset::HandshakeMeta::from(meta);
     // Mirror the canonical C++ single-call loop:
     //   loop { MT_RUN -> MT_CALL; dispatch; MT_RETURN/-UNDEFINED; MT_DONE }
     //   then MT_FINISHED.
@@ -35,7 +40,14 @@ pub fn run_single_call(
             HostEvent::SingleCall {
                 fn_id, json_arg, ..
             } => {
-                let reply = match invoke_hook(transport, proto, udf, fn_id, json_arg.as_deref())? {
+                let reply = match invoke_hook(
+                    transport,
+                    proto,
+                    udf,
+                    fn_id,
+                    json_arg.as_deref(),
+                    handshake.clone(),
+                )? {
                     HookOutcome::Returned(result) => proto.return_request(result),
                     HookOutcome::Undefined => proto.undefined_call_request(fn_name(fn_id)),
                 };
@@ -98,6 +110,7 @@ fn invoke_hook(
     udf: &LoadedUdf,
     fn_id: SingleCallFunctionId,
     json_arg: Option<&str>,
+    handshake: crate::rowset::HandshakeMeta,
 ) -> Result<HookOutcome, RuntimeError> {
     let arg = json_arg.unwrap_or("");
     let result = match fn_id {
@@ -105,7 +118,7 @@ fn invoke_hook(
             udf.call_default_output_columns()
         },
         SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => {
-            return invoke_vs_adapter_call(transport, proto, udf, arg);
+            return invoke_vs_adapter_call(transport, proto, udf, arg, handshake);
         }
         SingleCallFunctionId::ScFnGenerateSqlForImportSpec => unsafe {
             udf.call_generate_sql_for_import_spec(arg)
@@ -130,6 +143,7 @@ fn invoke_vs_adapter_call(
     proto: &mut Protocol,
     udf: &LoadedUdf,
     arg: &str,
+    handshake: crate::rowset::HandshakeMeta,
 ) -> Result<HookOutcome, RuntimeError> {
     // `transport`/`proto` feed the on-demand MT_IMPORT closure only when
     // connect-back is enabled; without it the context's `connection()` /
@@ -162,6 +176,7 @@ fn invoke_vs_adapter_call(
     });
 
     let mut bridge = crate::rowset::SingleCallContext::new(
+        handshake,
         #[cfg(feature = "connect-back")]
         conn_requester,
     );

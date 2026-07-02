@@ -1462,6 +1462,11 @@ pub struct SingleCallContext<'a> {
     /// Last error captured from a context method, surfaced through
     /// `RuntimeError::Udf`. A `Cell` because `connection()` borrows `&self`.
     last_error: std::cell::Cell<Option<String>>,
+    /// Handshake metadata (`exascript_info` identity/origin fields plus the
+    /// memory limit) threaded in at construction so the single-call context can
+    /// override the SDK's defaulted `UdfContext` accessors with the live
+    /// DB-supplied values, giving parity with `HostContextBridge`.
+    handshake: HandshakeMeta,
     #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
     /// Anchors the `'a` lifetime when connect-back is disabled (the requester is
@@ -1471,9 +1476,13 @@ pub struct SingleCallContext<'a> {
 }
 
 impl<'a> SingleCallContext<'a> {
-    pub fn new(#[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>) -> Self {
+    pub fn new(
+        handshake: HandshakeMeta,
+        #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
+    ) -> Self {
         SingleCallContext {
             last_error: std::cell::Cell::new(None),
+            handshake,
             #[cfg(feature = "connect-back")]
             conn_requester,
             #[cfg(not(feature = "connect-back"))]
@@ -1495,6 +1504,58 @@ impl<'a> SingleCallContext<'a> {
 impl UdfContext for SingleCallContext<'_> {
     fn num_columns(&self) -> usize {
         0
+    }
+
+    fn memory_limit(&self) -> u64 {
+        self.handshake.memory_limit
+    }
+
+    fn session_id(&self) -> u64 {
+        self.handshake.session_id
+    }
+
+    fn statement_id(&self) -> u32 {
+        self.handshake.statement_id
+    }
+
+    fn node_id(&self) -> u32 {
+        self.handshake.node_id
+    }
+
+    fn node_count(&self) -> u32 {
+        self.handshake.node_count
+    }
+
+    fn vm_id(&self) -> u64 {
+        self.handshake.vm_id
+    }
+
+    fn database_name(&self) -> String {
+        self.handshake.database_name.clone()
+    }
+
+    fn database_version(&self) -> String {
+        self.handshake.database_version.clone()
+    }
+
+    fn script_name(&self) -> String {
+        self.handshake.script_name.clone()
+    }
+
+    fn script_schema(&self) -> String {
+        self.handshake.script_schema.clone()
+    }
+
+    fn current_user(&self) -> Option<String> {
+        self.handshake.current_user.clone()
+    }
+
+    fn current_schema(&self) -> Option<String> {
+        self.handshake.current_schema.clone()
+    }
+
+    fn scope_user(&self) -> Option<String> {
+        self.handshake.scope_user.clone()
     }
 
     fn debug_level(&self) -> tracing::Level {
@@ -1620,13 +1681,16 @@ mod tests {
     #[test]
     fn single_call_context_debug_level_returns_valid_level() {
         #[cfg(feature = "connect-back")]
-        let ctx = SingleCallContext::new(Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                "no credential fetcher".into(),
-            ))
-        }));
+        let ctx = SingleCallContext::new(
+            HandshakeMeta::default(),
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher".into(),
+                ))
+            }),
+        );
         #[cfg(not(feature = "connect-back"))]
-        let ctx = SingleCallContext::new();
+        let ctx = SingleCallContext::new(HandshakeMeta::default());
 
         let level = ctx.debug_level();
         assert!(
@@ -2173,6 +2237,57 @@ mod tests {
         assert_eq!(bridge.current_user(), Some("ALICE".to_string()));
         assert_eq!(bridge.current_schema(), None);
         assert_eq!(bridge.scope_user(), None);
+    }
+
+    #[test]
+    fn single_call_context_returns_handshake_metadata() {
+        // A present optional (current_user) and absent optionals (current_schema,
+        // scope_user) prove the single-call context mirrors the proto
+        // present/absent distinction, same as HostContextBridge.
+        let handshake = HandshakeMeta {
+            session_id: 4242,
+            statement_id: 9,
+            node_id: 1,
+            node_count: 4,
+            vm_id: 777777,
+            memory_limit: 256 * 1024 * 1024,
+            database_name: "EXADB".to_string(),
+            database_version: "2026.1.0".to_string(),
+            script_name: "MY_SCRIPT".to_string(),
+            script_schema: "MY_SCHEMA".to_string(),
+            current_user: Some("ALICE".to_string()),
+            current_schema: None,
+            scope_user: None,
+        };
+
+        #[cfg(feature = "connect-back")]
+        let ctx = SingleCallContext::new(
+            handshake,
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
+        );
+        #[cfg(not(feature = "connect-back"))]
+        let ctx = SingleCallContext::new(handshake);
+
+        // Numeric accessors return the exact UdfMeta values, no rescaling.
+        assert_eq!(ctx.session_id(), 4242);
+        assert_eq!(ctx.statement_id(), 9);
+        assert_eq!(ctx.node_id(), 1);
+        assert_eq!(ctx.node_count(), 4);
+        assert_eq!(ctx.vm_id(), 777777);
+        assert_eq!(ctx.memory_limit(), 256 * 1024 * 1024);
+        // Owned-string accessors return the exact values.
+        assert_eq!(ctx.database_name(), "EXADB");
+        assert_eq!(ctx.database_version(), "2026.1.0");
+        assert_eq!(ctx.script_name(), "MY_SCRIPT");
+        assert_eq!(ctx.script_schema(), "MY_SCHEMA");
+        // Optionals: Some when present, None when absent.
+        assert_eq!(ctx.current_user(), Some("ALICE".to_string()));
+        assert_eq!(ctx.current_schema(), None);
+        assert_eq!(ctx.scope_user(), None);
     }
 
     // -----------------------------------------------------------------------
