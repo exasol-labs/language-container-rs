@@ -20,7 +20,7 @@
 The three published crates are the customer-facing API; the rest are marked
 `publish = false` and ship only as the prebuilt container binary.
 
-`connect-back-query`, `connect-back-insert`, `connect-back-crunch`, `connect-back-cluster-ip`, and `spike-connect` are in `default-members` and build with plain `cargo build` under the unified 1.92 / edition-2024 toolchain.
+`connect-back-query`, `connect-back-insert`, `connect-back-crunch`, `connect-back-cluster-ip`, and `spike-connect` are in `default-members` and build with plain `cargo build` under the unified 1.94 / edition-2024 toolchain.
 
 `it` is excluded from `default-members` because it requires a live Exasol Docker container, not for any toolchain reason. Build and test it with:
 
@@ -28,7 +28,7 @@ The three published crates are the customer-facing API; the rest are marked
 cargo test -p it --features integration
 ```
 
-The pinned workspace toolchain (`rust-toolchain.toml`) is 1.92.
+The pinned workspace toolchain (`rust-toolchain.toml`) is 1.94.
 
 ## exasol-udf-sdk — author-facing crate
 
