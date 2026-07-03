@@ -2,7 +2,7 @@
 
 ![language-container-rs logo](assets/logo.svg)
 
-![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange.svg)
+![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
@@ -25,7 +25,7 @@ The workspace ships three crates for UDF authors, container operators, and build
 
 - **Docker** — to build the language container image
 - **[exapump](https://github.com/exasol-labs/exapump)** — to upload to BucketFS and run SQL
-- **Rust 1.92+** with `cargo` — to compile UDFs
+- **Rust 1.94+** with `cargo` — to compile UDFs
 - An Exasol instance: [Exasol Personal](https://github.com/exasol/exasol-personal), [SaaS free trial](https://cloud.exasol.com), or [Docker image](https://hub.docker.com/r/exasol/docker-db)
 
 ## Install the language container

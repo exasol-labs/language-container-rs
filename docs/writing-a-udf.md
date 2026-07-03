@@ -6,7 +6,7 @@
 
 ## Prerequisites
 
-- Rust 1.92+ with the musl target:
+- Rust 1.94+ with the musl target:
   ```bash
   rustup target add x86_64-unknown-linux-musl
   ```
