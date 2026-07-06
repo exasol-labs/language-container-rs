@@ -269,11 +269,42 @@ impl EmitBuffer {
         let n_rows = self.rows.len();
         let n_cols = meta.len();
 
-        let mut data_string: Vec<String> = Vec::new();
-        let mut data_bool: Vec<bool> = Vec::new();
-        let mut data_int32: Vec<i32> = Vec::new();
-        let mut data_int64: Vec<i64> = Vec::new();
-        let mut data_double: Vec<f64> = Vec::new();
+        // Pre-size each type block to its exact upper bound (its column count ×
+        // n_rows) instead of growing via `Vec::new()` + `push`, which
+        // reallocates through the standard doubling growth curve. NULL cells
+        // occupy no slot (see the loop below), so the true final length can be
+        // at most this bound — `with_capacity` at the bound is therefore always
+        // sufficient and never wasteful beyond the NULL count.
+        let mut string_cols = 0usize;
+        let mut bool_cols = 0usize;
+        let mut int32_cols = 0usize;
+        let mut int64_cols = 0usize;
+        let mut double_cols = 0usize;
+        for col in meta {
+            match &col.typ {
+                ExaType::Numeric { .. }
+                | ExaType::Date
+                | ExaType::Timestamp
+                | ExaType::TimestampTz
+                | ExaType::String { .. }
+                | ExaType::Char { .. }
+                | ExaType::Geometry
+                | ExaType::HashType
+                | ExaType::IntervalYearToMonth
+                | ExaType::IntervalDayToSecond => string_cols += 1,
+                ExaType::Boolean => bool_cols += 1,
+                ExaType::Int32 => int32_cols += 1,
+                ExaType::Int64 => int64_cols += 1,
+                ExaType::Double => double_cols += 1,
+                ExaType::Unsupported => {}
+            }
+        }
+
+        let mut data_string: Vec<String> = Vec::with_capacity(string_cols * n_rows);
+        let mut data_bool: Vec<bool> = Vec::with_capacity(bool_cols * n_rows);
+        let mut data_int32: Vec<i32> = Vec::with_capacity(int32_cols * n_rows);
+        let mut data_int64: Vec<i64> = Vec::with_capacity(int64_cols * n_rows);
+        let mut data_double: Vec<f64> = Vec::with_capacity(double_cols * n_rows);
         let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
 
         // Row-major within each type block: iterate rows, then columns, so a
@@ -722,11 +753,40 @@ fn encode_slice(
     let n_rows = batch.num_rows();
     let n_cols = meta.len();
 
-    let mut data_string: Vec<String> = Vec::new();
-    let mut data_bool: Vec<bool> = Vec::new();
-    let mut data_int32: Vec<i32> = Vec::new();
-    let mut data_int64: Vec<i64> = Vec::new();
-    let mut data_double: Vec<f64> = Vec::new();
+    // Pre-size each type block to its exact upper bound (its column count ×
+    // n_rows), mirroring `to_proto`'s pre-sizing, instead of growing via
+    // `Vec::new()` + `push`.
+    let mut string_cols = 0usize;
+    let mut bool_cols = 0usize;
+    let mut int32_cols = 0usize;
+    let mut int64_cols = 0usize;
+    let mut double_cols = 0usize;
+    for acc in &accessors {
+        match acc {
+            ColAccessor::Int32(_) => int32_cols += 1,
+            ColAccessor::Int64(_) => int64_cols += 1,
+            ColAccessor::Float64(_) => double_cols += 1,
+            ColAccessor::Boolean(_) => bool_cols += 1,
+            ColAccessor::Utf8(_)
+            | ColAccessor::LargeUtf8(_)
+            | ColAccessor::Date32(_)
+            | ColAccessor::TsSecond(_)
+            | ColAccessor::TsMillisecond(_)
+            | ColAccessor::TsMicrosecond(_)
+            | ColAccessor::TsNanosecond(_)
+            | ColAccessor::Decimal128(_, _)
+            | ColAccessor::NumericFromInt32(_)
+            | ColAccessor::NumericFromInt64(_)
+            | ColAccessor::NumericFromFloat64(_) => string_cols += 1,
+            ColAccessor::Unsupported => {}
+        }
+    }
+
+    let mut data_string: Vec<String> = Vec::with_capacity(string_cols * n_rows);
+    let mut data_bool: Vec<bool> = Vec::with_capacity(bool_cols * n_rows);
+    let mut data_int32: Vec<i32> = Vec::with_capacity(int32_cols * n_rows);
+    let mut data_int64: Vec<i64> = Vec::with_capacity(int64_cols * n_rows);
+    let mut data_double: Vec<f64> = Vec::with_capacity(double_cols * n_rows);
     let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
 
     // Pre-capture per-column null buffers once (bulk null read, not per cell).
@@ -954,42 +1014,277 @@ const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.9f";
 /// ISO-8601 `T`-separated fallback some sources emit for timestamps.
 const TIMESTAMP_FORMAT_ISO: &str = "%Y-%m-%dT%H:%M:%S%.f";
 
+/// Parse an exactly-2-digit ASCII decimal field (e.g. `MM`, `DD`, `HH`, `MI`,
+/// `SS`), returning `None` for anything that is not two ASCII digits.
+fn parse_2digit(b: &[u8]) -> Option<u32> {
+    if b.len() != 2 || !b[0].is_ascii_digit() || !b[1].is_ascii_digit() {
+        return None;
+    }
+    Some((b[0] - b'0') as u32 * 10 + (b[1] - b'0') as u32)
+}
+
+/// Parse an exactly-4-digit ASCII decimal field (`YYYY`), returning `None` for
+/// anything that is not four ASCII digits.
+fn parse_4digit(b: &[u8]) -> Option<u32> {
+    if b.len() != 4 {
+        return None;
+    }
+    let mut v = 0u32;
+    for &c in b {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (c - b'0') as u32;
+    }
+    Some(v)
+}
+
+/// Hand-rolled fixed-format parser for the DATE wire form `YYYY-MM-DD`,
+/// replacing `NaiveDate::parse_from_str`'s generic strptime-style interpreter
+/// with direct byte-position digit reads (the mirror image of
+/// `fast_date_to_string`). Scoped to the exact 10-byte fixed-width layout the
+/// DB always sends (see the module doc comment above `DATE_FORMAT`); anything
+/// that doesn't match this exact shape (non-standard digit widths, wrong
+/// separators, garbage) returns `None` so the caller falls back to
+/// `NaiveDate::parse_from_str`, preserving that path's leniency exactly (see
+/// `decode_string_block_preserves_leniency_when_fast_path_defers`). Verified
+/// byte-identical to the chrono path by
+/// `fast_string_block_ingest_tests::fast_parse_date_matches_chrono_parse_for_valid_dates`.
+fn fast_parse_date(s: &str) -> Option<NaiveDate> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let year = parse_4digit(&b[0..4])?;
+    let month = parse_2digit(&b[5..7])?;
+    let day = parse_2digit(&b[8..10])?;
+    NaiveDate::from_ymd_opt(year as i32, month, day)
+}
+
+/// Hand-rolled fixed-format parser for the TIMESTAMP wire form
+/// `YYYY-MM-DD HH:MM:SS[.f]` (0 to 9 fractional digits; also accepts the
+/// `T`-separated ISO variant), replacing the two generic
+/// `NaiveDateTime::parse_from_str` attempts with direct byte-position digit
+/// reads — the mirror image of `fast_timestamp_to_string`. Anything that
+/// doesn't match this exact fixed shape (non-standard digit widths, a leap
+/// second, more than 9 fractional digits, an unrecognised separator, garbage)
+/// returns `None` so the caller falls back to the existing two-attempt chrono
+/// chain, preserving that path's leniency exactly (see
+/// `decode_string_block_preserves_leniency_when_fast_path_defers`). Verified
+/// byte-identical to the chrono path by
+/// `fast_string_block_ingest_tests::fast_parse_timestamp_matches_chrono_parse_for_valid_timestamps`.
+fn fast_parse_timestamp(s: &str) -> Option<NaiveDateTime> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let sep = b[10];
+    if sep != b' ' && sep != b'T' {
+        return None;
+    }
+
+    let year = parse_4digit(&b[0..4])?;
+    let month = parse_2digit(&b[5..7])?;
+    let day = parse_2digit(&b[8..10])?;
+    let hour = parse_2digit(&b[11..13])?;
+    let minute = parse_2digit(&b[14..16])?;
+    let second = parse_2digit(&b[17..19])?;
+
+    let nanos = match b.len() {
+        19 => 0u32,
+        len if len > 20 && b[19] == b'.' => {
+            let frac = &b[20..];
+            if frac.is_empty() || frac.len() > 9 || !frac.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let mut value = 0u32;
+            for &c in frac {
+                value = value * 10 + (c - b'0') as u32;
+            }
+            value * 10u32.pow(9 - frac.len() as u32)
+        }
+        _ => return None,
+    };
+
+    let date = NaiveDate::from_ymd_opt(year as i32, month, day)?;
+    date.and_hms_nano_opt(hour, minute, second, nanos)
+}
+
 /// Decode one non-null `data_string` cell into its typed `Value` per the column
 /// type. NUMERIC/DATE/TIMESTAMP parse into their typed payloads; a parse failure
 /// yields `Value::Null` so corrupt wire data stays decodable rather than
 /// aborting the whole batch. Extended string-backed types pass through verbatim.
+///
+/// DATE/TIMESTAMP first try the hand-rolled fixed-format parsers above
+/// (`fast_parse_date`/`fast_parse_timestamp`), falling back to the original
+/// `chrono::parse_from_str` chain for anything outside their fixed-width
+/// scope — the same byte-identical-with-fallback shape as the emit-side
+/// `value_to_block_string` fast formatters.
 fn decode_string_block(typ: &ExaType, s: String) -> Value {
     match typ {
         ExaType::Numeric { .. } => match Decimal::try_from(s.as_str()) {
             Ok(d) => Value::Numeric(d),
             Err(_) => Value::Null,
         },
-        ExaType::Date => match NaiveDate::parse_from_str(&s, DATE_FORMAT) {
-            Ok(d) => Value::Date(d),
-            Err(_) => Value::Null,
-        },
+        ExaType::Date => {
+            match fast_parse_date(&s).or_else(|| NaiveDate::parse_from_str(&s, DATE_FORMAT).ok()) {
+                Some(d) => Value::Date(d),
+                None => Value::Null,
+            }
+        }
         ExaType::Timestamp | ExaType::TimestampTz => {
-            match NaiveDateTime::parse_from_str(&s, TIMESTAMP_PARSE)
-                .or_else(|_| NaiveDateTime::parse_from_str(&s, TIMESTAMP_FORMAT_ISO))
+            match fast_parse_timestamp(&s)
+                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_PARSE).ok())
+                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_FORMAT_ISO).ok())
             {
-                Ok(ts) => Value::Timestamp(ts),
-                Err(_) => Value::Null,
+                Some(ts) => Value::Timestamp(ts),
+                None => Value::Null,
             }
         }
         _ => Value::String(s),
     }
 }
 
+/// Hand-rolled digit-writer replacing `Decimal`'s `Display` impl for the
+/// emit-side string block. `itoa::Buffer::format` writes the `i128`/`u128`
+/// digit run into a stack buffer with no intermediate `String`
+/// allocation-then-reparse; the decimal point is then spliced in directly.
+/// Mirrors `Decimal::fmt` exactly (see `value.rs`), verified byte-identical by
+/// `fast_string_block_tests::fast_decimal_matches_display_for_all_cases`.
+fn fast_decimal_to_string(d: &Decimal) -> String {
+    let mut buf = itoa::Buffer::new();
+    if d.scale == 0 {
+        return buf.format(d.unscaled).to_string();
+    }
+
+    let negative = d.unscaled < 0;
+    let digits = buf.format(d.unscaled.unsigned_abs());
+    let scale = d.scale as usize;
+
+    let mut out = String::with_capacity(digits.len() + scale + 2);
+    if negative {
+        out.push('-');
+    }
+    if digits.len() <= scale {
+        out.push_str("0.");
+        for _ in 0..(scale - digits.len()) {
+            out.push('0');
+        }
+        out.push_str(digits);
+    } else {
+        let point = digits.len() - scale;
+        out.push_str(&digits[..point]);
+        out.push('.');
+        out.push_str(&digits[point..]);
+    }
+    out
+}
+
+/// Write a zero-padded 2-digit decimal number (0..=99) directly as ASCII
+/// bytes, avoiding `core::fmt`'s width/padding machinery.
+fn push_2digit(out: &mut String, v: u32) {
+    out.push((b'0' + (v / 10) as u8) as char);
+    out.push((b'0' + (v % 10) as u8) as char);
+}
+
+/// Write a zero-padded `width`-digit decimal number as ASCII bytes via plain
+/// division/modulo — a fixed-width zero-padded digit writer with no runtime
+/// format-string interpretation.
+fn push_ndigit(out: &mut String, v: u32, width: u32) {
+    let mut divisor = 10u32.pow(width - 1);
+    let mut remaining = v;
+    for _ in 0..width {
+        out.push((b'0' + (remaining / divisor) as u8) as char);
+        remaining %= divisor;
+        divisor /= 10;
+    }
+}
+
+/// Fast `YYYY-MM-DD` formatter for `NaiveDate`, replacing chrono's generic
+/// `.format()` (which re-parses the `"%Y-%m-%d"` pattern on every call) with
+/// direct accessor reads (`year()`/`month()`/`day()` are O(1)) and hand-rolled
+/// zero-padded digit writes.
+///
+/// Scoped to the common case: years in `0..=9999` render as a zero-padded
+/// 4-digit field, matching chrono's `%Y` for that range exactly (verified in
+/// `fast_date_matches_chrono_format`). Outside that range chrono renders a
+/// variable-width `+`/`-`-prefixed field instead (see
+/// `fast_date_defers_for_out_of_common_range_years`); Exasol's DATE type only
+/// ever carries `0001-01-01..=9999-12-31`, so this covers every value that can
+/// actually reach the wire. Returns `None` for out-of-range years so the
+/// caller falls back to `NaiveDate::format`, preserving byte-identical output
+/// for every representable date.
+fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
+    use chrono::Datelike;
+
+    let year = d.year();
+    if !(0..=9999).contains(&year) {
+        return None;
+    }
+
+    let mut out = String::with_capacity(10);
+    push_ndigit(&mut out, year as u32, 4);
+    out.push('-');
+    push_2digit(&mut out, d.month());
+    out.push('-');
+    push_2digit(&mut out, d.day());
+    Some(out)
+}
+
+/// Fast `YYYY-MM-DD HH:MM:SS.fffffffff` formatter for `NaiveDateTime`,
+/// replacing chrono's generic `.format()` the same way `fast_date_to_string`
+/// does for the date part, plus hand-rolled zero-padded time and always-9-digit
+/// nanosecond fields.
+///
+/// Defers to `None` (letting the caller fall back to `NaiveDateTime::format`)
+/// when the date part is out of the common year range (see
+/// `fast_date_to_string`) or when `nanosecond()` reports a leap-second value
+/// (`>= 1_000_000_000`, per chrono's `Timelike::nanosecond` docs) — an edge
+/// case Exasol TIMESTAMP values never produce, kept out of the fast path
+/// rather than reverse-engineering chrono's undocumented leap-second
+/// rendering.
+fn fast_timestamp_to_string(ts: &NaiveDateTime) -> Option<String> {
+    use chrono::Timelike;
+
+    let date_part = fast_date_to_string(&ts.date())?;
+    let nanos = ts.nanosecond();
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+
+    let mut out = String::with_capacity(29);
+    out.push_str(&date_part);
+    out.push(' ');
+    push_2digit(&mut out, ts.hour());
+    out.push(':');
+    push_2digit(&mut out, ts.minute());
+    out.push(':');
+    push_2digit(&mut out, ts.second());
+    out.push('.');
+    push_ndigit(&mut out, nanos, 9);
+    Some(out)
+}
+
 /// Render a non-null `Value` as the text form for a string/numeric/temporal
 /// block. Typed variants are serialised back to their wire form; numeric integer
 /// and double variants are stringified so a DECIMAL EMITS column receiving a
 /// `Value::Int64`/`Value::Double` from a connect-back SELECT still serialises.
+///
+/// NUMERIC/DATE/TIMESTAMP use the hand-rolled fast formatters above, falling
+/// back to the `chrono`/`Display` path for the (rare, out-of-Exasol-range)
+/// cases they defer on — see `fast_date_to_string`/`fast_timestamp_to_string`.
+/// The `fast_string_block_tests` regression suite proves this is byte-identical
+/// to the `chrono`/`Display` path for every representable value.
 fn value_to_block_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Numeric(d) => d.to_string(),
-        Value::Date(d) => d.format(DATE_FORMAT).to_string(),
-        Value::Timestamp(ts) => ts.format(TIMESTAMP_EMIT).to_string(),
+        Value::Numeric(d) => fast_decimal_to_string(d),
+        Value::Date(d) => {
+            fast_date_to_string(d).unwrap_or_else(|| d.format(DATE_FORMAT).to_string())
+        }
+        Value::Timestamp(ts) => {
+            fast_timestamp_to_string(ts).unwrap_or_else(|| ts.format(TIMESTAMP_EMIT).to_string())
+        }
         Value::Int32(i) => i.to_string(),
         Value::Int64(i) => i.to_string(),
         Value::Double(f) => f.to_string(),
@@ -1793,6 +2088,31 @@ mod tests {
         );
     }
 
+    /// `to_proto`'s per-type blocks must be pre-sized with `Vec::with_capacity`
+    /// for the exact
+    /// (non-NULL) column count instead of growing via `Vec::new()` + `push`,
+    /// which reallocates through the standard doubling growth curve. With no
+    /// NULLs present, every row's string cell lands in `data_string`, so its
+    /// exact final length (3) is known up front; a `Vec::new()`-based push
+    /// loop for 3 elements ends at capacity 4 (the doubling curve's first
+    /// step above 1), so this distinguishes pre-sizing from incremental growth.
+    #[test]
+    fn to_proto_presizes_string_block_capacity() {
+        let meta = vec![col("a", ExaType::String { size: None })];
+        let mut emit = EmitBuffer::new();
+        emit.push(vec![Value::String("a".into())]);
+        emit.push(vec![Value::String("b".into())]);
+        emit.push(vec![Value::String("c".into())]);
+
+        let table = emit.to_proto(&meta);
+        assert_eq!(table.data_string.len(), 3);
+        assert_eq!(
+            table.data_string.capacity(),
+            3,
+            "expected exact pre-sized capacity, not push-growth capacity"
+        );
+    }
+
     #[test]
     fn bridge_typed_accessors() {
         let (table, meta) = mixed_batch();
@@ -2437,6 +2757,489 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Permanent regression guard: the string-block fast-path formatters
+    // (`value_to_block_string`'s NUMERIC/DATE/TIMESTAMP branches) must stay
+    // byte-identical to the `chrono`/`Display` path they replaced, for every
+    // representable value.
+    // -----------------------------------------------------------------------
+    mod fast_string_block_tests {
+        use super::*;
+
+        fn decimal(unscaled: i128, scale: u8) -> Decimal {
+            Decimal { unscaled, scale }
+        }
+
+        /// `fast_decimal_to_string` must match `Decimal`'s `Display` impl for
+        /// every representable case: positive/negative/zero, scale 0 through a
+        /// realistic max, and padding edge cases where the unscaled digit run
+        /// is shorter than the scale.
+        #[test]
+        fn fast_decimal_matches_display_for_all_cases() {
+            let cases = [
+                (0i128, 0u8),
+                (0, 5),
+                (1, 0),
+                (-1, 0),
+                (5, 2),
+                (-5, 2),
+                (12, 2),
+                (-12, 2),
+                (100, 2),
+                (123456789, 3),
+                (-123456789, 3),
+                (1, 18),
+                (-1, 18),
+                (1_000_000_000_000_000_001, 18),
+                (-1_000_000_000_000_000_001, 18),
+                (i128::MAX, 0),
+                (i128::MAX, 18),
+                (i128::MIN, 0),
+                (i128::MIN, 18),
+                (i128::MIN, 38),
+                (9, 1),
+                (10, 1),
+                (99, 1),
+            ];
+            for (unscaled, scale) in cases {
+                let d = decimal(unscaled, scale);
+                assert_eq!(
+                    fast_decimal_to_string(&d),
+                    d.to_string(),
+                    "mismatch for unscaled={unscaled} scale={scale}"
+                );
+            }
+        }
+
+        /// `fast_date_to_string` must match `NaiveDate::format(DATE_FORMAT)`
+        /// byte-for-byte across leap days, year boundaries, and pre-1970 dates.
+        #[test]
+        fn fast_date_matches_chrono_format() {
+            let cases = [
+                (0, 1, 1),
+                (1, 1, 1),
+                (1969, 12, 31),
+                (1970, 1, 1),
+                (2000, 2, 29),
+                (2024, 2, 29),
+                (2026, 6, 5),
+                (9999, 12, 31),
+            ];
+            for (y, m, d) in cases {
+                let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+                let expected = date.format(DATE_FORMAT).to_string();
+                assert_eq!(
+                    fast_date_to_string(&date),
+                    Some(expected.clone()),
+                    "mismatch for {y:04}-{m:02}-{d:02}, expected {expected}"
+                );
+            }
+        }
+
+        /// Years outside the common `0..=9999` range fall back to `None` so the
+        /// caller defers to chrono's slow (but correct) path rather than
+        /// producing wrong output.
+        #[test]
+        fn fast_date_defers_for_out_of_common_range_years() {
+            let date = NaiveDate::from_ymd_opt(10000, 1, 1).unwrap();
+            assert_eq!(fast_date_to_string(&date), None);
+
+            let date = NaiveDate::from_ymd_opt(-1, 1, 1).unwrap();
+            assert_eq!(fast_date_to_string(&date), None);
+        }
+
+        /// `fast_timestamp_to_string` must match
+        /// `NaiveDateTime::format(TIMESTAMP_EMIT)` byte-for-byte, including
+        /// always-9-digit fractional seconds, midnight, and nanosecond precision.
+        #[test]
+        fn fast_timestamp_matches_chrono_format() {
+            let cases: Vec<NaiveDateTime> = vec![
+                NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+                NaiveDate::from_ymd_opt(1969, 12, 31)
+                    .unwrap()
+                    .and_hms_opt(23, 59, 59)
+                    .unwrap(),
+                NaiveDate::from_ymd_opt(2024, 2, 29)
+                    .unwrap()
+                    .and_hms_opt(12, 30, 45)
+                    .unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 5)
+                    .unwrap()
+                    .and_hms_nano_opt(1, 2, 3, 4)
+                    .unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 5)
+                    .unwrap()
+                    .and_hms_nano_opt(23, 59, 59, 999_999_999)
+                    .unwrap(),
+                NaiveDate::from_ymd_opt(9999, 12, 31)
+                    .unwrap()
+                    .and_hms_opt(23, 59, 59)
+                    .unwrap(),
+            ];
+            for ts in cases {
+                let expected = ts.format(TIMESTAMP_EMIT).to_string();
+                assert_eq!(
+                    fast_timestamp_to_string(&ts),
+                    Some(expected.clone()),
+                    "mismatch for {ts:?}, expected {expected}"
+                );
+            }
+        }
+
+        /// A timestamp whose date falls outside the common year range defers
+        /// to `None` for the same reason as `fast_date_to_string`.
+        #[test]
+        fn fast_timestamp_defers_for_out_of_common_range_years() {
+            let ts = NaiveDate::from_ymd_opt(10000, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            assert_eq!(fast_timestamp_to_string(&ts), None);
+        }
+
+        /// `value_to_block_string` must produce identical output whether or not
+        /// the fast path is compiled in — this is the end-to-end proof that the
+        /// fast path is wired in correctly and stays byte-identical for the
+        /// whole `Value` enum, not just the two hand-tested helpers above.
+        #[test]
+        fn value_to_block_string_matches_slow_path_for_numeric_date_timestamp() {
+            let numeric = Value::Numeric(decimal(-1_000_000_000_000_000_001, 18));
+            assert_eq!(value_to_block_string(&numeric), "-1.000000000000000001");
+
+            let date = Value::Date(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap());
+            assert_eq!(value_to_block_string(&date), "2024-02-29");
+
+            let ts = Value::Timestamp(
+                NaiveDate::from_ymd_opt(2026, 6, 5)
+                    .unwrap()
+                    .and_hms_nano_opt(1, 2, 3, 4)
+                    .unwrap(),
+            );
+            assert_eq!(value_to_block_string(&ts), "2026-06-05 01:02:03.000000004");
+        }
+
+        /// End-to-end byte-identity proof at the `to_proto` level (plan
+        /// scenario "A promoted emit fast-path encoder stays byte-identical to
+        /// the row path"). Builds an `EmitBuffer` spanning the full string-block
+        /// `ExaType` range — NUMERIC/DATE/TIMESTAMP/VARCHAR — with interspersed
+        /// NULLs and two columns sharing the NUMERIC block, then asserts the
+        /// serialised `ExascriptTableData`'s string block equals the exact
+        /// vector the reference `chrono`/`Display` path (`d.to_string()`,
+        /// `date.format(DATE_FORMAT)`, `ts.format(TIMESTAMP_EMIT)`) produces in
+        /// dense row-major-interleaved order — so downstream Exasol parsing is
+        /// unaffected by the fast formatter. Also pins the NULL bitmap and the
+        /// non-string blocks.
+        #[test]
+        fn fast_path_to_proto_byte_identical_to_row_path() {
+            fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+                NaiveDate::from_ymd_opt(y, m, d).unwrap()
+            }
+            fn ts(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32, nano: u32) -> NaiveDateTime {
+                date(y, mo, d).and_hms_nano_opt(h, mi, s, nano).unwrap()
+            }
+
+            // num_a and num_b share the NUMERIC string block; label is VARCHAR
+            // (same block); i64 is a separate block carrying a NULL.
+            let meta = vec![
+                col(
+                    "num_a",
+                    ExaType::Numeric {
+                        precision: Some(18),
+                        scale: Some(2),
+                    },
+                ),
+                col(
+                    "num_b",
+                    ExaType::Numeric {
+                        precision: Some(38),
+                        scale: Some(0),
+                    },
+                ),
+                col("d", ExaType::Date),
+                col("t", ExaType::Timestamp),
+                col("label", ExaType::String { size: Some(100) }),
+                col("i", ExaType::Int64),
+            ];
+
+            let rows: Vec<Vec<Value>> = vec![
+                vec![
+                    Value::Numeric(decimal(12345, 2)),
+                    Value::Numeric(decimal(-1_000_000_000_000_000_001, 18)),
+                    Value::Date(date(2024, 2, 29)),
+                    Value::Timestamp(ts(2026, 6, 5, 1, 2, 3, 4)),
+                    Value::String("héllo".into()),
+                    Value::Int64(42),
+                ],
+                vec![
+                    Value::Null,
+                    Value::Numeric(decimal(999, 0)),
+                    Value::Null,
+                    Value::Timestamp(ts(1970, 1, 1, 0, 0, 0, 0)),
+                    Value::Null,
+                    Value::Null,
+                ],
+                vec![
+                    Value::Numeric(decimal(0, 5)),
+                    Value::Null,
+                    Value::Date(date(9999, 12, 31)),
+                    Value::Timestamp(ts(2000, 2, 29, 23, 59, 59, 999_999_999)),
+                    Value::String(String::new()),
+                    Value::Int64(-1),
+                ],
+            ];
+
+            // Reference formatter: the pre-optimisation `chrono`/`Display` path.
+            fn reference_block_string(v: &Value) -> String {
+                match v {
+                    Value::Numeric(d) => d.to_string(),
+                    Value::Date(d) => d.format(DATE_FORMAT).to_string(),
+                    Value::Timestamp(t) => t.format(TIMESTAMP_EMIT).to_string(),
+                    Value::String(s) => s.clone(),
+                    other => panic!("unexpected non-string-block value {other:?}"),
+                }
+            }
+
+            // Expected dense, row-major-interleaved string block: skip NULL
+            // cells (they take no block slot) and only include the string-block
+            // columns (indices 0..=4; column 5 is Int64).
+            let mut expected_string: Vec<String> = Vec::new();
+            for row in &rows {
+                // Columns 0..=4 are the string-block columns; column 5 is Int64.
+                for cell in row.iter().take(5) {
+                    if !matches!(cell, Value::Null) {
+                        expected_string.push(reference_block_string(cell));
+                    }
+                }
+            }
+
+            let mut emit = EmitBuffer::new();
+            for row in &rows {
+                emit.push(row.clone());
+            }
+            let table = emit.to_proto(&meta);
+
+            assert_eq!(
+                table.data_string, expected_string,
+                "fast-path string block must be byte-identical to the chrono/Display row path"
+            );
+            // Int64 block: only the two non-null cells, in row order.
+            assert_eq!(table.data_int64, vec![42, -1]);
+            // NULL bitmap is row-major (row * n_cols + col); 3 rows × 6 cols.
+            let mut expected_nulls = vec![false; rows.len() * meta.len()];
+            for (r, row) in rows.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    if matches!(cell, Value::Null) {
+                        expected_nulls[r * meta.len() + c] = true;
+                    }
+                }
+            }
+            assert_eq!(table.data_nulls, expected_nulls, "null bitmap");
+            assert_eq!(table.rows, rows.len() as u64, "row count");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Permanent regression guard: the string-block ingest fast-path parsers
+    // (`decode_string_block`'s DATE/TIMESTAMP branches) must stay
+    // byte-identical to the `chrono::parse_from_str` path they front, for
+    // every representable value, and must defer gracefully (not panic, not
+    // diverge) for malformed input (plan task 6.1).
+    // -----------------------------------------------------------------------
+    mod fast_string_block_ingest_tests {
+        use super::*;
+
+        /// Reference decode: the original `chrono`-only path `decode_string_block`
+        /// used before the fast parser was added, used as the known-correct
+        /// oracle for DATE/TIMESTAMP comparison.
+        fn reference_decode_date(s: &str) -> Value {
+            match NaiveDate::parse_from_str(s, DATE_FORMAT) {
+                Ok(d) => Value::Date(d),
+                Err(_) => Value::Null,
+            }
+        }
+
+        fn reference_decode_timestamp(s: &str) -> Value {
+            match NaiveDateTime::parse_from_str(s, TIMESTAMP_PARSE)
+                .or_else(|_| NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT_ISO))
+            {
+                Ok(ts) => Value::Timestamp(ts),
+                Err(_) => Value::Null,
+            }
+        }
+
+        /// `fast_parse_date` must match `NaiveDate::parse_from_str(DATE_FORMAT)`
+        /// byte-for-byte across leap days, year boundaries, and a normal
+        /// mid-range date.
+        #[test]
+        fn fast_parse_date_matches_chrono_parse_for_valid_dates() {
+            let cases = [
+                "2024-02-29",
+                "0001-01-01",
+                "9999-12-31",
+                "1970-01-01",
+                "2026-06-05",
+                "0000-01-01",
+            ];
+            for s in cases {
+                let expected = reference_decode_date(s);
+                assert_eq!(
+                    fast_parse_date(s).map(Value::Date),
+                    Some(expected.clone()),
+                    "mismatch for {s}, expected {expected:?}"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Date, s.to_string()),
+                    expected,
+                    "decode_string_block mismatch for {s}"
+                );
+            }
+        }
+
+        /// `fast_parse_timestamp` must match the existing chrono parse chain
+        /// (space-separated primary format, `T`-separated ISO fallback)
+        /// byte-for-byte, including midnight, 0/3/6/9 fractional digits, and
+        /// the ISO `T` variant.
+        #[test]
+        fn fast_parse_timestamp_matches_chrono_parse_for_valid_timestamps() {
+            let cases = [
+                "1970-01-01 00:00:00",
+                "2026-06-05 01:02:03.4",
+                "2026-06-05 01:02:03.400",
+                "2026-06-05 01:02:03.400000",
+                "2026-06-05 01:02:03.000000004",
+                "2024-02-29 23:59:59.999999999",
+                "2026-06-05T01:02:03.400",
+                "9999-12-31 23:59:59",
+                "0001-01-01 00:00:00.1",
+            ];
+            for s in cases {
+                let expected = reference_decode_timestamp(s);
+                assert_eq!(
+                    fast_parse_timestamp(s).map(Value::Timestamp),
+                    Some(expected.clone()),
+                    "mismatch for {s}, expected {expected:?}"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Timestamp, s.to_string()),
+                    expected,
+                    "decode_string_block mismatch for {s}"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::TimestampTz, s.to_string()),
+                    expected,
+                    "decode_string_block (TimestampTz) mismatch for {s}"
+                );
+            }
+        }
+
+        /// Non-standard-width but chrono-parseable input (single-digit month/
+        /// day, 2-digit year, a leap second, or an over-long fractional part
+        /// chrono silently truncates to 9 digits) must not be rejected by
+        /// `decode_string_block` even though the fast path correctly declines
+        /// (returns `None`) and defers to the `chrono` fallback — proving the
+        /// fallback chain preserves today's leniency exactly, never becoming
+        /// stricter than the pre-fast-path behaviour.
+        #[test]
+        fn decode_string_block_preserves_leniency_when_fast_path_defers() {
+            let date_cases = ["2024-2-29", "2024-02-9", "24-02-29"];
+            for s in date_cases {
+                assert_eq!(
+                    fast_parse_date(s),
+                    None,
+                    "fast_parse_date should defer (not itself parse) {s}"
+                );
+                let expected = reference_decode_date(s);
+                assert_ne!(
+                    expected,
+                    Value::Null,
+                    "test setup: {s} should be chrono-valid"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Date, s.to_string()),
+                    expected,
+                    "decode_string_block must still succeed via fallback for {s}"
+                );
+            }
+
+            let ts_cases = ["2024-02-29 23:59:60", "2024-02-29 23:59:59.1234567890"];
+            for s in ts_cases {
+                assert_eq!(
+                    fast_parse_timestamp(s),
+                    None,
+                    "fast_parse_timestamp should defer (not itself parse) {s}"
+                );
+                let expected = reference_decode_timestamp(s);
+                assert_ne!(
+                    expected,
+                    Value::Null,
+                    "test setup: {s} should be chrono-valid"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Timestamp, s.to_string()),
+                    expected,
+                    "decode_string_block must still succeed via fallback for {s}"
+                );
+            }
+        }
+
+        /// Malformed DATE/TIMESTAMP strings must decode to `Value::Null`
+        /// (never panic), exactly matching the pre-existing chrono-only
+        /// behaviour: garbage text, wrong-width separators, and out-of-range
+        /// calendar values (month 13, day 32, hour 24, minute 60).
+        #[test]
+        fn malformed_date_and_timestamp_strings_decode_to_null() {
+            let malformed = [
+                "",
+                "not-a-date",
+                "2024/02/29",
+                "2024-13-01",
+                "2024-02-32",
+                "2024-00-01",
+                "2024-02-00",
+            ];
+            for s in malformed {
+                assert_eq!(
+                    fast_parse_date(s),
+                    None,
+                    "fast_parse_date should defer/reject for {s}"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Date, s.to_string()),
+                    Value::Null,
+                    "decode_string_block(Date) should be Null for {s}"
+                );
+            }
+
+            let malformed_ts = [
+                "",
+                "not-a-timestamp",
+                "2024-02-29",
+                "2024-02-29 24:00:00",
+                "2024-02-29 23:60:00",
+                "2024-02-29 23:59:59.",
+                "2024-13-01 00:00:00",
+                "2024-02-32 00:00:00",
+                "2024-02-29T23:59:59.abc",
+                "2024-02-29X23:59:59",
+            ];
+            for s in malformed_ts {
+                assert_eq!(
+                    fast_parse_timestamp(s),
+                    None,
+                    "fast_parse_timestamp should defer/reject for {s}"
+                );
+                assert_eq!(
+                    decode_string_block(&ExaType::Timestamp, s.to_string()),
+                    Value::Null,
+                    "decode_string_block(Timestamp) should be Null for {s}"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // emit-arrow unit tests (task 2.5)
     // -----------------------------------------------------------------------
     #[cfg(feature = "emit-arrow")]
@@ -2560,6 +3363,30 @@ mod tests {
                     Value::Double(2.5),
                     Value::Bool(false),
                 ]
+            );
+        }
+
+        /// `encode_slice`'s per-type blocks must be pre-sized with
+        /// `Vec::with_capacity` for the
+        /// exact (non-NULL) column count, mirroring `to_proto`'s pre-sizing.
+        /// With no NULLs, a 3-row single-string-column batch's `data_string`
+        /// has exactly 3 entries; `Vec::new()` + `push` growth for 3 elements
+        /// ends at capacity 4 (the doubling curve's step above 1), so this
+        /// distinguishes pre-sizing from incremental growth.
+        #[test]
+        fn encode_slice_presizes_string_block_capacity() {
+            let meta = vec![col("b", ExaType::String { size: None })];
+            let schema = Arc::new(Schema::new(vec![Field::new("b", DataType::Utf8, true)]));
+            let arr: Arc<dyn arrow::array::Array> =
+                Arc::new(StringArray::from(vec![Some("a"), Some("b"), Some("c")]));
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+            let table = encode_slice(&batch, &meta).unwrap();
+            assert_eq!(table.data_string.len(), 3);
+            assert_eq!(
+                table.data_string.capacity(),
+                3,
+                "expected exact pre-sized capacity, not push-growth capacity"
             );
         }
 

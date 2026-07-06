@@ -19,6 +19,9 @@ arrow = { workspace = true, optional = true }
 exarrow-rs = { workspace = true, optional = true }
 rustls = { version = "0.23", features = ["aws_lc_rs"], optional = true }
 tokio = { workspace = true, optional = true }
+# Fast digit formatter for the string-block emit fast-path
+# (`fast_decimal_to_string`); always compiled.
+itoa = { workspace = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]

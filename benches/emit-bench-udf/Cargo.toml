@@ -18,3 +18,4 @@ crate-type = ["cdylib"]
 exasol-udf-sdk = { path = "../../crates/exasol-udf-sdk", features = ["emit-arrow"] }
 exasol-udf-macros = { path = "../../crates/exasol-udf-macros" }
 arrow = { workspace = true }
+chrono = { workspace = true }
