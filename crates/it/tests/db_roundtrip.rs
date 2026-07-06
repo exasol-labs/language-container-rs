@@ -26,6 +26,8 @@ const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 const RESOLV_LIB: &str = "libresolv_udf.so";
 const EMIT_BULK_LIB: &str = "libemit_bulk.so";
 const EMIT_ARROW_LIB: &str = "libemit_arrow_batch.so";
+const NUMERIC_TEMPORAL_LIB: &str = "libnumeric_temporal_emit.so";
+const NUMERIC_TEMPORAL_INGEST_LIB: &str = "libnumeric_temporal_ingest.so";
 const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
 const TS_ADD_LIB: &str = "libtimestamp_add_second.so";
 const TS_NOW_LIB: &str = "libtimestamp_now.so";
@@ -121,6 +123,18 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let emit_arrow_path = harness
         .upload_udf(EMIT_ARROW_LIB, read_udf_artifact(EMIT_ARROW_LIB)?)
         .await?;
+    let numeric_temporal_path = harness
+        .upload_udf(
+            NUMERIC_TEMPORAL_LIB,
+            read_udf_artifact(NUMERIC_TEMPORAL_LIB)?,
+        )
+        .await?;
+    let numeric_temporal_ingest_path = harness
+        .upload_udf(
+            NUMERIC_TEMPORAL_INGEST_LIB,
+            read_udf_artifact(NUMERIC_TEMPORAL_INGEST_LIB)?,
+        )
+        .await?;
     let cb_stream_path = harness
         .upload_udf(CB_STREAM_LIB, read_udf_artifact(CB_STREAM_LIB)?)
         .await?;
@@ -163,6 +177,12 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
 
     emit_arrow_batch_roundtrips(&mut conn, &emit_arrow_path).await?;
     eprintln!("[it] scenario emit_arrow_batch ok");
+
+    numeric_date_timestamp_emit_roundtrips(&mut conn, &numeric_temporal_path).await?;
+    eprintln!("[it] scenario numeric_date_timestamp_emit ok");
+
+    numeric_date_timestamp_ingest_roundtrips(&mut conn, &numeric_temporal_ingest_path).await?;
+    eprintln!("[it] scenario numeric_date_timestamp_ingest ok");
 
     // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
@@ -955,6 +975,143 @@ async fn emit_arrow_batch_roundtrips(conn: &mut Connection, lib_path: &str) -> R
     .ok_or_else(|| anyhow!("emit_arrow_batch aggregation query returned NULL"))?;
     if aggregated != "1:a,2:b,3:c" {
         bail!("emit_arrow_batch: expected '1:a,2:b,3:c', got {aggregated:?}");
+    }
+    Ok(())
+}
+
+/// Scenario: the productionised string-block fast-path formatters
+/// (`value_to_block_string`'s NUMERIC/DATE/TIMESTAMP branches) produce wire
+/// bytes the Exasol engine parses back to exactly the emitted values.
+///
+/// `numeric_temporal_emit` is a SET UDF that drains its input then emits three
+/// fixed rows of `(amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP)`
+/// via the row emit path. We assert (a) exactly 3 rows arrive and (b) all three
+/// rows match their full expected `(amount, event_date, event_ts)` tuple using
+/// typed SQL-side equality (robust to `TO_CHAR` formatting quirks). A
+/// formatting regression in the fast decimal/date/timestamp writers would make
+/// the tuple match count drop below 3.
+async fn numeric_date_timestamp_emit_roundtrips(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.numeric_temporal_emit(dummy BOOLEAN) \
+         EMITS (amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let count = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT numeric_temporal_emit(TRUE) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("numeric_temporal_emit count query returned NULL"))?;
+    if count != "3" {
+        bail!("numeric_temporal_emit: expected 3 rows, got {count}");
+    }
+
+    // Each row must match its full typed tuple. Plain TIMESTAMP is precision-3,
+    // so the emitted `.250` (250 ms) survives; the other rows carry no
+    // sub-second component. Typed equality avoids any TO_CHAR formatting quirk.
+    let matched = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT numeric_temporal_emit(TRUE) FROM DUAL) \
+         WHERE (amount = 1234.56 AND event_date = DATE '2026-07-06' \
+                AND event_ts = TIMESTAMP '2026-07-06 12:30:15.250') \
+            OR (amount = -42.50 AND event_date = DATE '1970-01-01' \
+                AND event_ts = TIMESTAMP '1999-12-31 23:59:59') \
+            OR (amount = 0.00 AND event_date = DATE '2000-02-29' \
+                AND event_ts = TIMESTAMP '2000-02-29 00:00:00')",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("numeric_temporal_emit tuple-match query returned NULL"))?;
+    if matched != "3" {
+        bail!(
+            "numeric_temporal_emit: expected all 3 rows to round-trip to their \
+             emitted NUMERIC/DATE/TIMESTAMP values, but only {matched} matched — \
+             a string-block fast-formatter regression"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: `numeric_date_timestamp_ingest_roundtrips` (plan task 6.1).
+///
+/// The mirror image of `numeric_date_timestamp_emit_roundtrips`: instead of a
+/// UDF *producing* NUMERIC/DATE/TIMESTAMP output, `numeric_temporal_ingest` is
+/// a SET UDF that *consumes* those same types as input parameters and echoes
+/// each row back unchanged via `ctx.get_decimal`/`ctx.get_date`/
+/// `ctx.get_timestamp` + `ctx.emit`. If the ingest fast-path parsers
+/// (`fast_parse_date`/`fast_parse_timestamp` inside `decode_string_block`)
+/// mis-decoded a wire string, the echoed value would no longer equal the
+/// DB-side literal that produced it. We feed the same three fixed rows the
+/// emit-side scenario emits (a signed/zero/scaled DECIMAL, an epoch/leap-day/
+/// year-boundary DATE, and midnight/sub-second/second-boundary TIMESTAMP
+/// values) and assert all three round-trip unchanged, using typed SQL-side
+/// equality (robust to `TO_CHAR` formatting quirks).
+async fn numeric_date_timestamp_ingest_roundtrips(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.numeric_temporal_ingest(\
+            amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP) \
+         EMITS (amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    const SOURCE_ROWS: &str = "\
+        SELECT CAST(1234.56 AS DECIMAL(18,2)) AS amount, DATE '2026-07-06' AS event_date, \
+               TIMESTAMP '2026-07-06 12:30:15.250' AS event_ts FROM DUAL \
+        UNION ALL \
+        SELECT CAST(-42.50 AS DECIMAL(18,2)), DATE '1970-01-01', \
+               TIMESTAMP '1999-12-31 23:59:59' FROM DUAL \
+        UNION ALL \
+        SELECT CAST(0.00 AS DECIMAL(18,2)), DATE '2000-02-29', \
+               TIMESTAMP '2000-02-29 00:00:00' FROM DUAL";
+
+    let count = query_single_string(
+        conn,
+        &format!(
+            "SELECT TO_CHAR(COUNT(*)) FROM (\
+               SELECT numeric_temporal_ingest(amount, event_date, event_ts) \
+               FROM ({SOURCE_ROWS}))"
+        ),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("numeric_temporal_ingest count query returned NULL"))?;
+    if count != "3" {
+        bail!("numeric_temporal_ingest: expected 3 rows, got {count}");
+    }
+
+    // Each echoed row must match its full typed tuple. Plain TIMESTAMP is
+    // precision-3, so the ingested `.250` (250 ms) survives; the other rows
+    // carry no sub-second component. Typed equality avoids any TO_CHAR
+    // formatting quirk.
+    let matched = query_single_string(
+        conn,
+        &format!(
+            "SELECT TO_CHAR(COUNT(*)) FROM (\
+               SELECT numeric_temporal_ingest(amount, event_date, event_ts) \
+               FROM ({SOURCE_ROWS})) \
+             WHERE (amount = 1234.56 AND event_date = DATE '2026-07-06' \
+                    AND event_ts = TIMESTAMP '2026-07-06 12:30:15.250') \
+                OR (amount = -42.50 AND event_date = DATE '1970-01-01' \
+                    AND event_ts = TIMESTAMP '1999-12-31 23:59:59') \
+                OR (amount = 0.00 AND event_date = DATE '2000-02-29' \
+                    AND event_ts = TIMESTAMP '2000-02-29 00:00:00')"
+        ),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("numeric_temporal_ingest tuple-match query returned NULL"))?;
+    if matched != "3" {
+        bail!(
+            "numeric_temporal_ingest: expected all 3 rows to round-trip unchanged \
+             through decode (ingest) + re-encode (emit), but only {matched} matched — \
+             an ingest fast-path parser regression"
+        );
     }
     Ok(())
 }

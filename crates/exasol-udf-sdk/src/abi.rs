@@ -1,6 +1,6 @@
 use std::ffi::c_char;
 
-/// ABI version — bump only when the vtable layout changes
+/// ABI version — bump only when the vtable layout changes.
 pub const EXA_UDF_ABI_VERSION: u32 = 6;
 
 /// The fingerprint string baked in at SDK build time; injected by build.rs.

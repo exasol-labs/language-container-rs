@@ -76,6 +76,8 @@ jobs:
             -p timestamp-add-second \
             -p timestamp-now \
             -p timestamp-passthrough \
+            -p numeric-temporal-emit \
+            -p numeric-temporal-ingest \
             -p handshake-meta \
             -p annotated-fixture
 
