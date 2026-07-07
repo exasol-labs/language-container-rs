@@ -27,7 +27,7 @@ Python3 SLC as the baseline. Each run is decomposed into four measure points:
   mirror `decode_string_block` parsing on the ingest side — added because the
   original `mixed`-only benchmark had zero coverage of the types under
   suspicion of dominating `emit_batch`'s cost (see
-  `specs/_plans/add-emit-transfer-spikes/plan.md`).
+  `specs/_recorded/2026-07-06-add-emit-transfer-spikes/plan.md`).
 
 Both shapes have Rust (`emit_<shape>_row`, `emit_<shape>_batch`,
 `sink_<shape>`) and Python3 (`py_<shape>_row`, `py_<shape>_batch`) scripts;

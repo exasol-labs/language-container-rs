@@ -323,12 +323,15 @@ fn gen_sql(script: &str, n: i64) -> String {
 /// sink's row count back as `TO_CHAR` text.
 fn ingest_sql(gen_script: &str, sink_script: &str, col_names: &str, n: i64) -> String {
     let aliased = col_names
-        .split(", ")
-        .map(|c| format!("g.{c}"))
+        .split(',')
+        .map(|c| format!("g.{}", c.trim()))
         .collect::<Vec<_>>()
         .join(", ");
+    // sink_script is a SET/EMITS UDF: without GROUP BY, Exasol fans it out
+    // across parallel VM instances, each emitting its own shard's partial
+    // count — SUM() combines them back into the true total.
     format!(
-        "SELECT TO_CHAR(s.cnt) FROM (SELECT {sink_script}({aliased}) FROM \
+        "SELECT TO_CHAR(SUM(s.cnt)) FROM (SELECT {sink_script}({aliased}) FROM \
          (SELECT {gen_script}({n}, 1) FROM DUAL) g({col_names})) s(cnt)"
     )
 }
