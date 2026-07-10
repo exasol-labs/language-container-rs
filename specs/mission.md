@@ -28,8 +28,9 @@ exhausting the UDF sandbox.
 2. **Ergonomic Rust UDF SDK** — the `UdfRun` / `UdfContext` traits plus the `#[exasol_udf]` proc macro give typed column access and optional connect-back, with rows surfaced as the SDK's own `Value` type.
 3. **Precompiled execution model** — build a static musl `.so` with `cargo exasol-udf build`, upload to BucketFS, load via a `%udf_object` directive in `CREATE SCRIPT`.
 4. **ABI-safe dynamic loading** — `abi_version` + `sdk_fingerprint` checks at load time turn a toolchain mismatch into a clear error instead of UB.
-5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SESSION SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step.
+5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SESSION SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step. The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) alongside the runtime.
 6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the static musl `.so` (`build`), and validates the ABI of a built artifact (`validate`).
+7. **Live diagnostics** — a `%debug` script directive tunes runtime tracing verbosity, exposes an SDK `log` surface for UDF-authored lines, and reports memory/emit-buffer telemetry at debug level, all carried over Exasol's `SET SESSION SCRIPT OUTPUT ADDRESS` stderr redirect.
 
 > Detailed behavior lives in the spec library (`specs/sdk`, `specs/protocol`,
 > `specs/runtime`, `specs/tools`, `specs/container`, `specs/binary`, `specs/examples`).
