@@ -1,6 +1,6 @@
 # Feature: dispatch-run-loop
 
-Orchestrates driving the scalar/set run loop over the wire protocol — covering bridge row materialisation, UDF error propagation, and connect-back availability. The `EmitBuffer`/`InputRowSet` rowset codec this loop drives (output packing, flush-threshold accounting, the Arrow batch-emit path, and any promoted fast-path formatter/parser) is specified separately in `runtime/rowset-codec`. Loader validation and artifact resolution are specified separately in `runtime/dispatch-loader`. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
+Orchestrates driving the scalar/set run loop over the wire protocol — covering bridge row materialisation, UDF error propagation, and connect-back availability. The `EmitBuffer`/`InputRowSet` rowset codec this loop drives (output packing, flush-threshold accounting, and any promoted fast-path formatter/parser) is specified separately in `runtime/rowset-codec`; the opt-in Arrow batch-emit path is specified separately in `runtime/emit-arrow-batch`. Loader validation and artifact resolution are specified separately in `runtime/dispatch-loader`. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
 
 ## Background
 
