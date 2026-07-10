@@ -42,7 +42,7 @@ exhausting the UDF sandbox.
 |------|------------|
 | SLC | Script Language Container — a Docker image that provides a language runtime for Exasol UDFs, registered via `ALTER SESSION SET SCRIPT_LANGUAGES` |
 | UDF | User-Defined Function — a function defined in a script body and executed by the Exasol query engine |
-| `localzmq+protobuf` | The IPC wire protocol between the DB and an SLC: ZeroMQ DEALER socket, protobuf-framed messages, one frame per message |
+| `localzmq+protobuf` | The IPC wire protocol between the DB and an SLC: the client opens a ZeroMQ REQ socket to the DB's REP socket, protobuf-framed messages, one frame per message |
 | BucketFS | Exasol's distributed file system; the standard location for uploading precompiled `.so` artifacts |
 | Option A | Precompiled-`.so` execution path — author ships a binary, SLC just loads it (the supported path) |
 | Option C | JIT execution path — script source compiled in-container on first call. Not supported (the runtime returns a clear error) |
@@ -59,7 +59,7 @@ exhausting the UDF sandbox.
 | Layer | Technology | Purpose |
 |-------|------------|---------|
 | Language | Rust (channel pinned in `rust-toolchain.toml`) | All crates |
-| ZMQ | `zmq` (libzmq C bindings) | DEALER socket transport |
+| ZMQ | `zmq` (libzmq C bindings) | REQ socket transport (client REQ ↔ DB REP) |
 | Protobuf | `prost`, `prost-build` | Code-gen from `zmqcontainer.proto`; no runtime `protoc` |
 | Dynamic loading | `libloading` | `dlopen` user `libudf.so` |
 | Arrow | `arrow` (pinned to match `exarrow-rs`) | Host-side connect-back batch decoding |
