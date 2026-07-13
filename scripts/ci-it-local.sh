@@ -93,7 +93,11 @@ cargo build --release \
   -p timestamp-add-second \
   -p timestamp-now \
   -p timestamp-passthrough \
-  -p annotated-fixture
+  -p annotated-fixture \
+  -p set-sum \
+  -p emit-k \
+  -p scalar-next-illegal \
+  -p returns-with-emit
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"

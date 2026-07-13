@@ -36,7 +36,7 @@ exasol-udf-macros = { version = "0.11" }
 
 ## 2. The `#[exasol_udf]` macro
 
-Annotate a public function with `#[exasol_udf]`. The macro generates the C ABI entry point and vtable the runtime expects.
+Annotate a public function with `#[exasol_udf]`. The macro generates the C ABI entry point and vtable the runtime expects, and reads the function's return type to pick the output shape (see §6): `Result<Option<T>, UdfError>` selects RETURNS; `Result<(), UdfError>` selects EMITS.
 
 ```rust
 use exasol_udf_macros::exasol_udf;
@@ -45,24 +45,24 @@ use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::Value;
 
 #[exasol_udf]
-pub fn my_udf(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn my_udf(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     // ...
-    Ok(())
+    Ok(None)
 }
 ```
 
-The function name becomes the SQL script name (case-insensitive). Return `Ok(())` after all `emit` calls are done.
+The function name becomes the SQL script name (case-insensitive). `Ok(Some(v))` sets the RETURNS output value; `Ok(None)` maps to SQL `NULL`.
 
 ### Multiple UDFs per `.so`
 
 A single cdylib can export any number of `#[exasol_udf]`-annotated functions. Each function generates its own C entry point and vtable; they never conflict:
 
 ```rust
-#[exasol_udf(input(x: i64), emits(y: i64))]
-pub fn identity(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+#[exasol_udf(input(x: i64))]
+pub fn identity(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> { /* … */ }
 
-#[exasol_udf(input(x: i64), emits(y: i64))]
-pub fn double_it(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+#[exasol_udf(input(x: i64))]
+pub fn double_it(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> { /* … */ }
 ```
 
 Both entry points live in the same `.so`. Each is registered as a separate SQL script:
@@ -86,8 +86,8 @@ The macro derives the exported C symbol from the Rust function name: it converts
 Use `name = "..."` to override the derived SQL name (and the symbol suffix) without renaming the Rust function:
 
 ```rust
-#[exasol_udf(name = "MY_SPECIAL_UDF", input(x: i64), emits(y: i64))]
-pub fn internal_impl(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+#[exasol_udf(name = "MY_SPECIAL_UDF", input(x: i64))]
+pub fn internal_impl(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> { /* … */ }
 // exports __exa_udf_entry_MY_SPECIAL_UDF
 ```
 
@@ -104,11 +104,20 @@ RETURNS BIGINT AS
 
 ### Optional type annotations
 
-If you annotate the input and output types, the runtime validates the SQL column schema at load time:
+If you annotate the input types, the runtime validates the SQL input-column schema at load time:
 
 ```rust
-#[exasol_udf(input(val: i64), emits(result: i64))]
-pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+#[exasol_udf(input(val: i64))]
+pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
+    // ...
+}
+```
+
+For an EMITS UDF, annotate the output columns too:
+
+```rust
+#[exasol_udf(input(k: i64), emits(i: i64))]
+pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // ...
 }
 ```
@@ -117,15 +126,16 @@ Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`
 
 ## 3. The `UdfContext` interface
 
-Every UDF receives `&mut dyn UdfContext`. The three core operations are:
+Every UDF receives `&mut dyn UdfContext`. The four core operations are:
 
 | Method | What it does |
 |--------|-------------|
 | `ctx.get(col)` | Returns `&Value` for column `col` (0-indexed) on the current input row |
-| `ctx.emit(values)` | Appends one output row |
-| `ctx.next()` | Advances to the next input row; returns `false` when exhausted |
+| `ctx.emit(values)` | Appends one output row. Valid only for EMITS output — the host returns `Err` if a RETURNS UDF calls it (see §6) |
+| `ctx.next()` | Advances to the next input row of a SET group, spanning `MT_NEXT` batches; returns `false` at the group boundary. Valid only for SET input — the host returns `Err` if a SCALAR UDF calls it |
+| `ctx.set_return(value)` | Sets the invocation's single RETURNS output value. The `#[exasol_udf]` macro calls this for you from the function's `Ok(Some(v))` / `Ok(None)` return; you never call it directly |
 
-`next()` is for SET UDFs only — call it before the first `get()` on each row. Scalar UDFs start with the single input row already loaded.
+`next()` is for SET UDFs only — call it before the first `get()` on each row; it walks every row of the group across all `MT_NEXT` batches transparently. SCALAR UDFs start with the single input row already loaded and must not call `next()`. See §6 for the full RETURNS/EMITS × SCALAR/SET matrix.
 
 ### Typed getters
 
@@ -199,7 +209,20 @@ pub enum UdfError {
 
 Return `Err(UdfError::User("message".into()))` for expected errors. Use `?` to propagate errors from typed getters and connect-back calls.
 
-## 6. Scalar UDF example
+## 6. The four dispatch shapes
+
+A UDF's dispatch shape is a product of two independent axes: how many input rows `run()` sees per invocation (SCALAR vs SET), and how a result leaves `run()` (RETURNS vs EMITS). The `#[exasol_udf]` macro derives the output axis from the function's return type; the `CREATE SCRIPT` statement declares both axes via `SCALAR`/`SET` and `RETURNS <type>`/`EMITS (...)`.
+
+| | RETURNS — `Result<Option<T>, UdfError>` | EMITS — `Result<(), UdfError>` |
+|---|---|---|
+| **SCALAR** — `run()` once per input row | §7 `scalar_double` | §9 `emit_k` |
+| **SET** — `run()` once per input group; `ctx.next()` walks rows across batches | §8 `set_sum` | §10 `set_filter` |
+
+`Ok(Some(v))` sets the RETURNS value for this invocation; `Ok(None)` maps to SQL `NULL`. Calling `ctx.emit` in RETURNS output returns `Err` — the return value is the only output channel. Calling `ctx.next()` in SCALAR input returns `Err` — the framework has already loaded the single row before `run()` starts.
+
+## 7. Scalar RETURNS example
+
+A SCALAR UDF's `run()` executes once per input row; the single row is already loaded when `run()` starts.
 
 ```rust
 use exasol_udf_macros::exasol_udf;
@@ -208,13 +231,22 @@ use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
-pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let doubled = match ctx.get_i64(0)? {
-        // get_i64 handles both Int64 and scale-0 Numeric (BIGINT).
-        Some(n) => Value::Numeric(Decimal::from(n * 2)),
-        None    => Value::Null,
+pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
+    let doubled = match ctx.get(0)? {
+        Value::Int64(n) => Value::Int64(n * 2),
+        // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
+        Value::Numeric(d) if d.scale == 0 => {
+            let n = i64::try_from(d.unscaled)
+                .map_err(|_| UdfError::Type(format!("Numeric value {} overflows i64", d)))?;
+            Value::Numeric(Decimal {
+                unscaled: (n * 2) as i128,
+                scale: 0,
+            })
+        }
+        Value::Null => return Ok(None),
+        _ => return Err(UdfError::Type("expected Int64 or Numeric".into())),
     };
-    ctx.emit(&[doubled])
+    Ok(Some(doubled))
 }
 ```
 
@@ -227,37 +259,123 @@ RETURNS BIGINT AS
 SELECT my_schema.scalar_double(21);  -- 42
 ```
 
-## 7. SET UDF example
+`Ok(Some(v))` becomes the row's output value; `Ok(None)` becomes SQL `NULL`. Calling `ctx.emit` here fails at runtime — RETURNS output has no `emit` channel. See `test-udfs/scalar-double` for the full fixture and its unit tests.
 
-SET UDFs receive every row in a group. Call `ctx.next()` before each `ctx.get()`.
+## 8. Set RETURNS example
+
+A SET UDF's `run()` executes once per input group. Call `ctx.next()` to walk the group's rows — it spans every `MT_NEXT` batch in the group transparently, so the UDF never sees a batch boundary.
 
 ```rust
+use exasol_udf_macros::exasol_udf;
+use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
+
 #[exasol_udf]
-pub fn set_sum(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let mut total: i64 = 0;
+pub fn set_sum(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
+    let mut sum: i64 = 0;
     while ctx.next()? {
         if let Some(n) = ctx.get_i64(0)? {
-            total += n;
+            sum += n;
         }
     }
-    ctx.emit(&[Value::Numeric(Decimal::from(total))])
+    Ok(Some(sum))
 }
 ```
 
 ```sql
 CREATE OR REPLACE RUST SET SCRIPT my_schema.set_sum(val BIGINT)
-EMITS (result BIGINT) AS
+RETURNS BIGINT AS
 %udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
 /
 
-SELECT my_schema.set_sum(v) EMITS (result BIGINT) FROM my_table;
+SELECT my_schema.set_sum(v) FROM my_table GROUP BY grp;
 ```
+
+One `set_sum` invocation runs per `grp` value and returns one aggregate row per group — the same `Some`/`None` value/NULL contract as §7's SCALAR RETURNS, just spanning a whole group instead of a single row. See `test-udfs/set-sum` for the full fixture.
 
 **Cluster distribution** — Exasol executes SET UDFs on every node in parallel. Grouping by [`IPROC()`](https://docs.exasol.com/db/latest/sql_references/functions/alphabeticallistfunctions/iproc.htm) pins each group to the node that owns the data, saturating the full cluster with a single query.
 
-## 8. Emitting Arrow batches
+## 9. Scalar EMITS example
 
-If your UDF data is already in an Arrow `RecordBatch`, you can emit it directly without converting each row to `Value`. The runtime encodes the batch column-by-column according to the declared `EMITS` schema and applies the same 4 MB flush semantics as row-based `emit`.
+A SCALAR UDF can still emit a variable number of output rows per input row — the input axis (one row per invocation) and the output axis (RETURNS vs EMITS) are independent.
+
+```rust
+use exasol_udf_macros::exasol_udf;
+use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
+use exasol_udf_sdk::value::Value;
+
+#[exasol_udf]
+pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let k = ctx.get_i64(0)?.unwrap_or(0);
+    for i in 0..k {
+        ctx.emit(&[Value::Int64(i)])?;
+    }
+    Ok(())
+}
+```
+
+```sql
+CREATE OR REPLACE RUST SCALAR SCRIPT my_schema.emit_k(k BIGINT)
+EMITS (i BIGINT) AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+
+SELECT my_schema.emit_k(k) EMITS (i BIGINT)
+FROM (SELECT 0 AS k UNION ALL SELECT 1 UNION ALL SELECT 3) t;
+-- k=0 -> 0 output rows
+-- k=1 -> 1 row:  i=0
+-- k=3 -> 3 rows: i=0, i=1, i=2
+```
+
+Each invocation emits `k` rows, so the same query produces 0, 1, or many output rows per input row. See `test-udfs/emit-k` for the full fixture.
+
+## 10. Set EMITS example
+
+A SET UDF that drives `ctx.next()` and calls `ctx.emit` for the rows it keeps — the row-based counterpart to Arrow-batch emission (§11).
+
+```rust
+use exasol_udf_macros::exasol_udf;
+use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
+use exasol_udf_sdk::value::{Decimal, Value};
+
+#[exasol_udf]
+pub fn set_filter(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    while ctx.next()? {
+        match ctx.get(0)? {
+            Value::Int64(n) if *n > 0 => ctx.emit(&[Value::Int64(*n)])?,
+            // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
+            Value::Numeric(d) if d.scale == 0 => {
+                let n = i64::try_from(d.unscaled)
+                    .map_err(|_| UdfError::Type(format!("cannot convert {} to i64", d)))?;
+                if n > 0 {
+                    ctx.emit(&[Value::Numeric(Decimal {
+                        unscaled: n as i128,
+                        scale: 0,
+                    })])?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+```
+
+```sql
+CREATE OR REPLACE RUST SET SCRIPT my_schema.set_filter(x BIGINT) EMITS (y BIGINT) AS
+%udf_object /buckets/bfsdefault/default/udf/libmy_udf.so;
+/
+
+SELECT my_schema.set_filter(x) FROM nums;  -- one row per positive input value
+```
+
+`set_filter` emits zero or one row per input row it sees, so a group of N rows can produce anywhere from 0 to N output rows. See `test-udfs/set-filter` for the full fixture.
+
+## 11. Emitting Arrow batches (SET EMITS via `RecordBatch`)
+
+§10 emits one `Value` row at a time. This is the same SET EMITS output shape, but through a batch-oriented method: if your UDF data is already in an Arrow `RecordBatch`, you can emit it directly without converting each row to `Value`. The runtime encodes the batch column-by-column according to the declared `EMITS` schema and applies the same 4 MB flush semantics as row-based `emit`.
 
 ### Enable the feature
 
@@ -313,7 +431,7 @@ EMITS (id BIGINT, label VARCHAR(1)) AS
 /
 ```
 
-## 9. Connect-back
+## 12. Connect-back
 
 Connect-back lets a UDF open a regular Exasol connection from inside `run()` and execute SQL. The connect-back session is an ordinary independent SQL login — Exasol treats it exactly like a connection from PyExasol, JDBC, or any other external client. It has its own session and its own transaction; it cannot access the invoking query's transaction.
 
@@ -398,10 +516,10 @@ Because the connect-back session is a separate transaction, Exasol's Serializabl
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::{Decimal, Value};
+use exasol_udf_sdk::value::Value;
 
 #[exasol_udf]
-pub fn db_version(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn db_version(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     while ctx.next()? {}  // SET only: drain remaining input rows before opening the session
 
     let cred = ctx.connection("CB_SELF")?;
@@ -412,7 +530,7 @@ pub fn db_version(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         Some(Value::String(s)) => s.clone(),
         _ => return Err(UdfError::User("unexpected result".into())),
     };
-    ctx.emit(&[Value::String(version)])
+    Ok(Some(Value::String(version)))
 }
 ```
 
@@ -466,15 +584,15 @@ On a real cluster the node IP changes per deployment. Read it at runtime rather 
 
 ```rust
 #[exasol_udf]
-pub fn node_ip(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn node_ip(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     let ip = ctx.cluster_ip()?;
-    ctx.emit(&[Value::String(ip)])
+    Ok(Some(Value::String(ip)))
 }
 ```
 
 Use the returned IP when constructing the `CONNECTION` object, or store it in a table as part of cluster administration.
 
-## 10. Build and deploy
+## 13. Build and deploy
 
 ```bash
 # Cross-compile to a musl .so (release profile, stripped)
@@ -495,9 +613,11 @@ RETURNS BIGINT AS
 
 `cargo exasol-udf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
 
-## 11. Unit testing
+## 14. Unit testing
 
-`UdfContext` is a trait. Implement a stub to test UDF logic without a live cluster:
+`UdfContext` is a trait. Implement a stub to test UDF logic without a live cluster. Test a RETURNS UDF by asserting on the function's own `Result<Option<T>, UdfError>` return value — the mock does not need to record an output side channel, and should return `Err` from `emit()` so an accidental author `emit()` call fails the test loudly. Test an EMITS UDF by recording into an `emitted: Vec<Vec<Value>>` field and asserting on that.
+
+### RETURNS: `scalar_double`
 
 ```rust
 #[cfg(test)]
@@ -505,15 +625,69 @@ mod tests {
     use super::*;
 
     struct TestCtx {
-        rows:    Vec<Vec<Value>>,
-        cursor:  usize,
+        input: Vec<Value>,
+    }
+
+    impl TestCtx {
+        fn new(row: Vec<Value>) -> Self {
+            Self { input: row }
+        }
+    }
+
+    impl UdfContext for TestCtx {
+        fn num_columns(&self) -> usize {
+            self.input.len()
+        }
+
+        fn get(&self, col: usize) -> Result<&Value, UdfError> {
+            self.input
+                .get(col)
+                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
+        }
+
+        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented("emit is banned in RETURNS output".into()))
+        }
+
+        fn next(&mut self) -> Result<bool, UdfError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn doubles_positive_int64() {
+        let mut ctx = TestCtx::new(vec![Value::Int64(21)]);
+        let result = scalar_double(&mut ctx).unwrap();
+        assert_eq!(result, Some(Value::Int64(42)));
+    }
+
+    #[test]
+    fn passes_null_through() {
+        let mut ctx = TestCtx::new(vec![Value::Null]);
+        let result = scalar_double(&mut ctx).unwrap();
+        assert_eq!(result, None);
+    }
+}
+```
+
+The mock does not override `set_return` — the default (`Err(UdfError::Unimplemented(...))`) is never exercised, because the test asserts on `scalar_double`'s own return value, not on a side channel. `set_return` only matters to the runtime bridge driving the compiled `.so`; a unit test calls the annotated function directly.
+
+### EMITS: `set_filter`
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestCtx {
+        rows: Vec<Vec<Value>>,
+        cursor: usize,
         emitted: Vec<Vec<Value>>,
     }
 
     impl TestCtx {
         fn new(rows: Vec<Vec<Value>>) -> Self {
-            // Start one before the first row so next() advances into row 0.
-            Self { rows, cursor: usize::MAX, emitted: Vec::new() }
+            Self { rows, cursor: 0, emitted: Vec::new() }
         }
     }
 
@@ -523,9 +697,9 @@ mod tests {
         }
 
         fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.rows[self.cursor]
+            self.rows[self.cursor - 1]
                 .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {col} out of range")))
+                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
         fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
@@ -534,32 +708,23 @@ mod tests {
         }
 
         fn next(&mut self) -> Result<bool, UdfError> {
-            self.cursor = self.cursor.wrapping_add(1);
-            Ok(self.cursor < self.rows.len())
+            if self.cursor < self.rows.len() {
+                self.cursor += 1;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
     #[test]
-    fn set_sum_over_three_rows() {
+    fn emits_only_positive_rows() {
         let mut ctx = TestCtx::new(vec![
-            vec![Value::Int64(1)],
-            vec![Value::Int64(2)],
+            vec![Value::Int64(-1)],
             vec![Value::Int64(3)],
         ]);
-        set_sum(&mut ctx).unwrap();
-        assert_eq!(
-            ctx.emitted,
-            vec![vec![Value::Numeric(Decimal::from(6_i64))]]
-        );
-    }
-
-    #[test]
-    fn scalar_double_null_passthrough() {
-        // For scalar UDFs the row is pre-loaded; next() is not called.
-        let mut ctx = TestCtx::new(vec![vec![Value::Null]]);
-        ctx.cursor = 0;  // point directly at the single row
-        scalar_double(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Null]]);
+        set_filter(&mut ctx).unwrap();
+        assert_eq!(ctx.emitted, vec![vec![Value::Int64(3)]]);
     }
 }
 ```

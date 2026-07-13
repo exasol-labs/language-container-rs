@@ -111,6 +111,20 @@ impl Runtime {
         };
         tracing::debug!("udf loaded; entering run loop");
 
+        // Validate the compiled output shape against the DB's output iteration
+        // type before any work, next to the load-time ABI checks. A mismatch
+        // (e.g. an emitting UDF registered RETURNS) closes the session with a
+        // clear F-UDF-CL-RUST-#### message rather than misdispatching mid-stream.
+        // Single-call mode carries no data output shape, so it is exempt.
+        if !meta.single_call_mode
+            && let Err(e) = udf.validate_output_shape(meta.output_iter())
+        {
+            let req = proto.error_close_request(UDF_ERROR_CLOSE_CODE, &e.to_string());
+            let _ = transport.send(&req);
+            unsafe { udf.destroy() };
+            return Err(e);
+        }
+
         // Validate the UDF's annotated schema (if any) against the metadata the
         // DB sent before doing any work. A mismatch closes the session with a
         // dedicated F-UDF-CL-RUST-#### code so the user sees the exact column

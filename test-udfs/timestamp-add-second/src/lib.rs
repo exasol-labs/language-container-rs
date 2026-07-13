@@ -4,10 +4,12 @@ use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::Value;
 
 #[exasol_udf]
-pub fn timestamp_add_second(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn timestamp_add_second(
+    ctx: &mut dyn UdfContext,
+) -> Result<Option<chrono::NaiveDateTime>, UdfError> {
     let result = match ctx.get(0)? {
-        Value::Timestamp(ts) => Value::Timestamp(*ts + chrono::Duration::seconds(1)),
-        Value::Null => Value::Null,
+        Value::Timestamp(ts) => *ts + chrono::Duration::seconds(1),
+        Value::Null => return Ok(None),
         other => {
             return Err(UdfError::Type(format!(
                 "expected timestamp, got {:?}",
@@ -15,7 +17,7 @@ pub fn timestamp_add_second(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
             )));
         }
     };
-    ctx.emit(&[result])
+    Ok(Some(result))
 }
 
 #[cfg(test)]
@@ -25,15 +27,11 @@ mod tests {
 
     struct TestCtx {
         input: Vec<Value>,
-        emitted: Vec<Vec<Value>>,
     }
 
     impl TestCtx {
         fn new(row: Vec<Value>) -> Self {
-            Self {
-                input: row,
-                emitted: Vec::new(),
-            }
+            Self { input: row }
         }
     }
 
@@ -48,9 +46,10 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
+        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented(
+                "emit is banned in RETURNS output".into(),
+            ))
         }
 
         fn next(&mut self) -> Result<bool, UdfError> {
@@ -70,14 +69,14 @@ mod tests {
             .unwrap();
 
         let mut ctx = TestCtx::new(vec![Value::Timestamp(input)]);
-        timestamp_add_second(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Timestamp(expected)]]);
+        let result = timestamp_add_second(&mut ctx).unwrap();
+        assert_eq!(result, Some(expected));
     }
 
     #[test]
     fn passes_null_through() {
         let mut ctx = TestCtx::new(vec![Value::Null]);
-        timestamp_add_second(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Null]]);
+        let result = timestamp_add_second(&mut ctx).unwrap();
+        assert_eq!(result, None);
     }
 }

@@ -4,16 +4,16 @@ Provides the canonical example UDF crates that demonstrate each SDK capability a
 
 ## Background
 
-Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), connect-back (query and DML), multi-entry-point crates, and Arrow batch emit. Timestamp fixtures are in `examples/test-udfs-timestamps`. The `emit-arrow-batch` fixture crate exercises the `emit-arrow` feature of `exasol-udf-sdk` in isolation (without `connect-back`), serving as the fixture for the live-DB integration suite's Arrow batch-emit path.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (plus `arrow` where needed) and builds for the `x86_64-unknown-linux-musl` target. Examples cover core UDF patterns (scalar, set, JSON, typed schema annotation), the iteration-shape contracts (per-row scalar, per-group set, RETURNS via the value-return channel, EMITS via `ctx.emit`, and the negative fixtures that prove runtime gating), multi-entry-point crates, and Arrow batch emit. RETURNS UDFs produce output by returning `Result<Option<T>, UdfError>`; EMITS UDFs produce output via `ctx.emit`. Timestamp fixtures are in `examples/test-udfs-timestamps`; connect-back fixtures are in `examples/test-udfs-connect-back`. The `emit-arrow-batch` fixture crate exercises the `emit-arrow` feature of `exasol-udf-sdk` in isolation (without `connect-back`), serving as the fixture for the live-DB integration suite's Arrow batch-emit path. Every fixture that an integration scenario `dlopen`s MUST be wired into the CI "Build UDF .so artifacts (release)" `-p` allowlist.
 
 ## Scenarios
 
-### Scenario: scalar-double emits twice its input
+### Scenario: scalar-double returns twice its input
 
-* *GIVEN* the `scalar-double` crate with a `#[exasol_udf]` struct implementing `UdfRun`
-* *WHEN* its `run` reads the first column as `i64` and emits `Value::Int64(x * 2)`
-* *THEN* the crate MUST compile to a cdylib exporting `__exa_udf_entry_SCALAR_DOUBLE`
-* *AND* for input `21` the emitted value MUST be `42`
+* *GIVEN* the `scalar-double` crate with a `#[exasol_udf]` function whose return type is `Result<Option<Value>, UdfError>`
+* *WHEN* its `run` reads the first column as `i64` and returns `Ok(Some(Value::Int64(x * 2)))`, or `Ok(None)` for a NULL input
+* *THEN* the crate MUST compile to a cdylib exporting `__exa_udf_entry_SCALAR_DOUBLE` with the RETURNS output-shape marker
+* *AND* for input `21` the returned value MUST be `42`, and a NULL input MUST return SQL NULL
 
 ### Scenario: set-filter emits only positive rows
 
@@ -24,24 +24,10 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 
 ### Scenario: json-parse extracts a field using serde_json
 
-* *GIVEN* the `json-parse` crate depending on `serde_json` with a `#[exasol_udf]` struct
-* *WHEN* its `run` reads the first column as a string, parses it with `serde_json`, and emits the `name` field as a string
-* *THEN* the crate MUST compile to a cdylib for `x86_64-unknown-linux-musl` with `serde_json` statically linked
-* *AND* for input `{"name":"exa"}` the emitted value MUST be `exa`
-
-### Scenario: connect-back-query emits a value fetched over connect-back
-
-* *GIVEN* an example UDF crate built against `exasol-udf-sdk` with the `connect-back` feature
-* *WHEN* its `run` calls `ctx.exa()?.query_arrow("SELECT 42")` and emits the first cell
-* *THEN* the example MUST compile as a cdylib for the musl target
-* *AND* it MUST emit the integer fetched from the query
-
-### Scenario: connect-back-insert creates a table and writes rows during run
-
-* *GIVEN* an example UDF crate built against `exasol-udf-sdk` with the `connect-back` feature
-* *WHEN* its `run` calls `ctx.exa()?.execute("CREATE TABLE IF NOT EXISTS cb_result (val BIGINT)")`, then for each input row calls `ctx.exa()?.execute(&format!("INSERT INTO cb_result VALUES ({})", value))`, and emits the row count
-* *THEN* the example MUST compile as a cdylib for the musl target
-* *AND* it MUST export the named entry point derived from the crate function name
+* *GIVEN* the `json-parse` crate depending on `serde_json` with a `#[exasol_udf]` function whose return type is `Result<Option<String>, UdfError>`
+* *WHEN* its `run` reads the first column as a string, parses it with `serde_json`, and returns the `name` field
+* *THEN* the crate MUST compile to a cdylib for `x86_64-unknown-linux-musl` with `serde_json` statically linked and the RETURNS output-shape marker
+* *AND* for input `{"name":"exa"}` the returned value MUST be `exa`, and a NULL input MUST return SQL NULL
 
 ### Scenario: annotated-double declares its schema via the typed annotation
 
@@ -50,14 +36,6 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 * *THEN* the generated vtable MUST embed the input column `x: Numeric` and emit column `result: Numeric`
 * *AND* the artifact MUST export the named entry point `__exa_udf_entry_ANNOTATED_DOUBLE` derived from the function identifier
 * *AND* the example MUST double its input as in `scalar-double`
-
-### Scenario: connect-back-scalar returns a value fetched over connect-back from a SCALAR script
-
-* *GIVEN* the `connect-back-scalar` crate built against `exasol-udf-sdk` with the `connect-back` feature, registered as `RUST SCALAR SCRIPT connect_back_scalar() RETURNS BIGINT`
-* *WHEN* its `run` calls `ctx.connection("CB_SELF")`, then `ctx.connect_back(&conn)`, then `conn.query("SELECT CAST(42 AS BIGINT)")`, and emits the first result cell as `Value::Numeric`
-* *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting the named entry point `__exa_udf_entry_CONNECT_BACK_SCALAR`
-* *AND* `SELECT TO_CHAR(connect_back_scalar())` MUST return `42`
-* *AND* the implementation MUST be structurally identical to the `connect-back-query` SET UDF — connect-back logic is not conditional on `SCALAR` vs `SET` registration
 
 ### Scenario: annotated-fixture exports two named entry points from one .so
 
@@ -74,3 +52,17 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` (pl
 * *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting the named entry point derived from the function identifier
 * *AND* the crate MUST enable only the `emit-arrow` feature on `exasol-udf-sdk` (NOT `connect-back`), proving Arrow batch emit works as a standalone capability
 * *AND* every row of the emitted `RecordBatch` MUST reach the output unchanged, in batch order, so the batch-emit path is observably equivalent to emitting the same rows via row-based `emit`
+
+### Scenario: set-sum aggregates a group and returns one value
+
+* *GIVEN* the `set-sum` crate with a `#[exasol_udf]` function whose return type is `Result<Option<Value>, UdfError>`, registered as `RUST SET SCRIPT ... RETURNS BIGINT`
+* *WHEN* its `run` loops `ctx.next()` over every row of the current input group, accumulating the first `i64` column, and returns `Ok(Some(Value::Int64(sum)))`
+* *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting `__exa_udf_entry_SET_SUM` with the RETURNS output-shape marker
+* *AND* for a group whose rows sum to `S` the returned value MUST equal `S`, independent of how many `MT_NEXT` batches the group spans
+
+### Scenario: emit-k emits a variable number of rows per input row
+
+* *GIVEN* the `emit-k` crate with a `#[exasol_udf]` function whose return type is `Result<(), UdfError>`, whose `run` reads the first `i64` column `k` of the current row and calls `ctx.emit()` `k` times
+* *WHEN* the crate is registered as `RUST SCALAR SCRIPT ... EMITS (v BIGINT)` and invoked over rows with `k = 0`, `k = 1`, and `k = N > 1`
+* *THEN* the crate MUST compile to a cdylib for the `x86_64-unknown-linux-musl` target exporting `__exa_udf_entry_EMIT_K` with the EMITS output-shape marker
+* *AND* each input row MUST produce exactly `k` output rows, proving a SCALAR EMITS UDF supports zero, one, and many emits per input row

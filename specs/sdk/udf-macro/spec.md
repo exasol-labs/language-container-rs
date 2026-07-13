@@ -1,10 +1,10 @@
 # Feature: udf-macro
 
-Defines the `#[exasol_udf]` proc-macro behaviour: compile-time code generation, entry-point wiring, panic safety, and type mapping. The macro generates the `cdylib` entry point and `ExaUdfVTable` from a function that takes `&mut dyn UdfContext`.
+Defines the `#[exasol_udf]` proc-macro behaviour: compile-time code generation, entry-point wiring, panic safety, and type mapping. The macro generates the `cdylib` entry point and `ExaUdfVTable` from a function that takes `&mut dyn UdfContext`, deriving the output shape from the function's return type.
 
 ## Background
 
-The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF entry points. The macro derives an SQL name (from the function identifier in `UPPER_SNAKE_CASE`, or verbatim via `name = "..."`) and namespaces every generated symbol with that name, exporting `__exa_udf_entry_<NAME>` instead of a single bare `__exa_udf_entry`. Same-name annotations still collide at link time; distinct-name annotations coexist in one crate.
+The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF entry points. The macro derives an SQL name (from the function identifier in `UPPER_SNAKE_CASE`, or verbatim via `name = "..."`) and namespaces every generated symbol with that name, exporting `__exa_udf_entry_<NAME>` instead of a single bare `__exa_udf_entry`. Same-name annotations still collide at link time; distinct-name annotations coexist in one crate. The macro inspects the annotated function's return type to choose the output shape and generates the matching `run` shim.
 
 ## Scenarios
 
@@ -62,3 +62,12 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 * *THEN* the macro MUST emit a compile error carrying the offending type's span
 * *AND* the macro MUST map `i32`, `i64`, `f32`, `f64`, `bool`, `String`, and `&str`/`str` to their `ExaType` JSON names as before
 * *AND* the macro MUST additionally map `Decimal`, `NaiveDate`, and `NaiveDateTime` to `Numeric`, `Date`, and `Timestamp` respectively so typed schema fields compile
+
+### Scenario: Macro derives the output shape from the function return type
+
+* *GIVEN* a `#[exasol_udf]` function whose return type is either `Result<(), UdfError>` (EMITS) or `Result<Option<T>, UdfError>` (RETURNS)
+* *WHEN* the crate is compiled as a cdylib
+* *THEN* the macro MUST classify a unit `Ok` type as EMITS and an `Option<T>` `Ok` type as RETURNS
+* *AND* for RETURNS the generated `run` shim MUST convert the returned `Some(v)`/`None` to `Option<Value>` via the SDK `IntoValue` conversion and deliver it through `ctx.set_return`, never through `ctx.emit`
+* *AND* for EMITS the generated `run` shim MUST invoke the user function and expect output through `ctx.emit`, unchanged from before
+* *AND* the generated `ExaUdfVTable` MUST carry an output-shape marker recording RETURNS versus EMITS so the runtime can validate it against `meta.output_iter`

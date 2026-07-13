@@ -4,7 +4,7 @@ Drives the scalar and set/EMITS run loop from `MT_NEXT`/`MT_EMIT` through `MT_DO
 
 ## Background
 
-Past the handshake, the `Protocol` state machine MUST remain pure — it consumes decoded `ExascriptResponse` values and produces `ExascriptRequest` values and `HostEvent`s without performing any socket I/O, so it can be unit-tested with fixtures. `iter_type` (resolved during the handshake) selects between a single-batch scalar run (`ExactlyOnce`) and a multi-batch set/EMITS run (`Multiple`); both share the same `NEXT` → `InputRows` → `Emit` → `Done` shape.
+Past the handshake, the `Protocol` state machine MUST remain pure — it consumes decoded `ExascriptResponse` values and produces `ExascriptRequest` values and `HostEvent`s without performing any socket I/O, so it can be unit-tested with fixtures. The state machine is iteration-shape agnostic: it relays each `MT_NEXT` → `InputRows` → `MT_EMIT` → `MT_DONE` exchange identically regardless of `iter_type`. Both scalar (`ExactlyOnce` input) and set (`Multiple` input) runs MAY span more than one `MT_NEXT` input batch; the group boundary is the `MT_DONE` that answers `MT_NEXT`, and successive input groups are opened by successive `MT_RUN` requests (the DB answers `MT_RUN` with `MT_CLEANUP` when no group remains). Mapping input batches to UDF `run()` invocations — per row for scalar, per group for set — is a runtime concern specified in `runtime/dispatch-run-loop`, not a property of the pure protocol.
 
 The close sequence (`MT_CLEANUP`, `MT_FINISHED`, `MT_CLOSE`) follows `MT_DONE` and reaches a terminal phase that rejects further run actions. The error-close path serializes a UDF failure into the standard close path with the error string prefixed `F-UDF-CL-RUST-` followed by a numeric code. A response whose `message_type` is not valid for the current phase — including an `MT_CALL` received while in a scalar/set run phase — MUST be surfaced as a `ProtocolError` rather than a panic or socket I/O.
 
@@ -13,11 +13,10 @@ The close sequence (`MT_CLEANUP`, `MT_FINISHED`, `MT_CLOSE`) follows `MT_DONE` a
 ### Scenario: Scalar run loop drives NEXT and EMIT to DONE
 
 * *GIVEN* a `Protocol` past the handshake with `iter_type = ExactlyOnce`
-* *WHEN* the host issues `HostAction::SendNext`, the DB replies with an input batch, the host issues `HostAction::Emit`, and finally the host issues `HostAction::Done`
-* *THEN* `SendNext` MUST produce an `MT_NEXT` request
-* *AND* an input-batch response MUST produce a `HostEvent::InputRows` exposing the column-oriented batch
-* *AND* `Emit` MUST produce an `MT_EMIT` request carrying the output column blocks
-* *AND* `Done` MUST produce an `MT_DONE` request
+* *WHEN* the host issues `HostAction::SendNext`, the DB replies with one or more input batches, the host issues `HostAction::Emit`, and finally the host issues `HostAction::Done`
+* *THEN* each `SendNext` MUST produce an `MT_NEXT` request, so a scalar run MAY consume more than one input batch before exhaustion
+* *AND* each input-batch response MUST produce a `HostEvent::InputRows`, `Emit` MUST produce an `MT_EMIT` request, and `Done` MUST produce an `MT_DONE` request
+* *AND* the state machine MUST relay these exchanges identically to the `Multiple` case, deferring the per-row-versus-per-group `run()` cardinality to the runtime
 
 ### Scenario: Set/EMITS run loop iterates multiple input batches
 

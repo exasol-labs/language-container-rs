@@ -12,7 +12,7 @@ the message definitions live in
 > **Connect-back is NOT part of this protocol.** The control channel below only
 > drives UDF execution. When a UDF "connects back" to the database it opens a
 > *separate, ordinary SQL login* (via exarrow-rs) — see the
-> [connect-back guide](writing-a-udf.md#8-connect-back). Don't conflate the two.
+> [connect-back guide](writing-a-udf.md#12-connect-back). Don't conflate the two.
 
 ## Transport: one ZMQ REQ/REP socket
 
@@ -88,6 +88,37 @@ UDF error the client sends `MT_CLOSE` carrying an `F-UDF-CL-RUST-####` message.
 The client then exits the process. (`exaudfclient` calls `std::process::exit(0)`
 on success so the DB's `waitpid` reaps it promptly — see
 [`crates/exaudfclient/src/main.rs`](../crates/exaudfclient/src/main.rs).)
+
+## UDF invocation: per-row (SCALAR) vs per-group (SET)
+
+The `MT_NEXT`/`MT_EMIT` loop above moves batches over the wire; it does not by
+itself say how many times the client calls the UDF's `run()`. That count comes
+from the handshake's `input_iter` axis (`UdfMeta::input_iter`):
+
+- **`ExactlyOnce` (SCALAR).** The framework calls `run()` once per input row,
+  walking every row across every `MT_NEXT` batch in the group. `ctx.next()` is
+  banned for SCALAR input — the SDK returns `Err` if the UDF calls it.
+- **`Multiple` (SET).** The framework calls `run()` once per group. The UDF
+  drives its own row loop with `ctx.next()`, which spans `MT_NEXT` batches
+  transparently: it fetches the next batch when the current one drains and
+  returns `false` only at the group boundary (the outer `MT_DONE`).
+
+A second, independent axis (`output_iter`) governs how a result leaves
+`run()`:
+
+- **`ExactlyOnce` (RETURNS).** `run()` returns `Result<Option<T>, UdfError>`.
+  `Some(v)` becomes the invocation's single output value; `None` becomes SQL
+  `NULL`. The value crosses through `ctx.set_return`, not `ctx.emit` — calling
+  `ctx.emit` in RETURNS output returns `Err`.
+- **`Multiple` (EMITS).** `run()` returns `Result<(), UdfError>` and calls
+  `ctx.emit(&[...])` any number of times (0, 1, or many rows), flushed to
+  `MT_EMIT` as shown above.
+
+The runtime validates the compiled `.so`'s output-shape marker against
+`output_iter` when it loads the `.so`, so a shape mismatch fails before the
+first `MT_RUN` rather than mid-run. See the
+[UDF-authoring guide, §6](writing-a-udf.md#6-the-four-dispatch-shapes) for the
+worked examples of all four SCALAR/SET × RETURNS/EMITS combinations.
 
 ## Fetching CONNECTION credentials (`MT_IMPORT`)
 

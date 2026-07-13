@@ -93,6 +93,59 @@ fn parse_schema_fields(content: ParseStream) -> syn::Result<Vec<SchemaField>> {
     Ok(fields.into_iter().collect())
 }
 
+/// The output shape derived from a UDF function's return type.
+enum OutputShape {
+    /// `Result<(), UdfError>` — the UDF emits rows via `ctx.emit`.
+    Emits,
+    /// `Result<Option<T>, UdfError>` — the UDF returns one value per invocation.
+    Returns,
+}
+
+/// Derive the output shape from the function return type: a `Result` whose `Ok`
+/// type is `Option<T>` selects RETURNS; anything else (notably `Result<(), _>`)
+/// selects EMITS.
+fn derive_output_shape(output: &syn::ReturnType) -> OutputShape {
+    if let syn::ReturnType::Type(_, ty) = output
+        && let Some(ok_ty) = result_ok_type(ty)
+        && is_option_type(ok_ty)
+    {
+        return OutputShape::Returns;
+    }
+    OutputShape::Emits
+}
+
+/// The last path segment of a `Type::Path`, if any.
+fn last_path_segment(ty: &Type) -> Option<&syn::PathSegment> {
+    match ty {
+        Type::Path(p) => p.path.segments.last(),
+        _ => None,
+    }
+}
+
+/// The first type argument of a `Result<Ok, Err>` return type, if `ty` is a
+/// `Result` path with angle-bracketed arguments.
+fn result_ok_type(ty: &Type) -> Option<&Type> {
+    let seg = last_path_segment(ty)?;
+    if seg.ident != "Result" {
+        return None;
+    }
+    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+        for arg in &args.args {
+            if let syn::GenericArgument::Type(t) = arg {
+                return Some(t);
+            }
+        }
+    }
+    None
+}
+
+/// Whether `ty` is an `Option<...>` path.
+fn is_option_type(ty: &Type) -> bool {
+    last_path_segment(ty)
+        .map(|s| s.ident == "Option")
+        .unwrap_or(false)
+}
+
 /// Map a Rust type token to its ExaType JSON type name.
 /// Returns an error (carrying the offending type's span) for unmappable types.
 fn rust_type_to_exatype(ty: &Type) -> syn::Result<&'static str> {
@@ -186,6 +239,27 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         &format_ident!("__exa_vs_adapter_shim_{udf_name}"),
     );
 
+    // Derive the output shape from the return type. EMITS calls the UDF and lets
+    // it emit; RETURNS threads the returned `Option<T>` through the `IntoValue`
+    // conversion and the sanctioned `set_return` channel. Both branches produce
+    // a `Result<(), UdfError>` so the run-shim's outer match is shared.
+    let output_shape = derive_output_shape(&input_fn.sig.output);
+    let (run_call_body, output_shape_expr) = match output_shape {
+        OutputShape::Emits => (
+            quote! { #fn_ident(*ctx) },
+            quote! { ::exasol_udf_sdk::abi::OutputShape::Emits },
+        ),
+        OutputShape::Returns => (
+            quote! {{
+                let __exa_ret = #fn_ident(*ctx)?;
+                (*ctx).set_return(::std::option::Option::Some(
+                    ::exasol_udf_sdk::value::IntoValue::into_value(__exa_ret),
+                ))
+            }},
+            quote! { ::exasol_udf_sdk::abi::OutputShape::Returns },
+        ),
+    };
+
     let expanded = quote! {
         #input_fn
 
@@ -236,7 +310,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let ctx: &mut &mut dyn ::exasol_udf_sdk::context::UdfContext = unsafe {
                     &mut *(ctx_ptr as *mut &mut dyn ::exasol_udf_sdk::context::UdfContext)
                 };
-                #fn_ident(*ctx)
+                #run_call_body
             }));
             match result {
                 ::std::result::Result::Ok(::std::result::Result::Ok(())) => 0,
@@ -271,6 +345,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             generate_sql_for_export_spec: ::std::option::Option::None,
             annotated_input_schema: #input_schema_ptr,
             annotated_output_schema: #output_schema_ptr,
+            output_shape: #output_shape_expr,
         };
 
         #[unsafe(no_mangle)]

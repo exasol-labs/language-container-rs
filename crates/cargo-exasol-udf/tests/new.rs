@@ -55,6 +55,14 @@ fn new_scaffolds_crate_files() {
         lib_contents.contains("exasol_udf"),
         "lib.rs must reference exasol_udf macro"
     );
+    assert!(
+        lib_contents.contains("Result<Option<i64>, UdfError>"),
+        "lib.rs must model the scalar RETURNS channel"
+    );
+    assert!(
+        lib_contents.contains("Ok(None)"),
+        "lib.rs scaffold body must return Ok(None) for the RETURNS channel"
+    );
 }
 
 #[test]

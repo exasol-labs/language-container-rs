@@ -7,10 +7,25 @@ pub trait UdfContext {
     fn num_columns(&self) -> usize;
     /// Get a specific input column value (0-indexed)
     fn get(&self, col: usize) -> Result<&Value, UdfError>;
-    /// Emit one output row. For scalar: called once per input row. For set/EMITS: called per output row.
+    /// Emit one output row. Valid only for EMITS output (any number of rows per
+    /// invocation); the host bans it in RETURNS output, where the returned value
+    /// crosses via `set_return` instead.
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError>;
-    /// Advance to the next input row (set UDFs only). Returns false when exhausted.
+    /// Advance to the next input row of a SET group, spanning input batches;
+    /// returns false at the group boundary. Valid only for SET (Multiple) input:
+    /// the host bans it in scalar (ExactlyOnce) input, where the framework drives
+    /// one invocation per row.
     fn next(&mut self) -> Result<bool, UdfError>;
+
+    /// Set the single RETURNS output value for this invocation. This is the
+    /// sanctioned value-return channel for RETURNS-shape UDFs; the macro's
+    /// RETURNS shim calls it with the converted return value (`None` → SQL
+    /// NULL). Distinct from `emit`, so the host bridge can accept the framework
+    /// return while banning an author `emit()` in RETURNS output. The default
+    /// reports the method as unimplemented for contexts that do not override it.
+    fn set_return(&mut self, _value: Option<Value>) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented("set_return".into()))
+    }
 
     /// Get a column value, mapping SQL NULL to `None`.
     fn get_value(&self, col: usize) -> Result<Option<Value>, UdfError> {
@@ -362,6 +377,19 @@ mod tests {
     fn default_memory_limit_is_zero() {
         let ctx = DummyCtx;
         assert_eq!(ctx.memory_limit(), 0);
+    }
+
+    #[test]
+    fn default_set_return_unimplemented() {
+        let mut ctx = DummyCtx;
+        assert!(matches!(
+            ctx.set_return(Some(Value::Int64(1))),
+            Err(UdfError::Unimplemented(_))
+        ));
+        assert!(matches!(
+            ctx.set_return(None),
+            Err(UdfError::Unimplemented(_))
+        ));
     }
 
     #[test]

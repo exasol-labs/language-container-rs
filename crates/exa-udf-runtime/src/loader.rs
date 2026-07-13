@@ -1,5 +1,6 @@
 use crate::error::RuntimeError;
-use exasol_udf_sdk::abi::{EXA_SDK_FINGERPRINT, EXA_UDF_ABI_VERSION, ExaUdfVTable};
+use exa_zmq_protocol::IterType;
+use exasol_udf_sdk::abi::{EXA_SDK_FINGERPRINT, EXA_UDF_ABI_VERSION, ExaUdfVTable, OutputShape};
 use libloading::{Library, Symbol};
 
 /// A loaded UDF shared object plus its validated vtable.
@@ -73,6 +74,37 @@ impl LoadedUdf {
             _lib: lib,
             vtable: vtable_ptr,
         })
+    }
+
+    /// The compiled output shape the macro stamped into the vtable.
+    ///
+    /// Safe to read only on a vtable that passed [`LoadedUdf::open`]: the ABI
+    /// version match there guarantees the `.so` shares the host's full vtable
+    /// layout, so this field is present and holds a valid `OutputShape`.
+    fn output_shape(&self) -> OutputShape {
+        unsafe { &*self.vtable }.output_shape
+    }
+
+    /// Validate the compiled output shape against the DB's output iteration type,
+    /// alongside the load-time ABI-version and fingerprint checks.
+    ///
+    /// `ExactlyOnce` output (RETURNS) must pair with a `.so` compiled as
+    /// [`OutputShape::Returns`]; `Multiple` output (EMITS) with
+    /// [`OutputShape::Emits`]. A mismatch (e.g. an emitting UDF registered
+    /// RETURNS) is a clear error rather than a mid-stream misdispatch.
+    pub fn validate_output_shape(&self, output_iter: IterType) -> Result<(), RuntimeError> {
+        let compiled = self.output_shape();
+        let registered = match output_iter {
+            IterType::ExactlyOnce => OutputShape::Returns,
+            IterType::Multiple => OutputShape::Emits,
+        };
+        if compiled != registered {
+            return Err(RuntimeError::OutputShapeMismatch {
+                compiled: shape_name(compiled),
+                registered: shape_name(registered),
+            });
+        }
+        Ok(())
     }
 
     /// Invoke the UDF's `run`.
@@ -181,6 +213,14 @@ impl LoadedUdf {
         let vtable = unsafe { &*self.vtable };
         let hook = vtable.generate_sql_for_export_spec?;
         Some(unsafe { call_arg_hook("generate_sql_for_export_spec", json_spec, hook) })
+    }
+}
+
+/// SQL-facing name for an output shape, used in the mismatch error message.
+fn shape_name(shape: OutputShape) -> &'static str {
+    match shape {
+        OutputShape::Returns => "RETURNS",
+        OutputShape::Emits => "EMITS",
     }
 }
 
@@ -318,6 +358,113 @@ pub extern "C" fn __exa_udf_entry_TESTABI() -> *const ExaUdfVTable {{
             .expect("invoke rustc");
         assert!(status.success(), "rustc failed for {name}");
         so_path
+    }
+
+    /// Compile a fixture whose vtable mirrors the host's full `ExaUdfVTable`
+    /// layout, including the trailing `output_shape` marker, so the loader may
+    /// soundly read that field. `output_shape` is the raw `OutputShape`
+    /// discriminant (0 = Returns, 1 = Emits). Uses the host fingerprint so the
+    /// `.so` passes the ABI/fingerprint gate.
+    fn compile_full_vtable_fixture(
+        out_dir: &std::path::Path,
+        name: &str,
+        output_shape: u32,
+    ) -> std::path::PathBuf {
+        let abi = EXA_UDF_ABI_VERSION;
+        let host_fp = EXA_SDK_FINGERPRINT.trim_end_matches('\0');
+        let src = format!(
+            r#"
+use std::ffi::c_char;
+use std::os::raw::c_void;
+
+#[repr(u32)]
+pub enum OutputShape {{ Returns = 0, Emits = 1 }}
+
+#[repr(C)]
+pub struct ExaUdfVTable {{
+    pub abi_version: u32,
+    pub fingerprint: *const c_char,
+    pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
+    pub destroy: unsafe extern "C" fn(),
+    pub default_output_columns: Option<unsafe extern "C" fn(*mut *mut c_char) -> i32>,
+    pub virtual_schema_adapter_call:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32>,
+    pub generate_sql_for_import_spec:
+        Option<unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> i32>,
+    pub generate_sql_for_export_spec:
+        Option<unsafe extern "C" fn(*const c_char, *mut *mut c_char) -> i32>,
+    pub annotated_input_schema: *const c_char,
+    pub annotated_output_schema: *const c_char,
+    pub output_shape: OutputShape,
+}}
+unsafe impl Sync for ExaUdfVTable {{}}
+
+unsafe extern "C" fn run_stub(_ctx: *mut c_void, _out: *mut *mut c_char) -> i32 {{ 0 }}
+unsafe extern "C" fn destroy_stub() {{}}
+
+static FP: &str = "{host_fp}\0";
+static VT: ExaUdfVTable = ExaUdfVTable {{
+    abi_version: {abi},
+    fingerprint: FP.as_ptr() as *const c_char,
+    run: run_stub,
+    destroy: destroy_stub,
+    default_output_columns: None,
+    virtual_schema_adapter_call: None,
+    generate_sql_for_import_spec: None,
+    generate_sql_for_export_spec: None,
+    annotated_input_schema: std::ptr::null(),
+    annotated_output_schema: std::ptr::null(),
+    output_shape: {output_shape_variant},
+}};
+
+#[no_mangle]
+pub extern "C" fn __exa_udf_entry_SHAPE() -> *const ExaUdfVTable {{
+    &VT as *const ExaUdfVTable
+}}
+"#,
+            output_shape_variant = if output_shape == 0 {
+                "OutputShape::Returns"
+            } else {
+                "OutputShape::Emits"
+            },
+        );
+        let src_path = out_dir.join(format!("{name}.rs"));
+        let so_path = out_dir.join(format!("lib{name}.so"));
+        std::fs::write(&src_path, &src).expect("write fixture source");
+        let status = std::process::Command::new("rustc")
+            .arg("--crate-type=cdylib")
+            .arg("--edition=2021")
+            .arg("-o")
+            .arg(&so_path)
+            .arg(&src_path)
+            .status()
+            .expect("invoke rustc");
+        assert!(status.success(), "rustc failed for {name}");
+        so_path
+    }
+
+    /// An EMITS-compiled `.so` validates clean against `Multiple` output but is
+    /// rejected against `ExactlyOnce` (RETURNS) with `OutputShapeMismatch`.
+    #[test]
+    fn output_shape_validated_against_output_iter() {
+        let dir = make_tempdir();
+        let so = compile_full_vtable_fixture(dir.path(), "shape_emits", 1);
+        let udf = LoadedUdf::open(&so, "SHAPE").expect("full-vtable fixture must load");
+
+        assert!(
+            udf.validate_output_shape(IterType::Multiple).is_ok(),
+            "EMITS marker must satisfy Multiple output"
+        );
+        match udf.validate_output_shape(IterType::ExactlyOnce) {
+            Err(RuntimeError::OutputShapeMismatch {
+                compiled,
+                registered,
+            }) => {
+                assert_eq!(compiled, "EMITS");
+                assert_eq!(registered, "RETURNS");
+            }
+            other => panic!("expected OutputShapeMismatch, got {other:?}"),
+        }
     }
 
     fn make_tempdir() -> TempDir {

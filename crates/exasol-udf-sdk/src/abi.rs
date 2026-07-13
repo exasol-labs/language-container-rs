@@ -1,7 +1,24 @@
 use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout changes.
-pub const EXA_UDF_ABI_VERSION: u32 = 6;
+pub const EXA_UDF_ABI_VERSION: u32 = 7;
+
+/// Compiled output shape of a UDF, stamped into the vtable so the host can
+/// validate it against the DB's `output_iter_type` at load/run time.
+///
+/// The discriminants mirror the protocol `IterType`: an `ExactlyOnce` output
+/// iteration (RETURNS, one value per invocation) is `0`; a `Multiple` output
+/// iteration (EMITS, any number of rows) is `1`. Declared `#[repr(u32)]` so the
+/// marker is a stable, C-ABI-safe scalar that crosses the `.so` boundary
+/// unambiguously.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputShape {
+    /// RETURNS: the UDF returns one value per invocation via `set_return`.
+    Returns = 0,
+    /// EMITS: the UDF emits any number of output rows via `emit`.
+    Emits = 1,
+}
 
 /// The fingerprint string baked in at SDK build time; injected by build.rs.
 /// Format: "SDK_VERSION:RUSTC_HASH\0". The build script supplies the
@@ -66,6 +83,10 @@ pub struct ExaUdfVTable {
     /// Null-terminated JSON describing the annotated output schema, or NULL when
     /// the UDF was not annotated with `emits(...)`.
     pub annotated_output_schema: *const c_char,
+    /// Compiled output shape derived from the UDF function's return type
+    /// (`Result<(), _>` ⇒ EMITS, `Result<Option<T>, _>` ⇒ RETURNS). The host
+    /// validates this against the DB's `output_iter_type` at load/run time.
+    pub output_shape: OutputShape,
 }
 
 // Safety: we only send the vtable pointer across thread boundaries controlled by the runtime,
@@ -79,7 +100,7 @@ mod tests {
 
     #[test]
     fn abi_version_and_vtable_layout() {
-        assert_eq!(EXA_UDF_ABI_VERSION, 6);
+        assert_eq!(EXA_UDF_ABI_VERSION, 7);
         assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
         let _ = EXA_SDK_FINGERPRINT;
     }
@@ -106,6 +127,7 @@ mod tests {
             generate_sql_for_export_spec: None,
             annotated_input_schema: std::ptr::null(),
             annotated_output_schema: std::ptr::null(),
+            output_shape: OutputShape::Emits,
         };
         assert!(vt.virtual_schema_adapter_call.is_none());
         assert!(vt.annotated_input_schema.is_null());
@@ -167,6 +189,7 @@ mod tests {
             generate_sql_for_export_spec: None,
             annotated_input_schema: std::ptr::null(),
             annotated_output_schema: std::ptr::null(),
+            output_shape: OutputShape::Returns,
         };
         let hook = vt.virtual_schema_adapter_call.unwrap();
         let mut ctx_byte = 0u8;
