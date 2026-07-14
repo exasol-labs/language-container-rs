@@ -67,8 +67,7 @@ path (and the path embedded in `SCRIPT_LANGUAGES` in step 4) as short as possibl
 Any platform that provides a BucketFS file browser (e.g. Exasol SaaS's "Files" tab):
 drop `rustslc.tar.gz` at the bucket root. BucketFS auto-extracts recognized archives on
 upload regardless of which channel does the uploading, so there's no explicit "extract"
-step — right after upload you should see both `rustslc.tar.gz` and a `rustslc/`
-directory appear in the browser.
+step — right after upload you should see `rustslc.tar.gz` appear in the browser.
 
 The BucketFS service/bucket names differ per platform — the SaaS ones are given in 2c
 below; for any other platform confirm the names via its UI or docs before step 4.
