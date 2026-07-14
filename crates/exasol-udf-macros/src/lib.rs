@@ -252,8 +252,13 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         OutputShape::Returns => (
             quote! {{
                 let __exa_ret = #fn_ident(*ctx)?;
-                (*ctx).set_return(::std::option::Option::Some(
-                    ::exasol_udf_sdk::value::IntoValue::into_value(__exa_ret),
+                // Map the inner value, not the whole `Option`, so `None` reaches
+                // `set_return` as `None` (SQL NULL) rather than being collapsed to
+                // `Value::Null` by `IntoValue for Option<T>` and then rewrapped in
+                // `Some(..)` — `set_return`'s contract distinguishes the two.
+                (*ctx).set_return(::std::option::Option::map(
+                    __exa_ret,
+                    ::exasol_udf_sdk::value::IntoValue::into_value,
                 ))
             }},
             quote! { ::exasol_udf_sdk::abi::OutputShape::Returns },
