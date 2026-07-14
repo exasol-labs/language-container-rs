@@ -4,7 +4,7 @@ Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/
 
 ## Background
 
-The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, and value types. It does not link the host runtime or exarrow-rs. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable from a struct that implements `UdfRun`.
+The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, and value types. It does not link the host runtime or exarrow-rs. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable from a struct that implements `UdfRun`. Output is produced two ways selected by the UDF function's return type: an EMITS function returns `Result<(), UdfError>` and pushes rows through `ctx.emit()`; a RETURNS function returns `Result<Option<T>, UdfError>` and its value becomes the single output row.
 
 `UdfContext` exposes plain handshake metadata to UDF code. Beyond the typed column accessors it provides `memory_limit()` and the `exascript_info` identity/origin accessors (`session_id`, `statement_id`, `node_id`, `node_count`, `vm_id`, `database_name`, `database_version`, `script_name`, `script_schema`, `current_user`, `current_schema`, `scope_user`), each sourced from `UdfMeta`; these are defaulted accessors (not feature-gated) so existing implementations keep compiling, overridden by the host context bridge to return the live value.
 
@@ -60,3 +60,19 @@ The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, an
 * *AND* the accessor MUST be a provided (defaulted) trait method returning `0` (denoting "no limit reported") so existing `UdfContext` implementations continue to compile without supplying it, mirroring how the SDK keeps the data-access surface backward compatible
 * *AND* the accessor MUST NOT be gated behind the `connect-back` feature, because the limit is plain handshake metadata rather than a connect-back capability
 * *AND* the accessor MUST follow the same defaulted-accessor pattern as the identity and origin metadata accessors, with the host context bridge overriding the default to return the exact byte value carried on `UdfMeta::maximal_memory_limit`
+
+### Scenario: A value-returning UDF function selects the RETURNS output shape
+
+* *GIVEN* a `#[exasol_udf]` function whose signature is `Result<Option<T>, UdfError>` for a `T` the SDK can convert to `Value`
+* *WHEN* the function returns `Some(v)` or `None`
+* *THEN* the SDK MUST provide an `IntoValue`-style conversion mapping each supported author type — `i64`, `i32`, `f64`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`, and `Value` itself — to the matching `Value` variant
+* *AND* `None` MUST convert to `Value::Null`, so a RETURNS function expresses SQL NULL as `Ok(None)`
+* *AND* the unit form `Result<(), UdfError>` MUST remain the EMITS shape, so `UdfRun::run` and existing EMITS UDFs that produce output through `ctx.emit()` compile and behave unchanged
+
+### Scenario: UdfContext exposes a set_return channel for RETURNS output
+
+* *GIVEN* the `UdfContext` trait
+* *WHEN* the framework delivers a RETURNS function's returned value
+* *THEN* the trait MUST provide `set_return(&mut self, value: Option<Value>) -> Result<(), UdfError>` used by the generated RETURNS shim to hand the single output row to the host, distinct from `emit`
+* *AND* `set_return` MUST be a provided (defaulted) trait method whose default returns `UdfError::Unimplemented`, so existing `UdfContext` implementations continue to compile without supplying it
+* *AND* `value = None` MUST denote a single SQL NULL output row and `value = Some(v)` a single output row carrying `v`

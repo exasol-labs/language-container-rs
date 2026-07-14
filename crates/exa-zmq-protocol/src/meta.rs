@@ -2,8 +2,12 @@ use crate::error::ProtocolError;
 use exa_proto::{ColumnType, ExascriptInfo, ExascriptMetadata, IterType as PbIterType};
 pub use exasol_udf_sdk::value::ExaType;
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum IterType {
+/// Iteration axis for a UDF's input or output: `ExactlyOnce` is the scalar /
+/// RETURNS shape (one row per invocation), `Multiple` the set / EMITS shape
+/// (many rows per invocation). Parsed from the handshake metadata; the run
+/// dispatcher branches on the input axis to drive the UDF per-row or per-group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterType {
     ExactlyOnce,
     Multiple,
 }
@@ -20,9 +24,7 @@ pub struct ColumnMeta {
 
 #[derive(Debug, Clone)]
 pub struct UdfMeta {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) input_iter: IterType,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) output_iter: IterType,
     pub input_columns: Vec<ColumnMeta>,
     pub output_columns: Vec<ColumnMeta>,
@@ -216,6 +218,17 @@ impl UdfMeta {
     /// Long unique ID of the VM / UDF process instance.
     pub fn vm_id(&self) -> u64 {
         self.vm_id
+    }
+
+    /// Input iteration axis: `ExactlyOnce` for SCALAR (per-row dispatch),
+    /// `Multiple` for SET (per-group dispatch).
+    pub fn input_iter(&self) -> IterType {
+        self.input_iter
+    }
+
+    /// Output iteration axis: `ExactlyOnce` for RETURNS, `Multiple` for EMITS.
+    pub fn output_iter(&self) -> IterType {
+        self.output_iter
     }
 
     #[cfg(test)]

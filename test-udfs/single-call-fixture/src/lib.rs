@@ -78,6 +78,7 @@ static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVT
     generate_sql_for_export_spec: None,
     annotated_input_schema: std::ptr::null(),
     annotated_output_schema: std::ptr::null(),
+    output_shape: exasol_udf_sdk::abi::OutputShape::Emits,
 };
 
 #[unsafe(no_mangle)]

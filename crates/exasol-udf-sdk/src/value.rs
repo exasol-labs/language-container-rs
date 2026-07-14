@@ -72,6 +72,87 @@ pub enum Value {
     Timestamp(chrono::NaiveDateTime),
 }
 
+/// Conversion into the SDK [`Value`] type for RETURNS-shape UDF output.
+///
+/// The `#[exasol_udf]` macro's RETURNS shim converts a function's returned
+/// `Option<T>` through this trait before handing it to
+/// [`UdfContext::set_return`](crate::context::UdfContext::set_return). The
+/// `Option<T>` blanket impl maps `None` to `Value::Null`, so a UDF returning
+/// `Ok(None)` yields SQL NULL.
+pub trait IntoValue {
+    /// Consume `self` and produce the corresponding [`Value`].
+    fn into_value(self) -> Value;
+}
+
+impl IntoValue for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+
+impl IntoValue for i32 {
+    fn into_value(self) -> Value {
+        Value::Int32(self)
+    }
+}
+
+impl IntoValue for i64 {
+    fn into_value(self) -> Value {
+        Value::Int64(self)
+    }
+}
+
+impl IntoValue for f64 {
+    fn into_value(self) -> Value {
+        Value::Double(self)
+    }
+}
+
+impl IntoValue for bool {
+    fn into_value(self) -> Value {
+        Value::Bool(self)
+    }
+}
+
+impl IntoValue for String {
+    fn into_value(self) -> Value {
+        Value::String(self)
+    }
+}
+
+impl IntoValue for &str {
+    fn into_value(self) -> Value {
+        Value::String(self.to_string())
+    }
+}
+
+impl IntoValue for Decimal {
+    fn into_value(self) -> Value {
+        Value::Numeric(self)
+    }
+}
+
+impl IntoValue for chrono::NaiveDate {
+    fn into_value(self) -> Value {
+        Value::Date(self)
+    }
+}
+
+impl IntoValue for chrono::NaiveDateTime {
+    fn into_value(self) -> Value {
+        Value::Timestamp(self)
+    }
+}
+
+impl<T: IntoValue> IntoValue for Option<T> {
+    fn into_value(self) -> Value {
+        match self {
+            Some(inner) => inner.into_value(),
+            None => Value::Null,
+        }
+    }
+}
+
 /// Column type tag (without a value)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExaType {
@@ -102,6 +183,31 @@ pub enum ExaType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn into_value_and_option_null() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
+        let timestamp = date.and_hms_opt(9, 30, 0).unwrap();
+        let decimal = Decimal::try_from("1.5").unwrap();
+
+        assert_eq!(7i32.into_value(), Value::Int32(7));
+        assert_eq!(42i64.into_value(), Value::Int64(42));
+        assert_eq!(1.5f64.into_value(), Value::Double(1.5));
+        assert_eq!(true.into_value(), Value::Bool(true));
+        assert_eq!(
+            String::from("exa").into_value(),
+            Value::String("exa".to_string())
+        );
+        assert_eq!("exa".into_value(), Value::String("exa".to_string()));
+        assert_eq!(decimal.clone().into_value(), Value::Numeric(decimal));
+        assert_eq!(date.into_value(), Value::Date(date));
+        assert_eq!(timestamp.into_value(), Value::Timestamp(timestamp));
+        assert_eq!(Value::Int64(9).into_value(), Value::Int64(9));
+
+        // Option<T>: Some forwards to the inner conversion, None maps to NULL.
+        assert_eq!(Some(42i64).into_value(), Value::Int64(42));
+        assert_eq!(None::<i64>.into_value(), Value::Null);
+    }
 
     #[test]
     fn decimal_from_str_roundtrip() {

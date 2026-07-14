@@ -81,7 +81,11 @@ jobs:
             -p numeric-temporal-emit \
             -p numeric-temporal-ingest \
             -p handshake-meta \
-            -p annotated-fixture
+            -p annotated-fixture \
+            -p set-sum \
+            -p emit-k \
+            -p scalar-next-illegal \
+            -p returns-with-emit
 
       - name: Build IT test binary (compile once)
         run: |

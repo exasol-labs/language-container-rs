@@ -75,15 +75,14 @@ use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::udf_log;
+use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
-pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     udf_log!(ctx, debug, "input col 0 = {:?}", ctx.get(0)?);
     let n = ctx.get_i64(0)?.unwrap_or(0);
     udf_log!(ctx, info, "doubling {}", n);
-    ctx.emit(&[exasol_udf_sdk::value::Value::Numeric(
-        exasol_udf_sdk::value::Decimal::from(n * 2),
-    )])
+    Ok(Some(Value::Numeric(Decimal::from(n * 2))))
 }
 ```
 

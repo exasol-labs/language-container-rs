@@ -34,6 +34,17 @@ const TS_NOW_LIB: &str = "libtimestamp_now.so";
 const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
 const ANNOTATED_FIXTURE_LIB: &str = "libannotated_fixture.so";
 const HANDSHAKE_LIB: &str = "libhandshake_meta.so";
+const SET_SUM_LIB: &str = "libset_sum.so";
+const EMIT_K_LIB: &str = "libemit_k.so";
+const SCALAR_NEXT_ILLEGAL_LIB: &str = "libscalar_next_illegal.so";
+const RETURNS_WITH_EMIT_LIB: &str = "libreturns_with_emit.so";
+
+/// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
+/// cross-joined five times. Large enough that a scalar input or a single SET
+/// group spans multiple `MT_NEXT` batches, so it exercises the batch-spanning
+/// dispatch (Bug 1 / Bug 2 guards).
+const ORDINAL_100K: &str = "SELECT (a.n*10000 + b.n*1000 + c.n*100 + d.n*10 + e.n) AS ord \
+     FROM it_rust.dig a, it_rust.dig b, it_rust.dig c, it_rust.dig d, it_rust.dig e";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn db_roundtrip_all_scenarios() -> Result<()> {
@@ -156,6 +167,24 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let handshake_path = harness
         .upload_udf(HANDSHAKE_LIB, read_udf_artifact(HANDSHAKE_LIB)?)
         .await?;
+    let set_sum_path = harness
+        .upload_udf(SET_SUM_LIB, read_udf_artifact(SET_SUM_LIB)?)
+        .await?;
+    let emit_k_path = harness
+        .upload_udf(EMIT_K_LIB, read_udf_artifact(EMIT_K_LIB)?)
+        .await?;
+    let scalar_next_illegal_path = harness
+        .upload_udf(
+            SCALAR_NEXT_ILLEGAL_LIB,
+            read_udf_artifact(SCALAR_NEXT_ILLEGAL_LIB)?,
+        )
+        .await?;
+    let returns_with_emit_path = harness
+        .upload_udf(
+            RETURNS_WITH_EMIT_LIB,
+            read_udf_artifact(RETURNS_WITH_EMIT_LIB)?,
+        )
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -254,7 +283,49 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
     eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
 
+    // Group F: run-dispatch iteration-type conformance suite (plan tasks 9.2-9.10).
+    // 9.1 baseline is already covered above by `scalar_double_returns_42` (SCALAR
+    // RETURNS) and `set_filter_emits_positive_only` (SET EMITS).
+    scalar_double_processes_every_row_100k(&mut conn, &scalar_path).await?;
+    eprintln!("[it] scenario scalar_double_processes_every_row_100k ok");
+    set_sum_aggregates_group_spanning_batches(&mut conn, &set_sum_path).await?;
+    eprintln!("[it] scenario set_sum_aggregates_group_spanning_batches ok");
+    set_sum_multi_group_by(&mut conn, &set_sum_path).await?;
+    eprintln!("[it] scenario set_sum_multi_group_by ok");
+    emit_k_scalar_emits_zero_one_many(&mut conn, &emit_k_path).await?;
+    eprintln!("[it] scenario emit_k_scalar_emits_zero_one_many ok");
+    scalar_next_illegal_fails_with_prefixed_error(&mut conn, &scalar_next_illegal_path).await?;
+    eprintln!("[it] scenario scalar_next_illegal_fails_with_prefixed_error ok");
+    returns_channel_value_null_and_emit_ban(&mut conn, &scalar_path, &returns_with_emit_path)
+        .await?;
+    eprintln!("[it] scenario returns_channel_value_null_and_emit_ban ok");
+    output_shape_mismatch_fails(&mut conn, &emit_k_path).await?;
+    eprintln!("[it] scenario output_shape_mismatch_fails ok");
+    empty_input_is_clean_noop_scalar_and_set(&mut conn, &scalar_path, &set_path).await?;
+    eprintln!("[it] scenario empty_input_is_clean_noop_scalar_and_set ok");
+    null_handling_across_types_scalar_and_set(
+        &mut conn,
+        &scalar_path,
+        &json_path,
+        &ts_pass_path,
+        &set_sum_path,
+    )
+    .await?;
+    eprintln!("[it] scenario null_handling_across_types_scalar_and_set ok");
+    emit_bulk_boundary_rows_and_oversize_row(&mut conn, &emit_bulk_path).await?;
+    eprintln!("[it] scenario emit_bulk_boundary_rows_and_oversize_row ok");
+
     conn.close().await?;
+    Ok(())
+}
+
+/// Seed `it_rust.dig` with the digits 0..9. Cross-joined via [`ORDINAL_100K`] it
+/// yields a 100,000-row ordinal source. Idempotent (`CREATE OR REPLACE`).
+async fn seed_digits(conn: &mut Connection) -> Result<()> {
+    conn.execute("CREATE OR REPLACE TABLE it_rust.dig (n BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.dig VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)")
+        .await?;
     Ok(())
 }
 
@@ -1354,6 +1425,462 @@ async fn timestamp_precision_matrix_roundtrips(
                  (the DB delivers UDF inputs at FF6/microsecond precision)"
             );
         }
+    }
+    Ok(())
+}
+
+/// Scenario 9.2: SCALAR dispatch invokes the UDF once per input row (Bug 1
+/// guard). `scalar_double` runs over 100,000 distinct rows; a dispatcher that
+/// read only the first row of each `MT_NEXT` batch (the pre-fix behaviour) would
+/// drop the rest, so both the output row count and the summed value would fall
+/// short. `dv = scalar_double(ord) = 2*ord`, so `COUNT(*)` must be exactly
+/// 100,000 and `SUM(dv) = 2 * (0+..+99999) = 9,999,900,000`.
+async fn scalar_double_processes_every_row_100k(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    seed_digits(conn).await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_double(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        &format!(
+            "SELECT TO_CHAR(COUNT(*)) || ':' || TO_CHAR(SUM(dv)) \
+             FROM (SELECT scalar_double(ord) AS dv FROM ({ORDINAL_100K}))"
+        ),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("scalar_double 100k query returned NULL"))?;
+    if got != "100000:9999900000" {
+        bail!(
+            "scalar_double over 100k rows produced {got:?}, expected \
+             \"100000:9999900000\" (one output per input row; a dropped-row \
+             regression lowers the count and the sum)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.3: SET dispatch invokes the UDF once per group spanning all input
+/// batches (Bug 2 guard). `set_sum` aggregates a single group of 100,000 rows
+/// that spans multiple `MT_NEXT` batches; a dispatcher that restarted the UDF
+/// per batch would emit partial sums instead of the full-group total. The whole
+/// group sums to `0+..+99999 = 4,999,950,000`.
+async fn set_sum_aggregates_group_spanning_batches(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    seed_digits(conn).await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT set_sum(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        &format!("SELECT TO_CHAR(set_sum(ord)) FROM ({ORDINAL_100K})"),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("set_sum group-spanning query returned NULL"))?;
+    if got != "4999950000" {
+        bail!(
+            "set_sum over a 100k-row group produced {got:?}, expected \
+             \"4999950000\" (the full-group sum); a per-batch aggregate would be a \
+             partial sum"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.4: SET RETURNS over multiple GROUP BY groups of varying large
+/// sizes yields one correct aggregate per group. The 100k ordinals are bucketed
+/// into three groups whose row `x` equals the group id, so each group's
+/// `set_sum` is `group_id * group_size`:
+///   g1 = ord < 70000    -> 70000 rows x 1 = 70000
+///   g2 = 70000..99998   -> 29999 rows x 2 = 59998
+///   g3 = ord = 99999    ->     1 row  x 3 = 3
+async fn set_sum_multi_group_by(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    seed_digits(conn).await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT set_sum(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        &format!(
+            "SELECT GROUP_CONCAT(TO_CHAR(g) || '=' || TO_CHAR(s) ORDER BY g) \
+             FROM (SELECT g, set_sum(x) AS s FROM (\
+                     SELECT CASE WHEN ord < 70000 THEN 1 WHEN ord < 99999 THEN 2 ELSE 3 END AS g, \
+                            CASE WHEN ord < 70000 THEN 1 WHEN ord < 99999 THEN 2 ELSE 3 END AS x \
+                     FROM ({ORDINAL_100K})) GROUP BY g)"
+        ),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("set_sum multi-group query returned NULL"))?;
+    if got != "1=70000,2=59998,3=3" {
+        bail!(
+            "set_sum over multiple GROUP BY groups produced {got:?}, expected \
+             \"1=70000,2=59998,3=3\" (one correct aggregate per group)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.5: SCALAR EMITS with 0, 1, and many emits per input row. `emit_k`
+/// emits `k` rows (values 0..k-1) for each input row. Feeding k in {0, 1, 3}
+/// must yield 0+1+3 = 4 output rows; the emitted values, sorted, are the union
+/// of {} u {0} u {0,1,2} = [0,0,1,2].
+async fn emit_k_scalar_emits_zero_one_many(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) EMITS (idx BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.emit_k_src (k BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.emit_k_src VALUES (0),(1),(3)")
+        .await?;
+
+    let got = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) || ':' || GROUP_CONCAT(idx ORDER BY idx) \
+         FROM (SELECT emit_k(k) AS idx FROM it_rust.emit_k_src)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_k query returned NULL"))?;
+    if got != "4:0,0,1,2" {
+        bail!(
+            "emit_k over inputs {{0,1,3}} produced {got:?}, expected \
+             \"4:0,0,1,2\" (0 rows for k=0, 1 for k=1, 3 for k=3)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.6 (Bug 3 guard, next-in-scalar): `scalar_next_illegal` calls the
+/// banned `ctx.next()` from SCALAR input context. The runtime gate must reject
+/// it, closing the session with the `F-UDF-CL-RUST-` prefix and the
+/// "next() is not allowed in scalar context" message. The fixture returns unit
+/// (EMITS shape) and is registered EMITS, so the only failure path is the
+/// next() gate.
+async fn scalar_next_illegal_fails_with_prefixed_error(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_next_illegal(x BIGINT) EMITS (y BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    match conn.query("SELECT scalar_next_illegal(1) FROM DUAL").await {
+        Ok(_) => bail!("scalar_next_illegal succeeded; expected a next-in-scalar error"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("F-UDF-CL-RUST-") {
+                bail!("scalar_next_illegal error lacked the F-UDF-CL-RUST- prefix: {msg}");
+            }
+            if !msg.contains("scalar context") {
+                bail!(
+                    "scalar_next_illegal error did not identify the next-in-scalar \
+                     gate (\"scalar context\"): {msg}"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Scenario 9.6 + 9.7 (RETURNS value-return channel): a SCALAR RETURNS UDF
+/// surfaces `Ok(Some(v))` as the SQL value, `Ok(None)` as SQL NULL, and the
+/// runtime bans author `emit()` in RETURNS output. `scalar_double` covers the
+/// value (21 -> 42) and NULL (NULL input -> Ok(None) -> SQL NULL) legs;
+/// `returns_with_emit` (a RETURNS UDF whose body calls `emit()`) covers the ban.
+async fn returns_channel_value_null_and_emit_ban(
+    conn: &mut Connection,
+    scalar_double_object: &str,
+    returns_with_emit_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_double(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {scalar_double_object};\n/"
+    ))
+    .await?;
+
+    // Some(v) -> value.
+    let value = query_single_string(conn, "SELECT TO_CHAR(scalar_double(21))").await?;
+    if value.as_deref() != Some("42") {
+        bail!("scalar_double(21) returned {value:?}, expected 42 (the RETURNS value channel)");
+    }
+
+    // None -> SQL NULL.
+    let null =
+        query_single_string(conn, "SELECT TO_CHAR(scalar_double(CAST(NULL AS BIGINT)))").await?;
+    if null.is_some() {
+        bail!("scalar_double(NULL) returned {null:?}, expected SQL NULL for Ok(None)");
+    }
+
+    // emit() in RETURNS output must be banned.
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT returns_with_emit() RETURNS BIGINT AS\n\
+         %udf_object {returns_with_emit_object};\n/"
+    ))
+    .await?;
+    match conn.query("SELECT returns_with_emit() FROM DUAL").await {
+        Ok(_) => bail!("returns_with_emit succeeded; expected an emit-in-RETURNS ban error"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("F-UDF-CL-RUST-") {
+                bail!("returns_with_emit error lacked the F-UDF-CL-RUST- prefix: {msg}");
+            }
+            if !msg.contains("RETURNS output") {
+                bail!(
+                    "returns_with_emit error did not identify the emit-in-RETURNS ban \
+                     (\"RETURNS output\"): {msg}"
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Scenario 9.6 (output-shape validation): `emit_k` compiles as EMITS (unit
+/// return, so its vtable output-shape marker is EMITS). Registering it as a
+/// RETURNS script and invoking it must fail the load/run output-shape-marker
+/// validation with a prefixed "Output shape mismatch" error, rather than
+/// misdispatching mid-stream. The DDL itself succeeds; the mismatch surfaces at
+/// UDF invocation.
+async fn output_shape_mismatch_fails(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    match conn.query("SELECT emit_k(3) FROM DUAL").await {
+        Ok(_) => bail!("emit_k registered RETURNS succeeded; expected an output-shape mismatch"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("F-UDF-CL-RUST-") {
+                bail!("output-shape mismatch error lacked the F-UDF-CL-RUST- prefix: {msg}");
+            }
+            if !msg.contains("shape mismatch") {
+                bail!("error did not identify the output-shape mismatch: {msg}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Scenario 9.8: empty input (`WHERE 1=0`) behaves per Exasol's scalar-vs-set
+/// asymmetry, with no error in either case.
+///
+/// A scalar RETURNS UDF is per-row: empty input means zero rows in, so `run` is
+/// invoked zero times and the projection yields **0 rows**.
+///
+/// A set EMITS UDF **without GROUP BY** has a single implicit group that always
+/// exists, exactly like an aggregate over empty input (`SELECT COUNT(*) FROM
+/// empty` → one row). That implicit group therefore yields **exactly one output
+/// row**, and because the UDF emits nothing for an empty group the row is all
+/// NULL. This is not a runtime quirk: the reference Python3 SET EMITS container
+/// on the same DB produces the identical result — empty input without GROUP BY →
+/// 1 NULL row, whereas empty input *with* GROUP BY → 0 rows (0 groups). A set
+/// EMITS over empty input is thus NOT the clean no-op that a scalar is.
+async fn empty_input_is_clean_noop_scalar_and_set(
+    conn: &mut Connection,
+    scalar_object: &str,
+    set_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_double(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {scalar_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT set_filter(x BIGINT) EMITS (y BIGINT) AS\n\
+         %udf_object {set_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.empty_src (x BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.empty_src VALUES (1),(2),(3)")
+        .await?;
+
+    let scalar_count = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) \
+         FROM (SELECT scalar_double(x) FROM it_rust.empty_src WHERE 1=0)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("empty-input scalar count returned NULL"))?;
+    if scalar_count != "0" {
+        bail!("scalar_double over empty input produced {scalar_count} rows, expected 0");
+    }
+
+    // The single implicit no-GROUP-BY group yields exactly one row, and that row
+    // is NULL because the empty group emits nothing. Assert both facts (total
+    // rows and non-NULL count) so a dropped-output regression (0 rows) or a
+    // phantom non-NULL row is caught, matching the reference container.
+    let set_counts = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) || ':' || TO_CHAR(COUNT(y)) \
+         FROM (SELECT set_filter(x) AS y FROM it_rust.empty_src WHERE 1=0)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("empty-input set count returned NULL"))?;
+    if set_counts != "1:0" {
+        bail!(
+            "set_filter over empty input (no GROUP BY) produced total:non_null = \
+             {set_counts}, expected 1:0 (one implicit-group NULL row)"
+        );
+    }
+
+    // With GROUP BY there are zero groups over empty input, so zero output rows.
+    let set_grouped_count = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) \
+         FROM (SELECT set_filter(x) FROM it_rust.empty_src WHERE 1=0 GROUP BY x)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("empty-input grouped set count returned NULL"))?;
+    if set_grouped_count != "0" {
+        bail!(
+            "set_filter over empty input WITH GROUP BY produced {set_grouped_count} rows, \
+             expected 0 (zero groups)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.9: NULL handling across types. A scalar RETURNS UDF returns SQL
+/// NULL for a NULL input across BIGINT (`scalar_double`), VARCHAR
+/// (`json_parse`), and TIMESTAMP (`timestamp_passthrough`). A set UDF over a
+/// column mixing NULLs and values skips the NULL rows and aggregates the rest:
+/// SUM of {1, NULL, 2, NULL, 3} = 6.
+async fn null_handling_across_types_scalar_and_set(
+    conn: &mut Connection,
+    scalar_object: &str,
+    json_object: &str,
+    ts_object: &str,
+    set_sum_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT scalar_double(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {scalar_object};\n/"
+    ))
+    .await?;
+    let numeric_null =
+        query_single_string(conn, "SELECT TO_CHAR(scalar_double(CAST(NULL AS BIGINT)))").await?;
+    if numeric_null.is_some() {
+        bail!("scalar_double(NULL BIGINT) returned {numeric_null:?}, expected SQL NULL");
+    }
+
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT json_parse(doc VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n\
+         %udf_object {json_object};\n/"
+    ))
+    .await?;
+    let varchar_null =
+        query_single_string(conn, "SELECT json_parse(CAST(NULL AS VARCHAR(2000)))").await?;
+    if varchar_null.is_some() {
+        bail!("json_parse(NULL VARCHAR) returned {varchar_null:?}, expected SQL NULL");
+    }
+
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT timestamp_passthrough(t TIMESTAMP) RETURNS TIMESTAMP AS\n\
+         %udf_object {ts_object};\n/"
+    ))
+    .await?;
+    let ts_null = query_single_string(
+        conn,
+        "SELECT TO_CHAR(timestamp_passthrough(CAST(NULL AS TIMESTAMP)))",
+    )
+    .await?;
+    if ts_null.is_some() {
+        bail!("timestamp_passthrough(NULL TIMESTAMP) returned {ts_null:?}, expected SQL NULL");
+    }
+
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT set_sum(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {set_sum_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.null_src (x BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.null_src VALUES (1),(NULL),(2),(NULL),(3)")
+        .await?;
+    let set_null = query_single_string(conn, "SELECT TO_CHAR(set_sum(x)) FROM it_rust.null_src")
+        .await?
+        .ok_or_else(|| anyhow!("set_sum over NULL-mixed input returned NULL"))?;
+    if set_null != "6" {
+        bail!(
+            "set_sum over {{1,NULL,2,NULL,3}} returned {set_null:?}, expected 6 \
+             (NULL rows skipped, non-NULL rows summed)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.10: the group-scoped `EmitBuffer` flushes at the 4,000,000-byte
+/// `MT_EMIT` wire limit and preserves rows across the boundary. The extended
+/// `emit-bulk` takes a per-row byte width in column 1.
+///
+/// (a) Straddle the threshold: 4 rows x 1,500,000 bytes = 6 MB. Two rows (3 MB)
+/// stay under 4,000,000; the third crosses it, forcing a mid-run flush, and the
+/// fourth tail-flushes. All four must arrive with their exact width.
+///
+/// (b) A single maximal row: one 2,000,000-byte value — the largest a live
+/// Exasol VARCHAR column holds. A true single row exceeding 4,000,000 bytes
+/// cannot be materialised in an Exasol VARCHAR (2,000,000-character cap), so
+/// that specific boundary is covered by the fixture unit test
+/// `width_can_exceed_emit_buffer_threshold` and the runtime unit test
+/// `emit_buffer_spans_group_and_tail_flushes`, not here.
+async fn emit_bulk_boundary_rows_and_oversize_row(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT emit_bulk(n BIGINT, w BIGINT) \
+         EMITS (val VARCHAR(2000000)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let straddle = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) || ':' || TO_CHAR(MIN(LENGTH(val))) || ':' \
+             || TO_CHAR(MAX(LENGTH(val))) \
+         FROM (SELECT emit_bulk(4, 1500000) AS val FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_bulk straddle query returned NULL"))?;
+    if straddle != "4:1500000:1500000" {
+        bail!(
+            "emit_bulk(4, 1500000) produced {straddle:?}, expected \
+             \"4:1500000:1500000\" (4 rows straddling the 4,000,000-byte flush \
+             threshold, each intact at 1,500,000 bytes)"
+        );
+    }
+
+    let oversize = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) || ':' || TO_CHAR(MAX(LENGTH(val))) \
+         FROM (SELECT emit_bulk(1, 2000000) AS val FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_bulk oversize query returned NULL"))?;
+    if oversize != "1:2000000" {
+        bail!(
+            "emit_bulk(1, 2000000) produced {oversize:?}, expected \"1:2000000\" \
+             (a single maximal 2,000,000-byte row)"
+        );
     }
     Ok(())
 }

@@ -8,11 +8,12 @@ use exasol_udf_sdk::value::{Decimal, Value};
 ///
 /// Identical connect-back logic to the `connect-back-query` SET UDF — the only
 /// difference is registration (`RUST SCALAR SCRIPT ... RETURNS BIGINT` vs
-/// `SET SCRIPT ... EMITS`). A scalar UDF returns its single value the same way
-/// (`ctx.emit` of one row), so the runtime dispatch path is shared. This proves
-/// connect-back works from a SCALAR script, not just SET/EMITS.
+/// `SET SCRIPT ... EMITS`). A scalar UDF surfaces its single value through the
+/// RETURNS channel (`Ok(Some(v))`, which the runtime forwards via `set_return`;
+/// `Ok(None)` yields SQL NULL). This proves connect-back works from a SCALAR
+/// script, not just SET/EMITS.
 #[exasol_udf]
-pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<Option<Decimal>, UdfError> {
     let c = ctx.connection("CB_SELF")?;
     let mut conn = ctx.connect_back(&c)?;
     let rows = conn.query("SELECT CAST(42 AS BIGINT)")?;
@@ -28,8 +29,8 @@ pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         other => return Err(UdfError::Type(format!("unexpected value {other:?}"))),
     };
     // BIGINT scalar output travels as PB_NUMERIC (typed Decimal).
-    ctx.emit(&[Value::Numeric(Decimal {
+    Ok(Some(Decimal {
         unscaled: val as i128,
         scale: 0,
-    })])
+    }))
 }

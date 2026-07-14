@@ -4,7 +4,7 @@ Defines the `#[repr(C)]` ABI vtable, SDK fingerprint, vtable stability rules, an
 
 ## Background
 
-The SDK ABI layer is the binary contract between a compiled UDF `.so` and the host runtime. The `#[repr(C)] ExaUdfVTable` carries an `abi_version`, an `sdk_fingerprint` (baked at build time from `SDK_VERSION:RUSTC_HASH`), and function pointer slots for `run`, `destroy`, and optional single-call hooks. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable from a struct that implements `UdfRun`. The host loader checks `abi_version` and `sdk_fingerprint` at load time; a mismatch is a clean `AbiMismatch` error rather than silent UB.
+The SDK ABI layer is the binary contract between a compiled UDF `.so` and the host runtime. The `#[repr(C)] ExaUdfVTable` carries an `abi_version`, an `sdk_fingerprint` (baked at build time from `SDK_VERSION:RUSTC_HASH`), a marker recording whether the UDF returns a value (RETURNS) or emits (EMITS), and function pointer slots for `run`, `destroy`, and optional single-call hooks. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable. The host loader checks `abi_version` and `sdk_fingerprint` at load time; a mismatch is a clean `AbiMismatch` error rather than silent UB.
 
 The `UdfContext` trait-object vtable is ordered by method declaration. Every `UdfContext` method must be declared unconditionally (no `#[cfg(feature = ...)]`) so the vtable layout is identical in all build configurations — a feature-mismatched `.so` must fail the version check, not misdispatch calls. The `emit-arrow` feature gates only the optional `arrow` dependency and the `EmitBatch` extension trait; it never gates `UdfContext` method declarations.
 
@@ -76,3 +76,12 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `UdfContext` MUST expose a defaulted `emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError>` gated `#[cfg(feature = "emit-arrow")]` whose default returns `Err(UdfError::Unimplemented("emit_record_batch_ipc"))`, so existing `UdfContext` implementations that do not override it keep compiling unchanged
 * *AND* neither `emit_record_batch_ipc` nor `EmitBatch` MUST be present when the crate is built without the `emit-arrow` feature, and the trait MUST compile in that configuration with no reference to any `arrow` type
 * *AND* the row-based `emit(&mut self, values: &[Value])` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
+
+### Scenario: Return channel adds set_return and an output-shape marker, bumping the ABI version
+
+* *GIVEN* the value-return channel that delivers a RETURNS UDF's returned value to the host
+* *WHEN* the `UdfContext` trait and `ExaUdfVTable` are compiled under this change
+* *THEN* `UdfContext` MUST gain a `set_return(&mut self, value: Option<Value>) -> Result<(), UdfError>` method declared unconditionally with a default returning `UdfError::Unimplemented`, so the `dyn UdfContext` vtable layout stays feature-independent
+* *AND* `ExaUdfVTable` MUST carry an output-shape marker (RETURNS versus EMITS) that the loader/runtime validates against `meta.output_iter`
+* *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `6 → 7` because both the `dyn UdfContext` layout and the `ExaUdfVTable` fields changed, so a `.so` built against ABI 6 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching
+* *AND* the `run` vtable function-pointer signature MUST remain `(ctx: *mut c_void, error_out: *mut *mut c_char)` — the returned value crosses through the existing trait-object `set_return` slot, not a new `run` parameter

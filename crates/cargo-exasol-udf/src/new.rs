@@ -54,9 +54,9 @@ use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 
 #[exasol_udf]
-fn run(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+fn run(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
     // TODO: implement your UDF
-    Ok(())
+    Ok(None)
 }
 "#;
     let lib_path = src_dir.join("lib.rs");

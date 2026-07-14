@@ -1,15 +1,14 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
 
-/// Scalar UDF that emits live handshake metadata so a DB round-trip can prove
+/// Scalar UDF that returns live handshake metadata so a DB round-trip can prove
 /// the DB-supplied `exascript_info` values reach UDF code through the
-/// `UdfContext` accessors. Emits a single pipe-delimited string:
+/// `UdfContext` accessors. Returns a single pipe-delimited string:
 /// `session_id|node_id|node_count|script_name`. Reads metadata only; opens no
 /// connect-back session.
 #[exasol_udf]
-pub fn handshake_meta(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn handshake_meta(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> {
     let summary = format!(
         "{}|{}|{}|{}",
         ctx.session_id(),
@@ -17,19 +16,19 @@ pub fn handshake_meta(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         ctx.node_count(),
         ctx.script_name(),
     );
-    ctx.emit(&[Value::String(summary)])
+    Ok(Some(summary))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::value::Value;
 
     struct MetaCtx {
         session_id: u64,
         node_id: u32,
         node_count: u32,
         script_name: String,
-        emitted: Vec<Vec<Value>>,
     }
 
     impl UdfContext for MetaCtx {
@@ -41,9 +40,10 @@ mod tests {
             Err(UdfError::Type("no input columns".into()))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
+        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented(
+                "emit is banned in RETURNS output".into(),
+            ))
         }
 
         fn next(&mut self) -> Result<bool, UdfError> {
@@ -68,20 +68,14 @@ mod tests {
     }
 
     #[test]
-    fn emits_pipe_delimited_handshake_summary() {
+    fn returns_pipe_delimited_handshake_summary() {
         let mut ctx = MetaCtx {
             session_id: 1_700_000_000_000_123,
             node_id: 0,
             node_count: 1,
             script_name: "handshake_meta".into(),
-            emitted: Vec::new(),
         };
-        handshake_meta(&mut ctx).unwrap();
-        assert_eq!(
-            ctx.emitted,
-            vec![vec![Value::String(
-                "1700000000000123|0|1|handshake_meta".into()
-            )]]
-        );
+        let result = handshake_meta(&mut ctx).unwrap();
+        assert_eq!(result, Some("1700000000000123|0|1|handshake_meta".into()));
     }
 }

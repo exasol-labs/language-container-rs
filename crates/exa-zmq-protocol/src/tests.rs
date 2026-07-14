@@ -167,6 +167,34 @@ fn set_loop_multiple_batches() {
 }
 
 #[test]
+fn scalar_run_loop_relays_multiple_batches() {
+    // The pure protocol relay does not branch on the input iteration axis: a
+    // scalar run loop relays multiple MT_NEXT batches (and an interleaved
+    // MT_EMIT) to DONE identically to the set case in `set_loop_multiple_batches`.
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto);
+    proto.step(response(MessageType::MtRun)).unwrap();
+
+    for rows in [4u64, 2u64] {
+        let mut next_resp = response(MessageType::MtNext);
+        next_resp.next = Some(ExascriptNextDataRep { table: table(rows) });
+        let (ev, _) = proto.step(next_resp).unwrap();
+        match ev {
+            HostEvent::NextData(t) => assert_eq!(t.rows, rows),
+            _ => panic!("expected NextData"),
+        }
+    }
+
+    // An emit ack mid-loop is relayed as EmitAck, then DONE ends the group.
+    let (ev, _) = proto.step(response(MessageType::MtEmit)).unwrap();
+    assert!(matches!(ev, HostEvent::EmitAck));
+
+    let (ev, _) = proto.step(response(MessageType::MtDone)).unwrap();
+    assert!(matches!(ev, HostEvent::Done));
+    assert_eq!(*proto.phase(), Phase::Run);
+}
+
+#[test]
 fn close_sequence_cleanup_finished_close() {
     let mut proto = Protocol::new();
     run_handshake(&mut proto);

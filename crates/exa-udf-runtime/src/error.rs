@@ -8,6 +8,11 @@ pub enum RuntimeError {
     AbiMismatch { expected: u32, found: u32 },
     #[error("Fingerprint mismatch: expected {expected}, found {found}")]
     FingerprintMismatch { expected: String, found: String },
+    #[error("Output shape mismatch: UDF compiled as {compiled} but registered as {registered}")]
+    OutputShapeMismatch {
+        compiled: &'static str,
+        registered: &'static str,
+    },
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
     #[error("Protocol error: {0}")]

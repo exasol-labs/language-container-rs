@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use exa_proto::ExascriptTableData;
-use exa_zmq_protocol::{ColumnMeta, ExaType};
+use exa_zmq_protocol::{ColumnMeta, ExaType, IterType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
@@ -127,20 +127,12 @@ impl InputRowSet {
         }
     }
 
-    pub fn current_index(&self) -> usize {
-        self.current_row
-    }
-
     pub fn current_row(&self) -> &[Value] {
         &self.rows[self.current_row]
     }
 
     pub fn row(&self, idx: usize) -> Option<&[Value]> {
         self.rows.get(idx).map(|r| r.as_slice())
-    }
-
-    pub fn is_exhausted(&self) -> bool {
-        self.current_row >= self.rows.len()
     }
 }
 
@@ -1398,15 +1390,30 @@ fn first_nonloopback_ipv4() -> Result<String, exasol_udf_sdk::error::UdfError> {
     result.ok_or_else(|| UdfError::ConnectBack("no non-loopback IPv4 interface found".into()))
 }
 
-/// Bridges one materialised input batch and an emit buffer to the SDK's
-/// `UdfContext`. The UDF advances through rows via `next` and reads the current
-/// row via `get`; `emit` appends to the buffer.
+/// Bridges the input of one group and its emit buffer to the SDK's
+/// `UdfContext`, reading the current row via `get` and appending output via
+/// `emit`. The dispatcher drives it by input iteration axis:
 ///
-/// `next` semantics: the first call positions on row 0 (returning whether any
-/// row exists); subsequent calls advance. This lets both scalar and set UDFs
-/// use the canonical `while ctx.next()? { ... }` loop while the dispatch layer
-/// controls batch refills.
+/// - `Multiple` (SET): the UDF advances via `next`, which spans every
+///   `MT_NEXT` batch of the group — it fetches the next batch when the current
+///   one drains and returns `false` only at the group boundary.
+/// - `ExactlyOnce` (SCALAR): the framework drives one `run()` per row via
+///   `advance_row`, reading the row through `get`; `next` is banned in this
+///   context and returns an error.
 ///
+/// Pulls subsequent batches through a [`BatchFetcher`] the dispatcher installs
+/// with `configure_group_input`; the default no-op fetcher yields no further
+/// batches, so a bridge built for a single materialised batch (e.g. in tests)
+/// iterates that batch and stops.
+///
+/// Fetches the next `MT_NEXT` batch within a group. `Ok(Some(table))` is a
+/// batch, `Ok(None)` the group boundary (the DB answered `MT_DONE`). Shares the
+/// dispatcher's single `RefCell<&mut Protocol>` with the emit flusher and the
+/// credential fetcher; borrows never overlap because the UDF is single-threaded
+/// and the dispatch loop is blocked inside `run()`.
+pub type BatchFetcher<'a> =
+    Box<dyn FnMut() -> Result<Option<exa_proto::ExascriptTableData>, UdfError> + 'a>;
+
 /// On-demand credential fetcher: given a CONNECTION name, sends MT_IMPORT to the
 /// DB and returns the resulting `ConnInfo`. `Fn` (not `FnOnce`) because
 /// `connection()` borrows `&self` and may be called repeatedly for different
@@ -1429,10 +1436,24 @@ pub struct HostContextBridge<'a> {
     emit_buf: &'a mut EmitBuffer,
     input_cols: &'a [ColumnMeta],
     /// Declared EMITS output schema — used by `emit_batch` to choose the target
-    /// proto block for each Arrow column. Threaded in by `dispatch::run_batch`
+    /// proto block for each Arrow column. Threaded in by `dispatch::run_group`
     /// alongside `input_cols` because the bridge previously held only the input
     /// columns and `emit_batch` needs the output schema at encoding time.
     output_meta: &'a [ColumnMeta],
+    /// Input iteration axis. `Multiple` (SET) drives `next` across batches;
+    /// `ExactlyOnce` (SCALAR) presents one row per `run()` via `advance_row` and
+    /// bans `next`. Defaults to `Multiple` so a bridge over a single materialised
+    /// batch iterates the whole batch.
+    input_iter: IterType,
+    /// Output iteration axis. `Multiple` (EMITS) admits author `emit`;
+    /// `ExactlyOnce` (RETURNS) bans it — the returned value crosses via
+    /// `set_return` instead. Defaults to `Multiple` so a bridge constructed
+    /// without an explicit output shape accepts `emit`.
+    output_iter: IterType,
+    /// Pulls the next `MT_NEXT` batch when the current one drains. Defaults to a
+    /// no-op yielding no further batches; the dispatcher installs the real
+    /// fetcher via `configure_group_input`.
+    fetcher: BatchFetcher<'a>,
     started: bool,
     /// Sends one pre-built proto table to the DB when the buffer crosses its byte
     /// threshold, keeping a single batch's output bounded. Invoked from `emit`
@@ -1510,6 +1531,9 @@ impl<'a> HostContextBridge<'a> {
             emit_buf,
             input_cols,
             output_meta,
+            input_iter: IterType::Multiple,
+            output_iter: IterType::Multiple,
+            fetcher: Box::new(|| Ok(None)),
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
@@ -1517,6 +1541,66 @@ impl<'a> HostContextBridge<'a> {
             #[cfg(feature = "connect-back")]
             conn_requester,
         }
+    }
+
+    /// Install the group's iteration axes and batch fetcher. Called once by the
+    /// dispatcher after construction; the fetcher spans `MT_NEXT` batches within
+    /// the group for both the scalar per-row loop and set `next`. The output axis
+    /// governs whether author `emit` is admitted (EMITS) or banned in favour of
+    /// `set_return` (RETURNS).
+    pub fn configure_group_input(
+        &mut self,
+        input_iter: IterType,
+        output_iter: IterType,
+        fetcher: BatchFetcher<'a>,
+    ) {
+        self.input_iter = input_iter;
+        self.output_iter = output_iter;
+        self.fetcher = fetcher;
+    }
+
+    /// Advance the framework cursor to the next scalar row, fetching the next
+    /// `MT_NEXT` batch when the current one drains. Returns `false` at the group
+    /// boundary.
+    pub fn advance_row(&mut self) -> Result<bool, UdfError> {
+        if self.input.advance() {
+            Ok(true)
+        } else {
+            self.refill()
+        }
+    }
+
+    /// Fetch batches until a non-empty one loads (presenting its row 0) or the
+    /// group ends. Zero-row batches are skipped. Returns `false` only at the
+    /// group boundary.
+    fn refill(&mut self) -> Result<bool, UdfError> {
+        loop {
+            match (self.fetcher)()? {
+                Some(table) => {
+                    *self.input = InputRowSet::from_proto(&table, self.input_cols);
+                    if !self.input.is_empty() {
+                        return Ok(true);
+                    }
+                }
+                None => return Ok(false),
+            }
+        }
+    }
+
+    /// Append one output row to the group-scoped buffer, flushing an `MT_EMIT`
+    /// when the running byte estimate crosses the threshold. Shared by `emit`
+    /// (EMITS output) and `set_return` (RETURNS output) so both honour the same
+    /// buffering and flush contract; the trailing rows are flushed by the
+    /// dispatcher before the group's `MT_DONE`.
+    fn push_output_row(&mut self, row: Vec<Value>) -> Result<(), UdfError> {
+        self.emit_buf.push(row);
+        if self.emit_buf.should_flush() {
+            self.emit_buf.record_flush_telemetry();
+            let table = self.emit_buf.to_proto(self.output_meta);
+            (self.flusher)(table)?;
+            self.emit_buf.clear();
+        }
+        Ok(())
     }
 
     /// Take the last error message captured from a UDF context method.
@@ -1550,6 +1634,9 @@ impl<'a> HostContextBridge<'a> {
             emit_buf,
             input_cols,
             output_meta,
+            input_iter: IterType::Multiple,
+            output_iter: IterType::Multiple,
+            fetcher: Box::new(|| Ok(None)),
             started: false,
             flusher,
             last_error: std::cell::Cell::new(None),
@@ -1659,23 +1746,25 @@ impl UdfContext for HostContextBridge<'_> {
     }
 
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-        self.emit_buf.push(values.to_vec());
-        if self.emit_buf.should_flush() {
-            self.emit_buf.record_flush_telemetry();
-            let table = self.emit_buf.to_proto(self.output_meta);
-            tracing::debug!(
-                target: "emit_flush",
-                rows = table.rows,
-                "MT_EMIT sending"
-            );
-            (self.flusher)(table)?;
-            self.emit_buf.clear();
+        if self.output_iter == IterType::ExactlyOnce {
+            return Err(UdfError::User(
+                "emit() is not allowed in RETURNS output context; return the value instead".into(),
+            ));
         }
-        Ok(())
+        self.push_output_row(values.to_vec())
+    }
+
+    fn set_return(&mut self, value: Option<Value>) -> Result<(), UdfError> {
+        self.push_output_row(vec![value.unwrap_or(Value::Null)])
     }
 
     #[cfg(feature = "emit-arrow")]
     fn emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError> {
+        if self.output_iter == IterType::ExactlyOnce {
+            return Err(UdfError::User(
+                "emit() is not allowed in RETURNS output context; return the value instead".into(),
+            ));
+        }
         // Resolve the disjoint borrow: take references to fields we need
         // separately so the borrow checker sees them as independent borrows.
         let emit_buf = &mut *self.emit_buf;
@@ -1702,14 +1791,31 @@ impl UdfContext for HostContextBridge<'_> {
     }
 
     fn next(&mut self) -> Result<bool, UdfError> {
-        if self.input.is_empty() {
-            return Ok(false);
+        match self.input_iter {
+            // SCALAR: the framework drives one `run()` per input row via
+            // `advance_row`, so `next()` has no meaning here. Reject it, matching
+            // the reference containers' ban on `next()` in scalar context.
+            IterType::ExactlyOnce => Err(UdfError::User(
+                "next() is not allowed in scalar context".into(),
+            )),
+            // SET: span every `MT_NEXT` batch of the group. The first call
+            // positions on row 0 of the current batch; subsequent calls advance,
+            // fetching the next batch when the current drains. `false` only at
+            // the group boundary.
+            IterType::Multiple => {
+                if !self.started {
+                    self.started = true;
+                    if !self.input.is_empty() {
+                        return Ok(true);
+                    }
+                    return self.refill();
+                }
+                if self.input.advance() {
+                    return Ok(true);
+                }
+                self.refill()
+            }
         }
-        if !self.started {
-            self.started = true;
-            return Ok(true);
-        }
-        Ok(self.input.advance())
     }
 
     #[cfg(feature = "connect-back")]
@@ -2030,6 +2136,80 @@ mod tests {
                 ))
             }),
         )
+    }
+
+    /// A one-row single-Int64-column batch for the contract-gate tests.
+    fn single_int_batch() -> (ExascriptTableData, Vec<ColumnMeta>) {
+        let meta = vec![col("a", ExaType::Int64)];
+        let table = ExascriptTableData {
+            rows: 1,
+            data_int64: vec![1],
+            data_nulls: vec![false],
+            ..Default::default()
+        };
+        (table, meta)
+    }
+
+    #[test]
+    fn scalar_input_bans_next() {
+        let (table, meta) = single_int_batch();
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+        bridge.configure_group_input(
+            IterType::ExactlyOnce,
+            IterType::ExactlyOnce,
+            Box::new(|| Ok(None)),
+        );
+        match bridge.next() {
+            Err(UdfError::User(msg)) => assert!(
+                msg.contains("next()") && msg.contains("scalar"),
+                "unexpected next-ban message: {msg}"
+            ),
+            other => panic!("expected next() ban error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn returns_output_bans_emit() {
+        let (table, meta) = single_int_batch();
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+        bridge.configure_group_input(
+            IterType::ExactlyOnce,
+            IterType::ExactlyOnce,
+            Box::new(|| Ok(None)),
+        );
+        match bridge.emit(&[Value::Int64(9)]) {
+            Err(UdfError::User(msg)) => assert!(
+                msg.contains("emit()") && msg.contains("RETURNS"),
+                "unexpected emit-ban message: {msg}"
+            ),
+            other => panic!("expected emit() ban error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_return_records_some_as_row_and_none_as_null() {
+        let (table, meta) = single_int_batch();
+        let mut rs = InputRowSet::from_proto(&table, &meta);
+        let mut emit = EmitBuffer::new();
+        {
+            let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+            bridge.configure_group_input(
+                IterType::ExactlyOnce,
+                IterType::ExactlyOnce,
+                Box::new(|| Ok(None)),
+            );
+            bridge.set_return(Some(Value::Int64(7))).unwrap();
+            bridge.set_return(None).unwrap();
+        }
+        assert_eq!(
+            emit.rows,
+            vec![vec![Value::Int64(7)], vec![Value::Null]],
+            "set_return must record Some(v) as [v] and None as [Null]"
+        );
     }
 
     /// One batch, 2 rows, mixed types with a NULL cell. Verifies dense per-type

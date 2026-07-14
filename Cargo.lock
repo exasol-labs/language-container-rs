@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "exasol-udf-sdk",
  "libloading",
@@ -933,6 +933,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "emit-k"
+version = "0.1.0"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -982,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -991,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1014,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1059,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1070,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1080,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -1802,7 +1810,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.20.3"
+version = "0.21.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2784,6 +2792,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "returns-with-emit"
+version = "0.1.0"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2921,6 +2937,14 @@ dependencies = [
 [[package]]
 name = "scalar-double"
 version = "0.1.1"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
+name = "scalar-next-illegal"
+version = "0.1.0"
 dependencies = [
  "exasol-udf-macros",
  "exasol-udf-sdk",
@@ -3110,6 +3134,14 @@ dependencies = [
 [[package]]
 name = "set-filter"
 version = "0.1.1"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
+name = "set-sum"
+version = "0.1.0"
 dependencies = [
  "exasol-udf-macros",
  "exasol-udf-sdk",

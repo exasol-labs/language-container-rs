@@ -5,7 +5,7 @@ use exasol_udf_sdk::value::Value;
 use std::net::ToSocketAddrs;
 
 #[exasol_udf]
-pub fn resolv_udf(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn resolv_udf(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> {
     let host = match ctx.get(0)? {
         Value::String(s) => s.clone(),
         Value::Null => return Err(UdfError::Type("host must not be NULL".into())),
@@ -16,7 +16,7 @@ pub fn resolv_udf(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         .map_err(|e| UdfError::User(format!("DNS resolution failed for {host:?}: {e}")))?
         .next()
         .ok_or_else(|| UdfError::User(format!("no addresses returned for {host:?}")))?;
-    ctx.emit(&[Value::String(addr.ip().to_string())])
+    Ok(Some(addr.ip().to_string()))
 }
 
 #[cfg(test)]
@@ -25,15 +25,11 @@ mod tests {
 
     struct TestCtx {
         input: Vec<Value>,
-        emitted: Vec<Vec<Value>>,
     }
 
     impl TestCtx {
         fn new(row: Vec<Value>) -> Self {
-            Self {
-                input: row,
-                emitted: Vec::new(),
-            }
+            Self { input: row }
         }
     }
 
@@ -48,9 +44,10 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {col} out of range")))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
+        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented(
+                "emit is banned in RETURNS output".into(),
+            ))
         }
 
         fn next(&mut self) -> Result<bool, UdfError> {
@@ -61,14 +58,10 @@ mod tests {
     #[test]
     fn resolves_localhost_to_ip() {
         let mut ctx = TestCtx::new(vec![Value::String("localhost".into())]);
-        resolv_udf(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted.len(), 1);
-        let ip = match &ctx.emitted[0][0] {
-            Value::String(s) => s.clone(),
-            other => panic!("expected String, got {other:?}"),
-        };
+        let result = resolv_udf(&mut ctx).unwrap();
+        let ip = result.expect("resolv_udf should return Some(ip)");
         ip.parse::<std::net::IpAddr>()
-            .expect("emitted value should be a valid IP address");
+            .expect("returned value should be a valid IP address");
     }
 
     #[test]

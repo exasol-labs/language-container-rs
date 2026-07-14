@@ -7,7 +7,7 @@ pub mod value;
 pub use connect_back::{ConnectionObject, ExaConnection};
 pub use context::{UdfContext, UdfRun};
 pub use error::UdfError;
-pub use value::{ExaType, Value};
+pub use value::{ExaType, IntoValue, Value};
 
 /// Write a formatted message to stderr when the context's resolved debug level
 /// permits the requested level.

@@ -4,7 +4,7 @@ use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
 
 #[exasol_udf]
-pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     let doubled = match ctx.get(0)? {
         Value::Int64(n) => Value::Int64(n * 2),
         // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
@@ -16,10 +16,10 @@ pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
                 scale: 0,
             })
         }
-        Value::Null => Value::Null,
+        Value::Null => return Ok(None),
         _ => return Err(UdfError::Type("expected Int64 or Numeric".into())),
     };
-    ctx.emit(&[doubled])
+    Ok(Some(doubled))
 }
 
 #[cfg(test)]
@@ -28,15 +28,11 @@ mod tests {
 
     struct TestCtx {
         input: Vec<Value>,
-        emitted: Vec<Vec<Value>>,
     }
 
     impl TestCtx {
         fn new(row: Vec<Value>) -> Self {
-            Self {
-                input: row,
-                emitted: Vec::new(),
-            }
+            Self { input: row }
         }
     }
 
@@ -51,9 +47,10 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
+        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented(
+                "emit is banned in RETURNS output".into(),
+            ))
         }
 
         fn next(&mut self) -> Result<bool, UdfError> {
@@ -64,22 +61,22 @@ mod tests {
     #[test]
     fn doubles_positive_int64() {
         let mut ctx = TestCtx::new(vec![Value::Int64(21)]);
-        scalar_double(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Int64(42)]]);
+        let result = scalar_double(&mut ctx).unwrap();
+        assert_eq!(result, Some(Value::Int64(42)));
     }
 
     #[test]
     fn doubles_negative_int64() {
         let mut ctx = TestCtx::new(vec![Value::Int64(-5)]);
-        scalar_double(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Int64(-10)]]);
+        let result = scalar_double(&mut ctx).unwrap();
+        assert_eq!(result, Some(Value::Int64(-10)));
     }
 
     #[test]
     fn passes_null_through() {
         let mut ctx = TestCtx::new(vec![Value::Null]);
-        scalar_double(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Null]]);
+        let result = scalar_double(&mut ctx).unwrap();
+        assert_eq!(result, None);
     }
 
     #[test]
