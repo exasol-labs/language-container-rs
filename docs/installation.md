@@ -50,11 +50,11 @@ curl -fsSL -o rustslc.tar.gz \
 Pick `<VERSION>` from the releases page, or `gh release list --repo exasol-labs/language-container-rs`.
 
 **Naming — this is the one thing that must stay consistent for the rest of the guide:**
-rename the download to `rustslc.tar.gz`. This name (minus `.tar.gz`) is embedded
+the filename must remain `rustslc.tar.gz`. This name (minus `.tar.gz`) is embedded
 verbatim in the BucketFS upload destination, the directory BucketFS auto-extracts it
 to, and the `SCRIPT_LANGUAGES` string in step 4. If you need several SLC versions
-installed side by side, pick a different name and swap `rustslc` for it everywhere
-below — otherwise just use `rustslc` as-is.
+installed side by side, pick a different name for the `-o` flag above and swap
+`rustslc` for it everywhere below — otherwise just use `rustslc` as-is.
 
 ### Step 2 — Upload `rustslc.tar.gz` to BucketFS
 
@@ -79,9 +79,11 @@ For an on-prem/Docker BucketFS that's reachable over the network, but without
 
 ```bash
 curl -X PUT -T rustslc.tar.gz -u w:<BFS_WRITE_PASSWORD> \
-  http://<HOST>:2580/default/rustslc.tar.gz
+  http://<HOST>:2580/bfsdefault/default/rustslc.tar.gz
 ```
 
+BucketFS endpoints are addressed as `/<service>/<bucket>/<path>` — `bfsdefault/default`
+is the on-prem/Docker default; swap it for whatever service/bucket your platform uses.
 Use `https://` and port `2581` (add `--insecure` for the self-signed Docker-db cert) if
 the BucketFS service requires TLS. `w` is the fixed BucketFS write-username; the
 password is the bucket's write password (for a local Docker-db, read it with the
