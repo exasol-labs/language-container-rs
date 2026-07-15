@@ -78,14 +78,16 @@ For an on-prem/Docker BucketFS that's reachable over the network, but without
 `exapump` installed:
 
 ```bash
-curl -X PUT -T rustslc.tar.gz \
-  http://w:<BFS_WRITE_PASSWORD>@<HOST>:2580/default/rustslc.tar.gz
+curl -X PUT -T rustslc.tar.gz -u w:<BFS_WRITE_PASSWORD> \
+  http://<HOST>:2580/default/rustslc.tar.gz
 ```
 
 Use `https://` and port `2581` (add `--insecure` for the self-signed Docker-db cert) if
 the BucketFS service requires TLS. `w` is the fixed BucketFS write-username; the
 password is the bucket's write password (for a local Docker-db, read it with the
 `xmllint`/`EXAConf` snippet in the [automated install](#automated-install-scriptsinstallsh) section above).
+`-u` sends the same Basic-Auth credential as embedding it in the URL, without putting
+the password in your shell history or any proxy/access log that records request URLs.
 
 #### c) Exasol SaaS REST API
 
@@ -148,6 +150,12 @@ SELECT * FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SCRIPT_LANGUAGES';
 Build the registration string from the BucketFS service/bucket used in step 2
 (on-prem/Docker: `bfsdefault/default`; Exasol SaaS: `uploads/default`) plus the
 `rustslc` name fixed in step 1, and append it to the existing value:
+
+> This guide uploads to the bucket root, so `rustslc` is the whole path. If your
+> platform's upload UI forces a destination folder, or you choose to mirror
+> `scripts/install.sh`'s own layout (which uploads under `slc/<name>` — see
+> `BFS_PATH` in the script), prefix that folder onto `rustslc` in *both* URIs below,
+> e.g. `slc/rustslc` instead of `rustslc`.
 
 ```sql
 -- current session only
