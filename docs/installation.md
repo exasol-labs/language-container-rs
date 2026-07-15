@@ -88,8 +88,8 @@ Use `https://` and port `2581` (add `--insecure` for the self-signed Docker-db c
 the BucketFS service requires TLS. `w` is the fixed BucketFS write-username; the
 password is the bucket's write password (for a local Docker-db, read it with the
 `xmllint`/`EXAConf` snippet in the [automated install](#automated-install-scriptsinstallsh) section above).
-`-u` sends the same Basic-Auth credential as embedding it in the URL, without putting
-the password in your shell history or any proxy/access log that records request URLs.
+`-u` sends the same Basic-Auth credential as embedding it in the URL, but avoids putting credentials in the URL (so they don’t end up in URL-logging proxies/access logs).
+To keep the password out of shell history and `ps` output, pass only the username (`-u w`) and let `curl` prompt for the password.
 
 #### c) Exasol SaaS REST API
 
