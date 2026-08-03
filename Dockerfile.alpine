@@ -25,22 +25,30 @@ RUN cargo build --release -p exaudfclient
 
 # Collect the exact glibc runtime libs (cp -L dereferences symlinks so we copy
 # real files rather than dangling symlinks into a musl Alpine chroot).
-RUN mkdir -p /glibc-rt/lib/x86_64-linux-gnu \
-               /glibc-rt/lib64 \
-               /glibc-rt/usr/lib/x86_64-linux-gnu \
-               /glibc-rt/etc/ld.so.conf.d && \
+# Arch-parameterized: TRIPLET is the Debian multiarch dir (x86_64-linux-gnu on
+# amd64, aarch64-linux-gnu on arm64) and LOADER is the built binary's own dynamic
+# interpreter (/lib64/ld-linux-x86-64.so.2 on amd64, /lib/ld-linux-aarch64.so.1
+# on arm64) — both derived at build time so no arch is hardcoded.
+RUN TRIPLET="$(gcc -print-multiarch)" && \
+    LOADER="$(readelf -l /build/target/release/exaudfclient \
+        | sed -n 's/.*interpreter: \(.*\)]/\1/p' | tr -d ' ')" && \
+    mkdir -p "/glibc-rt/lib/$TRIPLET" \
+             "/glibc-rt/usr/lib/$TRIPLET" \
+             "/glibc-rt$(dirname "$LOADER")" \
+             /glibc-rt/etc/ld.so.conf.d && \
     # Core glibc runtime (cp -L dereferences symlinks into real files)
-    cp -L /lib/x86_64-linux-gnu/libc.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
-    cp -L /lib/x86_64-linux-gnu/libm.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
-    cp -L /lib/x86_64-linux-gnu/libgcc_s.so.1 /glibc-rt/lib/x86_64-linux-gnu/ && \
-    cp -L /lib/x86_64-linux-gnu/libstdc++.so.6 /glibc-rt/lib/x86_64-linux-gnu/ && \
-    cp -L /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /glibc-rt/lib64/ && \
+    cp -L "/lib/$TRIPLET/libc.so.6"      "/glibc-rt/lib/$TRIPLET/" && \
+    cp -L "/lib/$TRIPLET/libm.so.6"      "/glibc-rt/lib/$TRIPLET/" && \
+    cp -L "/lib/$TRIPLET/libgcc_s.so.1"  "/glibc-rt/lib/$TRIPLET/" && \
+    cp -L "/lib/$TRIPLET/libstdc++.so.6" "/glibc-rt/lib/$TRIPLET/" && \
+    # Dynamic loader, preserved at its own absolute path
+    cp -L "$LOADER" "/glibc-rt$LOADER" && \
     # NSS modules (glibc dlopen's these at runtime for files/dns lookups)
-    cp -L /usr/lib/x86_64-linux-gnu/libnss_files.so.2 /glibc-rt/usr/lib/x86_64-linux-gnu/ && \
-    cp -L /usr/lib/x86_64-linux-gnu/libnss_dns.so.2 /glibc-rt/usr/lib/x86_64-linux-gnu/ && \
+    cp -L "/usr/lib/$TRIPLET/libnss_files.so.2" "/glibc-rt/usr/lib/$TRIPLET/" && \
+    cp -L "/usr/lib/$TRIPLET/libnss_dns.so.2"   "/glibc-rt/usr/lib/$TRIPLET/" && \
     # ld.so.conf so the linker knows the search paths (generates ld.so.cache equivalent)
-    printf '/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu\n' \
-        > /glibc-rt/etc/ld.so.conf.d/x86_64-linux-gnu.conf && \
+    printf '/lib/%s\n/usr/lib/%s\n' "$TRIPLET" "$TRIPLET" \
+        > "/glibc-rt/etc/ld.so.conf.d/$TRIPLET.conf" && \
     printf 'include /etc/ld.so.conf.d/*.conf\n' > /glibc-rt/etc/ld.so.conf && \
     # Generate ld.so.cache inside the staged tree
     ldconfig -r /glibc-rt

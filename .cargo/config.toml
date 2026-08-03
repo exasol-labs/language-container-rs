@@ -5,3 +5,8 @@
 
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"
+
+[target.aarch64-unknown-linux-musl]
+# musl-gcc is the host-arch musl wrapper (musl-tools), mirroring the x86_64
+# stanza above: on an aarch64 host it links aarch64 objects.
+linker = "musl-gcc"
