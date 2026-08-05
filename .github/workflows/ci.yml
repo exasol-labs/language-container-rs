@@ -170,12 +170,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # dispatch/single_call tests in exa-udf-runtime dlopen these .so fixtures
-      # (cache hit after the build job). cargo llvm-cov redirects the target
-      # dir to target/llvm-cov-target, but the fixture lookup resolves
-      # <workspace>/target/debug/lib*.so, so they must exist under the plain
-      # target dir before the coverage run. Drop this step once #54 lands
-      # (fixture path resolved from the test binary's own directory).
+      # cargo llvm-cov redirects target/ to target/llvm-cov-target, but the
+      # fixture lookup expects target/debug/lib*.so. Drop once #54 lands.
       - name: Build test fixture cdylibs
         run: cargo build -p scalar-double -p annotated-fixture -p single-call-fixture
 
@@ -186,9 +182,6 @@ jobs:
             --workspace \
             --lcov --output-path lcov-unit.info
 
-      # if-no-files-found: error + always(): a red run is the run whose
-      # coverage report someone needs to read, and the sonar job needs the
-      # artifact regardless of pass/fail.
       - name: Upload unit coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -202,15 +195,14 @@ jobs:
     name: Sonar Analysis
     runs-on: ubuntu-latest
     needs: [unit-tests]
-    # Fork PRs don't get repository secrets, so SONAR_TOKEN would be empty
-    # and fail the scan.
+    # Fork PRs lack SONAR_TOKEN — skip rather than fail.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # shallow clones degrade blame-based issue assignment
+          fetch-depth: 0 # full history for blame-based analysis
 
       - name: Download unit coverage
         uses: actions/download-artifact@v4
