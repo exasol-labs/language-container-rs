@@ -1,0 +1,273 @@
+use super::*;
+use exa_proto::exascript_metadata::ColumnDefinition;
+use exa_proto::{ExascriptInfo, ExascriptMetadata};
+
+impl super::ColumnMeta {
+    pub(crate) fn to_pb(&self) -> exa_proto::exascript_metadata::ColumnDefinition {
+        let pb_type = match self.typ {
+            ExaType::Double => ColumnType::PbDouble,
+            ExaType::Int32 => ColumnType::PbInt32,
+            ExaType::Int64 => ColumnType::PbInt64,
+            ExaType::Numeric { .. } => ColumnType::PbNumeric,
+            ExaType::Timestamp | ExaType::TimestampTz => ColumnType::PbTimestamp,
+            ExaType::Date => ColumnType::PbDate,
+            ExaType::String { .. }
+            | ExaType::Char { .. }
+            | ExaType::Geometry
+            | ExaType::HashType
+            | ExaType::IntervalYearToMonth
+            | ExaType::IntervalDayToSecond => ColumnType::PbString,
+            ExaType::Boolean => ColumnType::PbBoolean,
+            ExaType::Unsupported => ColumnType::PbUnsupported,
+        };
+        exa_proto::exascript_metadata::ColumnDefinition {
+            name: self.name.clone(),
+            r#type: Some(pb_type as i32),
+            type_name: self.type_name.clone(),
+            size: self.size,
+            precision: self.precision,
+            scale: self.scale,
+        }
+    }
+}
+
+fn iter_to_pb(iter: &IterType) -> PbIterType {
+    match iter {
+        IterType::ExactlyOnce => PbIterType::PbExactlyOnce,
+        IterType::Multiple => PbIterType::PbMultiple,
+    }
+}
+
+impl super::UdfMeta {
+    pub(crate) fn to_pb(&self) -> ExascriptMetadata {
+        ExascriptMetadata {
+            input_iter_type: iter_to_pb(&self.input_iter) as i32,
+            output_iter_type: iter_to_pb(&self.output_iter) as i32,
+            input_columns: self.input_columns.iter().map(ColumnMeta::to_pb).collect(),
+            output_columns: self.output_columns.iter().map(ColumnMeta::to_pb).collect(),
+            single_call_mode: self.single_call_mode,
+        }
+    }
+}
+
+fn col(
+    ty: ColumnType,
+    type_name: &str,
+    size: Option<u32>,
+    precision: Option<u32>,
+    scale: Option<u32>,
+) -> ColumnDefinition {
+    ColumnDefinition {
+        name: "c".to_string(),
+        r#type: Some(ty as i32),
+        type_name: type_name.to_string(),
+        size,
+        precision,
+        scale,
+    }
+}
+
+#[test]
+fn from_pb_uses_sdk_exatype() {
+    let pb = col(ColumnType::PbNumeric, "DECIMAL", None, Some(18), Some(2));
+    let meta = ColumnMeta::from_pb(&pb);
+    assert_eq!(
+        meta.typ,
+        ExaType::Numeric {
+            precision: Some(18),
+            scale: Some(2)
+        }
+    );
+}
+
+#[test]
+fn from_pb_refines_extended_types_via_type_name() {
+    let cases = [
+        (
+            "CHAR(10) UTF8",
+            ColumnType::PbString,
+            Some(10),
+            ExaType::Char { size: Some(10) },
+        ),
+        (
+            "VARCHAR(256) UTF8",
+            ColumnType::PbString,
+            Some(256),
+            ExaType::String { size: Some(256) },
+        ),
+        ("GEOMETRY(0)", ColumnType::PbString, None, ExaType::Geometry),
+        (
+            "HASHTYPE(16 BYTE)",
+            ColumnType::PbString,
+            None,
+            ExaType::HashType,
+        ),
+        (
+            "INTERVAL YEAR(2) TO MONTH",
+            ColumnType::PbString,
+            None,
+            ExaType::IntervalYearToMonth,
+        ),
+        (
+            "INTERVAL DAY(2) TO SECOND(3)",
+            ColumnType::PbString,
+            None,
+            ExaType::IntervalDayToSecond,
+        ),
+        (
+            "TIMESTAMP(3) WITH LOCAL TIME ZONE",
+            ColumnType::PbTimestamp,
+            None,
+            ExaType::TimestampTz,
+        ),
+    ];
+
+    for (type_name, pb_ty, size, expected) in cases {
+        let pb = col(pb_ty, type_name, size, None, None);
+        let meta = ColumnMeta::from_pb(&pb);
+        assert_eq!(meta.typ, expected, "type_name = {type_name}");
+    }
+
+    let plain_ts = col(ColumnType::PbTimestamp, "TIMESTAMP(3)", None, None, None);
+    assert_eq!(ColumnMeta::from_pb(&plain_ts).typ, ExaType::Timestamp);
+
+    let unknown_string = col(ColumnType::PbString, "MYSTERY", Some(7), None, None);
+    assert_eq!(
+        ColumnMeta::from_pb(&unknown_string).typ,
+        ExaType::String { size: Some(7) }
+    );
+}
+
+#[test]
+fn unambiguous_types_ignore_type_name() {
+    let misleading = "VARCHAR WITH LOCAL TIME ZONE GEOMETRY";
+    let cases = [
+        (ColumnType::PbDouble, ExaType::Double),
+        (ColumnType::PbInt32, ExaType::Int32),
+        (ColumnType::PbInt64, ExaType::Int64),
+        (ColumnType::PbDate, ExaType::Date),
+        (ColumnType::PbBoolean, ExaType::Boolean),
+        (ColumnType::PbUnsupported, ExaType::Unsupported),
+    ];
+    for (pb_ty, expected) in cases {
+        let pb = col(pb_ty, misleading, None, None, None);
+        assert_eq!(ColumnMeta::from_pb(&pb).typ, expected);
+    }
+
+    let numeric = col(ColumnType::PbNumeric, misleading, None, Some(5), Some(1));
+    assert_eq!(
+        ColumnMeta::from_pb(&numeric).typ,
+        ExaType::Numeric {
+            precision: Some(5),
+            scale: Some(1)
+        }
+    );
+}
+
+fn make_info(maximal_memory_limit: u64) -> ExascriptInfo {
+    ExascriptInfo {
+        maximal_memory_limit,
+        ..Default::default()
+    }
+}
+
+fn make_meta() -> ExascriptMetadata {
+    // input_iter_type / output_iter_type default to 0; prost resolves 0 to
+    // PbExactlyOnce (the first variant) via unwrap_or(IterType::default()),
+    // so Default::default() is equivalent to the previous explicit form.
+    ExascriptMetadata::default()
+}
+
+#[test]
+fn from_pb_decodes_handshake_metadata_without_conn_info() {
+    let info = ExascriptInfo {
+        database_name: "EXADB".to_string(),
+        database_version: "2026.1.0".to_string(),
+        script_name: "MY_SCRIPT".to_string(),
+        script_schema: "MY_SCHEMA".to_string(),
+        session_id: 1234567890,
+        statement_id: 7,
+        node_count: 3,
+        node_id: 2,
+        vm_id: 9876543210,
+        maximal_memory_limit: 64 * 1024 * 1024,
+        // Present optional: decodes to Some; absent ones stay None.
+        current_user: Some("ALICE".to_string()),
+        current_schema: None,
+        scope_user: Some("BOB".to_string()),
+        ..Default::default()
+    };
+    let udf = UdfMeta::from_pb(&make_meta(), &info).unwrap();
+
+    assert_eq!(udf.database_name, "EXADB");
+    assert_eq!(udf.database_version, "2026.1.0");
+    assert_eq!(udf.script_name, "MY_SCRIPT");
+    assert_eq!(udf.script_schema, "MY_SCHEMA");
+    assert_eq!(udf.session_id(), 1234567890);
+    assert_eq!(udf.statement_id(), 7);
+    assert_eq!(udf.node_count(), 3);
+    assert_eq!(udf.node_id(), 2);
+    assert_eq!(udf.vm_id(), 9876543210);
+    assert_eq!(udf.maximal_memory_limit, 64 * 1024 * 1024);
+    // Optionals mirror the proto present/absent distinction verbatim.
+    assert_eq!(udf.current_user, Some("ALICE".to_string()));
+    assert_eq!(udf.current_schema, None);
+    assert_eq!(udf.scope_user, Some("BOB".to_string()));
+}
+
+#[test]
+fn from_pb_carries_maximal_memory_limit() {
+    let info_nonzero = make_info(512 * 1024 * 1024);
+    let meta = make_meta();
+    let udf = UdfMeta::from_pb(&meta, &info_nonzero).unwrap();
+    assert_eq!(udf.maximal_memory_limit, 512 * 1024 * 1024);
+
+    let info_zero = make_info(0);
+    let udf_zero = UdfMeta::from_pb(&meta, &info_zero).unwrap();
+    assert_eq!(udf_zero.maximal_memory_limit, 0);
+}
+
+#[test]
+fn extended_exatype_roundtrips_to_pb() {
+    let cases = [
+        (
+            ExaType::Char { size: Some(10) },
+            "CHAR(10)",
+            ColumnType::PbString,
+        ),
+        (ExaType::Geometry, "GEOMETRY(0)", ColumnType::PbString),
+        (ExaType::HashType, "HASHTYPE(16 BYTE)", ColumnType::PbString),
+        (
+            ExaType::IntervalYearToMonth,
+            "INTERVAL YEAR TO MONTH",
+            ColumnType::PbString,
+        ),
+        (
+            ExaType::IntervalDayToSecond,
+            "INTERVAL DAY TO SECOND",
+            ColumnType::PbString,
+        ),
+        (
+            ExaType::TimestampTz,
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+            ColumnType::PbTimestamp,
+        ),
+    ];
+
+    for (typ, type_name, expected_pb) in cases {
+        let meta = ColumnMeta {
+            name: "c".to_string(),
+            typ: typ.clone(),
+            type_name: type_name.to_string(),
+            size: Some(10),
+            precision: Some(3),
+            scale: Some(1),
+        };
+        let pb = meta.to_pb();
+        assert_eq!(pb.r#type(), expected_pb, "typ = {typ:?}");
+        assert_eq!(pb.type_name, type_name);
+        assert_eq!(pb.size, Some(10));
+        assert_eq!(pb.precision, Some(3));
+        assert_eq!(pb.scale, Some(1));
+    }
+}

@@ -157,16 +157,6 @@ impl Protocol {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn connection_id(&self) -> u64 {
-        self.connection_id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn phase(&self) -> &Phase {
-        &self.phase
-    }
-
     fn phase_name(&self) -> &'static str {
         match self.phase {
             Phase::Handshake => "Handshake",
@@ -295,5 +285,5 @@ impl Protocol {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "loop_tests.rs"]
 mod tests;

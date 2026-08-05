@@ -56,6 +56,18 @@ Project mission in: @specs/mission.md
 - The `ExaConnection` trait (SDK/FFI boundary) must remain **Arrow-free**: only `Vec<Value>` chunks cross the `.so` boundary; Arrow `TypeId` is not stable across dynamic library boundaries.
 - The natural consumer pattern is emit-as-you-read: `conn.query_for_each(sql, |row| ctx.emit(&row))` — read a chunk, emit it, discard it, repeat.
 
+## Unit test layout
+
+- Unit tests MUST live in `<module>_tests.rs` beside `<module>.rs`, declared as the last item of `<module>.rs`:
+  ```rust
+  #[cfg(test)]
+  #[path = "<module>_tests.rs"]
+  mod tests;
+  ```
+- The file name MUST match `[0-9a-zA-Z_-]+[_-]tests.rs`. `cargo llvm-cov` excludes exactly that pattern from every report; any other name silently re-inflates the coverage percentage.
+- The test module remains a child module of its parent, so `use super::*;` still reaches the parent's private items and its imports.
+- A test-only helper (e.g. an accessor or a `to_pb`-style debug converter) that exists solely for tests belongs in the sibling `_tests.rs` file, not in the production module — add it there as `impl super::TypeName { ... }` (or a plain free fn), not gated by `#[cfg(test)]` since the whole file is already test-only via the `mod tests;` declaration.
+
 ## Misc
 
 - Keep the three "connection" concepts distinct: Exasol CONNECTION object (credential store) vs exarrow-rs session (the connect-back act) vs cluster node IP (`ctx.cluster_ip()`).
