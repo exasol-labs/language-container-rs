@@ -22,6 +22,17 @@ fn fixture_so_path() -> PathBuf {
     p
 }
 
+/// A `#[exasol_udf]`-macro fixture, which leaves every single-call hook
+/// unregistered (`None`) -- used to drive the runtime's undefined-hook path
+/// for a hook the dedicated single-call fixture always wires up.
+fn scalar_double_so_path() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.pop();
+    p.pop();
+    p.push("target/debug/libscalar_double.so");
+    p
+}
+
 fn response(mt: MessageType, conn: u64) -> ExascriptResponse {
     ExascriptResponse {
         r#type: mt as i32,
@@ -330,6 +341,65 @@ fn mt_return_ack_terminates_session() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
+/// No other message is valid as the direct answer to MT_RUN in single-call
+/// mode: retrying here would risk a livelock, so an unrecognized event — here
+/// MT_DONE, which belongs to the MT_NEXT/MT_DONE run-loop exchange, never to
+/// MT_RUN — is a hard error rather than something the client tolerates or
+/// retries.
+#[test]
+fn unexpected_event_in_single_call_mode_is_hard_error() {
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 31u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("unexpected");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(&server, &response(MessageType::MtDone, conn_id));
+
+    // The hard error surfaces as the client's own MT_CLOSE, relayed before
+    // returning Err; it does not wait for a reply.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "an unexpected event must close the wire with MT_CLOSE"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("F-UDF-CL-RUST-9001"),
+        "close carries the UDF error close code: {close_msg:?}"
+    );
+    assert!(
+        close_msg.contains("unexpected message in single-call mode"),
+        "close names the hard-error policy: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("an unexpected event must surface as Err");
+    assert!(
+        err.to_string()
+            .contains("unexpected message in single-call mode"),
+        "runtime error names the hard-error policy: {err}"
+    );
+}
+
 #[test]
 fn single_call_mode_routes_to_dispatcher() {
     // A bare cleanup right after MT_RUN must end the single-call session
@@ -366,4 +436,717 @@ fn single_call_mode_routes_to_dispatcher() {
 
     let result = client.join().expect("client thread panicked");
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+#[test]
+fn close_ack_after_call_reply_ends_session() {
+    // run_single_call's reply-ack match Close arm: after the container sends
+    // MT_RETURN, the DB can end the session with MT_CLOSE as that reply's ack
+    // instead of MT_RETURN (SingleCallAck) or MT_CLEANUP.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 71u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("closeack");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "expected MT_RETURN"
+    );
+    let mut close = response(MessageType::MtClose, conn_id);
+    close.close = Some(exa_proto::ExascriptClose {
+        exception_message: Some("ack boom".into()),
+    });
+    send_resp(&server, &close);
+
+    // The runtime relays the DB's close as its own MT_CLOSE before returning.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "a close ack must relay as the runtime's own MT_CLOSE"
+    );
+    let relayed = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        relayed.contains("ack boom"),
+        "relayed close carries the DB's original message, got: {relayed}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("a close ack must surface as Err");
+    assert!(
+        err.to_string().contains("ack boom"),
+        "runtime error carries the DB's message: {err}"
+    );
+}
+
+#[test]
+fn unexpected_ack_after_call_reply_is_hard_error() {
+    // run_single_call's reply-ack match wildcard arm: any event other than
+    // SingleCallAck/Cleanup/Close (here MT_DONE, which belongs to the
+    // MT_NEXT/MT_DONE run-loop exchange) as the ack to the container's own
+    // MT_RETURN is a hard error, exactly like an unexpected event anywhere
+    // else in single-call mode.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 73u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("unexpectedack");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "expected MT_RETURN"
+    );
+    send_resp(&server, &response(MessageType::MtDone, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "an unexpected ack must close the wire with MT_CLOSE"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("unexpected message in single-call mode"),
+        "close names the hard-error policy: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("an unexpected ack must surface as Err");
+    assert!(
+        err.to_string()
+            .contains("unexpected message in single-call mode"),
+        "runtime error names the hard-error policy: {err}"
+    );
+}
+
+#[test]
+fn close_directly_after_run_request_with_no_call_pending() {
+    // run_single_call's top-level post-MT_RUN match Close arm: the DB can end
+    // the session with MT_CLOSE as the direct answer to MT_RUN itself,
+    // before any MT_CALL is ever issued.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 79u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("closenocall");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    let mut close = response(MessageType::MtClose, conn_id);
+    close.close = Some(exa_proto::ExascriptClose {
+        exception_message: Some("no call for you".into()),
+    });
+    send_resp(&server, &close);
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "the runtime relays the DB's close as its own MT_CLOSE"
+    );
+    let relayed = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        relayed.contains("no call for you"),
+        "relayed close carries the DB's original message, got: {relayed}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    assert!(
+        result.is_err(),
+        "a close with no call pending must surface as a run error"
+    );
+}
+
+#[test]
+fn done_continues_to_second_call_cycle() {
+    // run_single_call's post-MT_DONE match Done arm: the DB can answer the
+    // container's own MT_DONE with MT_DONE (not MT_CLEANUP), continuing the
+    // session into a second MT_RUN/MT_CALL cycle rather than ending it. Every
+    // other mock test ends the session via MT_CLEANUP on the first MT_DONE.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 83u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("secondcycle");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    // First call cycle.
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtReturn as i32);
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtDone as i32);
+    send_resp(&server, &response(MessageType::MtDone, conn_id));
+
+    // Second call cycle: the DB opens another MT_RUN instead of having ended
+    // the session, proving the loop continued.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtRun as i32,
+        "MT_DONE answered with MT_DONE must continue the session"
+    );
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtReturn as i32);
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtDone as i32);
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+#[test]
+fn close_after_done_request_in_single_call_mode() {
+    // run_single_call's post-MT_DONE match Close arm: the DB can end the
+    // session with MT_CLOSE as the answer to the container's own MT_DONE.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 89u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("closeafterdone");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtReturn as i32);
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtDone as i32);
+    let mut close = response(MessageType::MtClose, conn_id);
+    close.close = Some(exa_proto::ExascriptClose {
+        exception_message: Some("done teardown boom".into()),
+    });
+    send_resp(&server, &close);
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "the runtime relays the DB's close as its own MT_CLOSE"
+    );
+    let relayed = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        relayed.contains("done teardown boom"),
+        "relayed close carries the DB's original message, got: {relayed}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    assert!(
+        result.is_err(),
+        "a close after MT_DONE must surface as a run error"
+    );
+}
+
+#[test]
+fn unexpected_after_done_request_in_single_call_mode() {
+    // run_single_call's post-MT_DONE match wildcard arm: any event other than
+    // Done/Cleanup/Close (here MT_RUN, classified as HostEvent::Run) as the
+    // answer to the container's own MT_DONE is a hard error.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 97u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("unexpectedafterdone");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnDefaultOutputColumns,
+            None,
+        ),
+    );
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtReturn as i32);
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtDone as i32);
+    send_resp(&server, &response(MessageType::MtRun, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "an unexpected event after MT_DONE must close the wire with MT_CLOSE"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("unexpected message in single-call mode"),
+        "close names the hard-error policy: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("an unexpected event after MT_DONE must surface as Err");
+    assert!(
+        err.to_string()
+            .contains("unexpected message in single-call mode"),
+        "runtime error names the hard-error policy: {err}"
+    );
+}
+
+#[test]
+fn import_spec_hook_error_surfaces_as_run_error() {
+    // invoke_hook's ScFnGenerateSqlForImportSpec arm (its sibling
+    // ScFnGenerateSqlForExportSpec is exercised by
+    // unimplemented_hook_replies_undefined_call, which leaves that hook
+    // unregistered instead) and the Some(Err(e)) => Err(e) arm of the
+    // result-mapping match: the fixture's import-spec hook deliberately
+    // returns rc=1 with the echoed spec in the out-pointer, so the hook error
+    // propagates as a run error rather than an MT_RETURN/MT_UNDEFINED_CALL.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 101u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("importspec");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnGenerateSqlForImportSpec,
+            Some(r#"{"x":1}"#),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "the import-spec hook's error must close the wire with MT_CLOSE"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("F-UDF-CL-RUST-9001"),
+        "close carries the UDF error close code: {close_msg:?}"
+    );
+    assert!(
+        close_msg.contains(r#"IMPORT_SPEC_HOOK_ERROR arg={"x":1}"#),
+        "close echoes the hook's own error text with the spec it received: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("the import-spec hook's error must surface as Err");
+    assert!(
+        err.to_string().contains("IMPORT_SPEC_HOOK_ERROR"),
+        "runtime error carries the hook's error text: {err}"
+    );
+}
+
+#[test]
+fn unrecognized_call_fn_id_replies_undefined_call() {
+    // invoke_hook's ScFnNil sentinel arm: the DB can send an MT_CALL naming a
+    // function id this container's SingleCallFunctionId enum doesn't
+    // recognize (Protocol::step falls back to ScFnNil via
+    // `try_from(..).unwrap_or(ScFnNil)`); the dispatcher must treat it as an
+    // unimplemented hook rather than panic or misroute.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 103u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("unrecognizedfn");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    let mut resp = response(MessageType::MtCall, conn_id);
+    resp.call = Some(ExascriptSingleCallRep {
+        r#fn: 9999,
+        json_arg: None,
+        import_specification: None,
+        export_specification: None,
+    });
+    send_resp(&server, &resp);
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtUndefinedCall as i32,
+        "expected MT_UNDEFINED_CALL for an unrecognized fn id"
+    );
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+#[test]
+fn adapter_hook_success_returns_via_mt_return() {
+    // invoke_vs_adapter_call's success arm (Some(Ok(s))): when the adapter
+    // hook succeeds, the runtime replies MT_RETURN with its result. Every
+    // other adapter test drives the fixture's deliberate-failure default
+    // path instead.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 107u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("adaptersuccess");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+            Some("SUCCEED"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "expected MT_RETURN"
+    );
+    assert_eq!(
+        req.call_result.expect("call_result").result,
+        "VS_ADAPTER_OK",
+        "the adapter hook's own result must reach MT_RETURN"
+    );
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+#[test]
+fn vs_adapter_hook_undefined_when_not_registered() {
+    // invoke_vs_adapter_call's None arm: when the loaded UDF's vtable leaves
+    // virtual_schema_adapter_call unset -- true of every #[exasol_udf]-macro
+    // fixture, unlike the dedicated single-call fixture used everywhere else
+    // in this file -- the runtime must reply MT_UNDEFINED_CALL rather than
+    // treat the missing hook as an error.
+    let so = scalar_double_so_path();
+    assert!(so.exists(), "build libscalar_double.so first: {:?}", so);
+    let conn_id = 109u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("vsadapterundef");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtClient as i32);
+    let mut info = response(MessageType::MtInfo, conn_id);
+    info.info = Some(ExascriptInfo {
+        source_code: source,
+        script_name: "SCALAR_DOUBLE".into(),
+        ..Default::default()
+    });
+    send_resp(&server, &info);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtMeta as i32);
+    let mut meta = response(MessageType::MtMeta, conn_id);
+    meta.meta = Some(ExascriptMetadata {
+        input_iter_type: IterType::PbExactlyOnce as i32,
+        output_iter_type: IterType::PbExactlyOnce as i32,
+        input_columns: vec![],
+        output_columns: vec![],
+        single_call_mode: true,
+    });
+    send_resp(&server, &meta);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+            Some("{}"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtUndefinedCall as i32,
+        "expected MT_UNDEFINED_CALL when the hook is unregistered"
+    );
+    let undef = req.undefined_call.expect("undefined_call");
+    assert_eq!(undef.remote_fn, "SC_FN_VIRTUAL_SCHEMA_ADAPTER_CALL");
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+#[cfg(feature = "connect-back")]
+#[test]
+fn adapter_connection_probe_combines_hook_and_recorded_errors() {
+    // invoke_vs_adapter_call's Some(detail) sub-arm: when the adapter hook
+    // itself fails (its own deliberate rc=1) *and* it called
+    // ctx.connection(...) during the call, the connect-back error recorded on
+    // the live SingleCallContext (via record_error) is folded into the
+    // surfaced message alongside the hook's own error text, rather than only
+    // one of the two ever reaching the DB.
+    let so = fixture_so_path();
+    assert!(
+        so.exists(),
+        "build libsingle_call_fixture.so first: {:?}",
+        so
+    );
+    let conn_id = 113u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("connectionprobe");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+            Some("CONNECTION_PROBE"),
+        ),
+    );
+
+    // The hook blocks mid-call on ctx.connection("PROBE_CONN"), which sends
+    // its own MT_IMPORT over the same wire. Answer with anything that isn't
+    // ConnInfo (here MT_CLEANUP) so the connect-back request itself fails and
+    // records an error on the context before the hook returns its own rc=1.
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtImport as i32,
+        "the connection probe must issue its own MT_IMPORT mid-call"
+    );
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "the combined hook+connect-back error must close the wire with MT_CLOSE"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("VS_ADAPTER_ERROR"),
+        "close carries the hook's own error text: {close_msg:?}"
+    );
+    assert!(
+        close_msg.contains("Connect-back error"),
+        "close carries the recorded connect-back detail: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("the combined error must surface as Err");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("VS_ADAPTER_ERROR") && err_msg.contains("Connect-back error"),
+        "runtime error combines both the hook's and the recorded connect-back error: {err_msg:?}"
+    );
 }

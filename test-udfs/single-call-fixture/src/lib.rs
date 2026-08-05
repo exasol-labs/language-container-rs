@@ -1,13 +1,14 @@
 //! Test fixture cdylib that exercises the single-call vtable hooks.
 //!
 //! Unlike the `#[exasol_udf]` macro (which currently leaves all single-call
-//! hooks `None`), this fixture wires `default_output_columns` and
-//! `virtual_schema_adapter_call` directly so the runtime's single-call
-//! dispatcher can be tested against a real `.so` boundary. The other two hooks
-//! are left `None` to verify the runtime replies `MT_UNDEFINED_CALL` for them.
+//! hooks `None`), this fixture wires `default_output_columns`,
+//! `virtual_schema_adapter_call`, and `generate_sql_for_import_spec` directly
+//! so the runtime's single-call dispatcher can be tested against a real `.so`
+//! boundary. `generate_sql_for_export_spec` alone is left `None` to verify the
+//! runtime replies `MT_UNDEFINED_CALL` for it.
 
 use exasol_udf_sdk::context::UdfContext;
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString, c_char};
 
 /// Hand a Rust string to the runtime through a `libc::malloc`-backed buffer.
 ///
@@ -39,7 +40,7 @@ unsafe extern "C" fn default_output_columns(result: *mut *mut c_char) -> i32 {
 
 unsafe extern "C" fn virtual_schema_adapter_call(
     ctx: *mut std::ffi::c_void,
-    _json_arg: *const c_char,
+    json_arg: *const c_char,
     result: *mut *mut c_char,
 ) -> i32 {
     unsafe {
@@ -49,6 +50,29 @@ unsafe extern "C" fn virtual_schema_adapter_call(
         // the `call_ctx_arg_hook` contract in loader.rs), so we cast back to
         // `*mut &mut dyn UdfContext` and dereference twice.
         let ctx: &mut dyn UdfContext = &mut **(ctx as *mut &mut dyn UdfContext);
+        let arg = if json_arg.is_null() {
+            ""
+        } else {
+            CStr::from_ptr(json_arg).to_str().unwrap_or("")
+        };
+
+        // Test-only success path: covers the runtime's success arm for this
+        // hook, which the deliberate-failure default below never reaches.
+        if arg == "SUCCEED" {
+            write_result("VS_ADAPTER_OK", result);
+            return 0;
+        }
+
+        // Test-only connect-back probe: exercises ctx.connection(), which
+        // records its own error on the live SingleCallContext independently of
+        // this hook's own (also deliberate) failure below, so the runtime can
+        // combine both into one close message.
+        if arg == "CONNECTION_PROBE" {
+            let _ = ctx.connection("PROBE_CONN");
+            write_result("VS_ADAPTER_ERROR", result);
+            return 1;
+        }
+
         // Surface the live handshake metadata through the deliberate-error
         // channel: the runtime reads this string off the `result` out-pointer
         // when the hook returns a non-zero code.
@@ -66,6 +90,25 @@ unsafe extern "C" fn virtual_schema_adapter_call(
     }
 }
 
+/// Deliberately fails, echoing the received spec in the error text: exercises
+/// the runtime's `ScFnGenerateSqlForImportSpec` dispatch arm and its
+/// hook-error mapping (its sibling `generate_sql_for_export_spec` is left
+/// `None` below to verify the runtime's undefined-hook reply instead).
+unsafe extern "C" fn generate_sql_for_import_spec(
+    json_spec: *const c_char,
+    result: *mut *mut c_char,
+) -> i32 {
+    unsafe {
+        let spec = if json_spec.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(json_spec).to_string_lossy().into_owned()
+        };
+        write_result(&format!("IMPORT_SPEC_HOOK_ERROR arg={spec}"), result);
+        1
+    }
+}
+
 #[used]
 static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVTable {
     abi_version: exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION,
@@ -74,7 +117,7 @@ static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVT
     destroy: destroy_shim,
     default_output_columns: Some(default_output_columns),
     virtual_schema_adapter_call: Some(virtual_schema_adapter_call),
-    generate_sql_for_import_spec: None,
+    generate_sql_for_import_spec: Some(generate_sql_for_import_spec),
     generate_sql_for_export_spec: None,
     annotated_input_schema: std::ptr::null(),
     annotated_output_schema: std::ptr::null(),

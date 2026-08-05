@@ -7,6 +7,7 @@ mod loader;
 mod rowset;
 mod schema_check;
 mod single_call;
+mod wire;
 
 pub use artifact::{parse_debug_level, parse_udf_object_path};
 pub use error::RuntimeError;

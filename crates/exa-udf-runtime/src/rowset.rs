@@ -141,6 +141,22 @@ impl InputRowSet {
 /// amortising the per-flush round-trip across many rows.
 const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
 
+/// Fixed per-cell byte-cost widths shared by `value_byte_cost` (the `Value`
+/// axis, used by the row path) and `fixed_cell_cost` (the Arrow `DataType`
+/// axis, used by the batch path) — one owning table for both.
+const BYTES_BOOL: usize = 1;
+const BYTES_INT32: usize = 4;
+const BYTES_INT64: usize = 8;
+const BYTES_DOUBLE: usize = 8;
+const BYTES_DATE: usize = 10;
+const BYTES_TIMESTAMP: usize = 29;
+/// Fixed portion of a NUMERIC cell's cost; `d.scale`/`scale` digits are added
+/// on top by each caller. O(1) upper bound, no alloc: i128 renders in ≤39
+/// digits + sign (≤40), which also dominates the scale-padded form (sign +
+/// scale+1 + point). Over-counts → flushes early, matching the conservative
+/// intent below.
+const NUMERIC_COST_BASE: usize = 40;
+
 /// Conservative O(1) byte cost for one cell, approximating the width its
 /// non-null value occupies in `to_proto`'s type block. NULL cells cost 0
 /// because they take no type-block slot; the estimate slightly over-counts
@@ -149,17 +165,14 @@ const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
 fn value_byte_cost(v: &Value) -> usize {
     match v {
         Value::Null => 0,
-        Value::Bool(_) => 1,
-        Value::Int32(_) => 4,
-        Value::Int64(_) => 8,
-        Value::Double(_) => 8,
+        Value::Bool(_) => BYTES_BOOL,
+        Value::Int32(_) => BYTES_INT32,
+        Value::Int64(_) => BYTES_INT64,
+        Value::Double(_) => BYTES_DOUBLE,
         Value::String(s) => s.len(),
-        // O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign (≤40),
-        // which also dominates the scale-padded form (sign + scale+1 + point).
-        // Over-counts → flushes early, matching the conservative intent above.
-        Value::Numeric(d) => 40 + d.scale as usize,
-        Value::Date(_) => 10,
-        Value::Timestamp(_) => 29,
+        Value::Numeric(d) => NUMERIC_COST_BASE + d.scale as usize,
+        Value::Date(_) => BYTES_DATE,
+        Value::Timestamp(_) => BYTES_TIMESTAMP,
     }
 }
 
@@ -623,6 +636,118 @@ fn is_string_family_exatype(typ: &ExaType) -> bool {
     )
 }
 
+/// Days from CE day 1 to the Arrow/Unix epoch: 1970-01-01 is CE day 719163, so
+/// an Arrow `Date32` (days since 1970-01-01) becomes a `NaiveDate` by adding it.
+#[cfg(feature = "emit-arrow")]
+const ARROW_EPOCH_CE_DAY: i32 = 719163;
+
+/// Convert one non-NULL Arrow cell to the SDK `Value` the row path would have
+/// carried for it.
+///
+/// This is the single owner of the Arrow decoding decisions — the `Date32`
+/// CE-day epoch offset, which `Timestamp` unit each variant divides by (the
+/// nanosecond split is euclidean, so a pre-epoch negative count still yields
+/// the non-negative sub-second remainder `chrono` requires), and how a
+/// `Decimal128`'s unscaled/scale pair becomes a `Decimal`. Both encoders are
+/// consumers: `arrow_batch_to_value_rows` buffers the returned `Value` as-is,
+/// and `encode_slice` renders it with `value_to_block_string` for the string
+/// block. Neither may re-derive any of it, or the two paths can disagree about
+/// the same cell and break the byte-identity contract with `to_proto`.
+///
+/// `row` must index a non-NULL cell: nullness is a bulk per-column read the
+/// callers already perform, and a NULL cell occupies no type-block slot at all.
+/// `ColAccessor::Unsupported` yields `Value::Null` — an `ExaType::Unsupported`
+/// column has no representation the DB reads back.
+#[cfg(feature = "emit-arrow")]
+fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
+    match acc {
+        ColAccessor::Int32(arr) => Value::Int32(arr.value(row)),
+        ColAccessor::Int64(arr) => Value::Int64(arr.value(row)),
+        ColAccessor::Float64(arr) => Value::Double(arr.value(row)),
+        ColAccessor::Boolean(arr) => Value::Bool(arr.value(row)),
+        ColAccessor::Utf8(arr) => Value::String(arr.value(row).to_string()),
+        ColAccessor::LargeUtf8(arr) => Value::String(arr.value(row).to_string()),
+        ColAccessor::Date32(arr) => Value::Date(
+            NaiveDate::from_num_days_from_ce_opt(arr.value(row) + ARROW_EPOCH_CE_DAY)
+                .unwrap_or_default(),
+        ),
+        ColAccessor::TsSecond(arr) => Value::Timestamp(
+            chrono::DateTime::from_timestamp(arr.value(row), 0)
+                .map(|dt| dt.naive_utc())
+                .unwrap_or_default(),
+        ),
+        ColAccessor::TsMillisecond(arr) => Value::Timestamp(
+            chrono::DateTime::from_timestamp_millis(arr.value(row))
+                .map(|dt| dt.naive_utc())
+                .unwrap_or_default(),
+        ),
+        ColAccessor::TsMicrosecond(arr) => Value::Timestamp(
+            chrono::DateTime::from_timestamp_micros(arr.value(row))
+                .map(|dt| dt.naive_utc())
+                .unwrap_or_default(),
+        ),
+        ColAccessor::TsNanosecond(arr) => {
+            let ns = arr.value(row);
+            Value::Timestamp(
+                chrono::DateTime::from_timestamp(
+                    ns.div_euclid(1_000_000_000),
+                    ns.rem_euclid(1_000_000_000) as u32,
+                )
+                .map(|dt| dt.naive_utc())
+                .unwrap_or_default(),
+            )
+        }
+        ColAccessor::Decimal128(arr, scale) => Value::Numeric(Decimal {
+            unscaled: arr.value(row),
+            scale: *scale as u8,
+        }),
+        ColAccessor::NumericFromInt32(arr) => Value::Int32(arr.value(row)),
+        ColAccessor::NumericFromInt64(arr) => Value::Int64(arr.value(row)),
+        ColAccessor::NumericFromFloat64(arr) => Value::Double(arr.value(row)),
+        ColAccessor::Unsupported => Value::Null,
+    }
+}
+
+/// Fixed per-cell byte cost for an Arrow `DataType` with a constant-width
+/// proto encoding — the batch-path counterpart of `value_byte_cost`'s `Value`
+/// match, drawing on the same width table. Returns `None` for variable-width
+/// types (`Utf8`/`LargeUtf8`, whose cost depends on each string's length) and
+/// for any other type this batch path does not cost (`Unsupported` columns
+/// cost 0, matching type validation already having run before this call).
+#[cfg(feature = "emit-arrow")]
+fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
+    use arrow::datatypes::DataType;
+    match dt {
+        DataType::Boolean => Some(BYTES_BOOL),
+        DataType::Int32 => Some(BYTES_INT32),
+        DataType::Int64 => Some(BYTES_INT64),
+        DataType::Float64 => Some(BYTES_DOUBLE),
+        DataType::Date32 => Some(BYTES_DATE),
+        DataType::Timestamp(_, _) => Some(BYTES_TIMESTAMP),
+        DataType::Decimal128(_, scale) => Some(NUMERIC_COST_BASE + *scale as usize),
+        _ => None,
+    }
+}
+
+/// Add `cell_cost(row)` to `costs[row]` for every row not marked null in
+/// `nulls`, leaving NULL rows untouched — a NULL cell occupies no type-block
+/// slot, matching `value_byte_cost`'s treatment of `Value::Null`. The one
+/// null-check-and-accumulate loop shared by every `DataType` arm in
+/// `compute_row_costs`, parameterized by how a non-null cell's cost is
+/// computed.
+#[cfg(feature = "emit-arrow")]
+fn accumulate_costs(
+    costs: &mut [usize],
+    nulls: Option<&arrow::buffer::NullBuffer>,
+    cell_cost: impl Fn(usize) -> usize,
+) {
+    for (r, cost) in costs.iter_mut().enumerate() {
+        if !nulls.is_some_and(|nb| nb.is_null(r)) {
+            *cost += cell_cost(r);
+        }
+    }
+}
+
 /// Compute a per-row byte cost vector for the batch using Arrow's columnar
 /// layout for efficiency (no per-cell work for fixed-width types; offset-buffer
 /// prefix-sum for variable-width; same fixed estimates as `value_byte_cost`).
@@ -639,80 +764,20 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
         let dt = col.data_type();
         let null_buf = col.nulls();
 
-        // For each row r: add the per-cell byte cost to costs[r].
-        // NULL cells cost 0 (no type-block slot, matching value_byte_cost).
-        // Iterate via enumerate so we don't trigger needless_range_loop.
+        if let Some(fixed) = fixed_cell_cost(dt) {
+            accumulate_costs(&mut costs, null_buf, |_r| fixed);
+            continue;
+        }
+
         match dt {
-            DataType::Int32 => {
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 4;
-                    }
-                }
-            }
-            DataType::Int64 => {
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 8;
-                    }
-                }
-            }
-            DataType::Float64 => {
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 8;
-                    }
-                }
-            }
-            DataType::Boolean => {
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 1;
-                    }
-                }
-            }
-            DataType::Date32 => {
-                // DATE renders to "YYYY-MM-DD" (10 chars)
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 10;
-                    }
-                }
-            }
-            DataType::Timestamp(_, _) => {
-                // TIMESTAMP renders to "YYYY-MM-DD HH:MM:SS.nnnnnnnnn" (29 chars)
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += 29;
-                    }
-                }
-            }
-            DataType::Decimal128(_, scale) => {
-                // Numeric: 40 + scale chars (matches value_byte_cost)
-                let fixed_cost = 40 + (*scale as usize);
-                for (r, cost) in costs.iter_mut().enumerate() {
-                    if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                        *cost += fixed_cost;
-                    }
-                }
-            }
             DataType::Utf8 => {
-                // Variable width: use the string value's byte length.
                 if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    for (r, cost) in costs.iter_mut().enumerate() {
-                        if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                            *cost += arr.value(r).len();
-                        }
-                    }
+                    accumulate_costs(&mut costs, null_buf, |r| arr.value(r).len());
                 }
             }
             DataType::LargeUtf8 => {
                 if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
-                    for (r, cost) in costs.iter_mut().enumerate() {
-                        if !null_buf.as_ref().is_some_and(|nb| nb.is_null(r)) {
-                            *cost += arr.value(r).len();
-                        }
-                    }
+                    accumulate_costs(&mut costs, null_buf, |r| arr.value(r).len());
                 }
             }
             _ => {
@@ -729,11 +794,20 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
 ///
 /// Each Arrow column array is downcast to its concrete type exactly once via
 /// `build_accessors`; its validity (null) buffer is read once in bulk per
-/// column. The row-major loop then reads `accessor.value(r)` with no further
-/// downcast per cell. A NULL cell occupies no type-block slot — only the
-/// row-major bitmap is updated — so the encoding stays byte-identical to
-/// `to_proto` for arbitrary EMITS schemas including multiple columns sharing
-/// one block type and any null pattern.
+/// column, so the row-major loop does no further downcast or null lookup per
+/// cell. A NULL cell occupies no type-block slot — only the row-major bitmap is
+/// updated — so the encoding stays byte-identical to `to_proto` for arbitrary
+/// EMITS schemas including multiple columns sharing one block type and any null
+/// pattern.
+///
+/// Native-block cells (`Int32`/`Int64`/`Float64`/`Boolean`) are the Arrow
+/// array's own scalar and go straight into their block; every string-block cell
+/// is `accessor_value`'s `Value` rendered by `value_into_block_string`, which
+/// moves rather than copies a `Value::String` but yields the same bytes as the
+/// row path's `value_to_block_string` for every variant, which is what makes
+/// the two byte-identical. The accessor variants are listed exhaustively rather
+/// than matched by wildcard so a new `ColAccessor` has to choose its block here
+/// instead of silently landing in the string block.
 #[cfg(feature = "emit-arrow")]
 fn encode_slice(
     batch: &arrow::record_batch::RecordBatch,
@@ -802,77 +876,18 @@ fn encode_slice(
                 ColAccessor::Int64(arr) => data_int64.push(arr.value(r)),
                 ColAccessor::Float64(arr) => data_double.push(arr.value(r)),
                 ColAccessor::Boolean(arr) => data_bool.push(arr.value(r)),
-                ColAccessor::Utf8(arr) => data_string.push(arr.value(r).to_string()),
-                ColAccessor::LargeUtf8(arr) => data_string.push(arr.value(r).to_string()),
-                ColAccessor::Date32(arr) => {
-                    let days = arr.value(r);
-                    let date = chrono::NaiveDate::from_num_days_from_ce_opt(
-                        days + 719163, // Arrow epoch: 1970-01-01 = day 719163 in CE days
-                    )
-                    .unwrap_or_default();
-                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Date(
-                        date,
-                    )));
-                }
-                ColAccessor::TsSecond(arr) => {
-                    let ts = chrono::DateTime::from_timestamp(arr.value(r), 0)
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default();
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Timestamp(ts),
-                    ));
-                }
-                ColAccessor::TsMillisecond(arr) => {
-                    let ts = chrono::DateTime::from_timestamp_millis(arr.value(r))
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default();
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Timestamp(ts),
-                    ));
-                }
-                ColAccessor::TsMicrosecond(arr) => {
-                    let ts = chrono::DateTime::from_timestamp_micros(arr.value(r))
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default();
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Timestamp(ts),
-                    ));
-                }
-                ColAccessor::TsNanosecond(arr) => {
-                    let ns = arr.value(r);
-                    let ts = chrono::DateTime::from_timestamp(
-                        ns / 1_000_000_000,
-                        (ns % 1_000_000_000) as u32,
-                    )
-                    .map(|dt| dt.naive_utc())
-                    .unwrap_or_default();
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Timestamp(ts),
-                    ));
-                }
-                ColAccessor::Decimal128(arr, scale) => {
-                    let d = exasol_udf_sdk::value::Decimal {
-                        unscaled: arr.value(r),
-                        scale: *scale as u8,
-                    };
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Numeric(d),
-                    ));
-                }
-                ColAccessor::NumericFromInt32(arr) => {
-                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Int32(
-                        arr.value(r),
-                    )));
-                }
-                ColAccessor::NumericFromInt64(arr) => {
-                    data_string.push(value_to_block_string(&exasol_udf_sdk::value::Value::Int64(
-                        arr.value(r),
-                    )));
-                }
-                ColAccessor::NumericFromFloat64(arr) => {
-                    data_string.push(value_to_block_string(
-                        &exasol_udf_sdk::value::Value::Double(arr.value(r)),
-                    ));
+                ColAccessor::Utf8(_)
+                | ColAccessor::LargeUtf8(_)
+                | ColAccessor::Date32(_)
+                | ColAccessor::TsSecond(_)
+                | ColAccessor::TsMillisecond(_)
+                | ColAccessor::TsMicrosecond(_)
+                | ColAccessor::TsNanosecond(_)
+                | ColAccessor::Decimal128(_, _)
+                | ColAccessor::NumericFromInt32(_)
+                | ColAccessor::NumericFromInt64(_)
+                | ColAccessor::NumericFromFloat64(_) => {
+                    data_string.push(value_into_block_string(accessor_value(acc, r)));
                 }
                 ColAccessor::Unsupported => {}
             }
@@ -895,18 +910,17 @@ fn encode_slice(
 /// Convert a (possibly sliced) RecordBatch into a `Vec<Vec<Value>>` for tail
 /// materialisation into the shared `EmitBuffer`.
 ///
-/// Uses the same `build_accessors` downcast-once path as `encode_slice` so
-/// both functions share a single downcast site. The resulting `Value` payload
-/// for each cell matches what the row path's `push` + `to_proto` would produce
-/// (same `value_to_block_string` rendering for string-block types), so
-/// subsequent `emit` calls and the end-of-`run` tail flush are coherent.
+/// Shares `encode_slice`'s single downcast site (`build_accessors`) and its
+/// single conversion site (`accessor_value`), so a cell buffered here and the
+/// same cell flushed mid-batch carry the identical `Value` — which is what makes
+/// a batch split invisible to the DB, and what keeps subsequent `emit` calls and
+/// the end-of-`run` tail flush coherent with the row path's `push` + `to_proto`.
 #[cfg(feature = "emit-arrow")]
 fn arrow_batch_to_value_rows(
     batch: &arrow::record_batch::RecordBatch,
     meta: &[ColumnMeta],
-) -> Result<Vec<Vec<exasol_udf_sdk::value::Value>>, UdfError> {
+) -> Result<Vec<Vec<Value>>, UdfError> {
     use arrow::array::Array;
-    use exasol_udf_sdk::value::Value;
 
     let accessors = build_accessors(batch, meta)?;
     let n_rows = batch.num_rows();
@@ -922,63 +936,11 @@ fn arrow_batch_to_value_rows(
         let mut row = Vec::with_capacity(n_cols);
         for (c, acc) in accessors.iter().enumerate() {
             let is_null = null_bufs[c].as_ref().is_some_and(|nb| nb.is_null(r));
-            if is_null {
-                row.push(Value::Null);
-                continue;
-            }
-
-            let v = match acc {
-                ColAccessor::Int32(arr) => Value::Int32(arr.value(r)),
-                ColAccessor::Int64(arr) => Value::Int64(arr.value(r)),
-                ColAccessor::Float64(arr) => Value::Double(arr.value(r)),
-                ColAccessor::Boolean(arr) => Value::Bool(arr.value(r)),
-                ColAccessor::Utf8(arr) => Value::String(arr.value(r).to_string()),
-                ColAccessor::LargeUtf8(arr) => Value::String(arr.value(r).to_string()),
-                ColAccessor::Date32(arr) => {
-                    let date = chrono::NaiveDate::from_num_days_from_ce_opt(
-                        arr.value(r) + 719163, // Arrow epoch: 1970-01-01 = day 719163 in CE days
-                    )
-                    .unwrap_or_default();
-                    Value::Date(date)
-                }
-                ColAccessor::TsSecond(arr) => Value::Timestamp(
-                    chrono::DateTime::from_timestamp(arr.value(r), 0)
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default(),
-                ),
-                ColAccessor::TsMillisecond(arr) => Value::Timestamp(
-                    chrono::DateTime::from_timestamp_millis(arr.value(r))
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default(),
-                ),
-                ColAccessor::TsMicrosecond(arr) => Value::Timestamp(
-                    chrono::DateTime::from_timestamp_micros(arr.value(r))
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default(),
-                ),
-                ColAccessor::TsNanosecond(arr) => {
-                    let ns = arr.value(r);
-                    Value::Timestamp(
-                        chrono::DateTime::from_timestamp(
-                            ns / 1_000_000_000,
-                            (ns % 1_000_000_000) as u32,
-                        )
-                        .map(|dt| dt.naive_utc())
-                        .unwrap_or_default(),
-                    )
-                }
-                ColAccessor::Decimal128(arr, scale) => {
-                    Value::Numeric(exasol_udf_sdk::value::Decimal {
-                        unscaled: arr.value(r),
-                        scale: *scale as u8,
-                    })
-                }
-                ColAccessor::NumericFromInt32(arr) => Value::Int32(arr.value(r)),
-                ColAccessor::NumericFromInt64(arr) => Value::Int64(arr.value(r)),
-                ColAccessor::NumericFromFloat64(arr) => Value::Double(arr.value(r)),
-                ColAccessor::Unsupported => Value::Null,
-            };
-            row.push(v);
+            row.push(if is_null {
+                Value::Null
+            } else {
+                accessor_value(acc, r)
+            });
         }
         result.push(row);
     }
@@ -1282,6 +1244,23 @@ fn value_to_block_string(v: &Value) -> String {
         Value::Double(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
+    }
+}
+
+/// `value_to_block_string` for a `Value` the caller owns and is about to drop.
+///
+/// Yields exactly the same bytes, but a `Value::String` moves into the block
+/// instead of being copied a second time — which matters because the batch path
+/// hands over a freshly built `Value` per cell, so the borrowing form would
+/// clone every `Value::String` a second time; the pre-refactor `encode_slice`
+/// moved the Arrow `to_string()` result straight into the block instead. Every
+/// other variant delegates, keeping `value_to_block_string` the single owner of
+/// the string-block wire form.
+#[cfg(feature = "emit-arrow")]
+fn value_into_block_string(v: Value) -> String {
+    match v {
+        Value::String(s) => s,
+        other => value_to_block_string(&other),
     }
 }
 
@@ -1677,66 +1656,119 @@ fn open_connect_back(
         .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>)
 }
 
+/// Expands to the `UdfContext` handshake-metadata getters (`memory_limit`
+/// through `scope_user`, plus `debug_level`). `HostContextBridge` and
+/// `SingleCallContext` both carry a `handshake: HandshakeMeta` field and
+/// forward these accessors to it identically; invoking this macro in each
+/// impl keeps that one decision textually owned in one place.
+macro_rules! delegate_handshake_meta {
+    () => {
+        fn memory_limit(&self) -> u64 {
+            self.handshake.memory_limit
+        }
+
+        fn session_id(&self) -> u64 {
+            self.handshake.session_id
+        }
+
+        fn statement_id(&self) -> u32 {
+            self.handshake.statement_id
+        }
+
+        fn node_id(&self) -> u32 {
+            self.handshake.node_id
+        }
+
+        fn node_count(&self) -> u32 {
+            self.handshake.node_count
+        }
+
+        fn vm_id(&self) -> u64 {
+            self.handshake.vm_id
+        }
+
+        fn database_name(&self) -> String {
+            self.handshake.database_name.clone()
+        }
+
+        fn database_version(&self) -> String {
+            self.handshake.database_version.clone()
+        }
+
+        fn script_name(&self) -> String {
+            self.handshake.script_name.clone()
+        }
+
+        fn script_schema(&self) -> String {
+            self.handshake.script_schema.clone()
+        }
+
+        fn current_user(&self) -> Option<String> {
+            self.handshake.current_user.clone()
+        }
+
+        fn current_schema(&self) -> Option<String> {
+            self.handshake.current_schema.clone()
+        }
+
+        fn scope_user(&self) -> Option<String> {
+            self.handshake.scope_user.clone()
+        }
+
+        fn debug_level(&self) -> tracing::Level {
+            current_debug_level()
+        }
+    };
+}
+
+/// Expands to the `#[cfg(feature = "connect-back")]` `UdfContext` wrappers
+/// (`cluster_ip`, `connection`, `connect_back`). `HostContextBridge` and
+/// `SingleCallContext` both carry a `conn_requester` field and a
+/// `record_error` method and forward these three hooks to the shared
+/// connect-back machinery identically, each recording the error on failure.
+macro_rules! delegate_connect_back_hooks {
+    () => {
+        #[cfg(feature = "connect-back")]
+        fn cluster_ip(&self) -> Result<String, UdfError> {
+            let result = first_nonloopback_ipv4();
+            if let Err(ref e) = result {
+                self.record_error(e.to_string());
+            }
+            result
+        }
+
+        #[cfg(feature = "connect-back")]
+        fn connection(
+            &self,
+            name: &str,
+        ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+            let result = request_connection(&self.conn_requester, name);
+            if let Err(ref e) = result {
+                self.record_error(e.to_string());
+            }
+            result
+        }
+
+        #[cfg(feature = "connect-back")]
+        fn connect_back(
+            &mut self,
+            conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+        ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
+            let result = open_connect_back(conn);
+            if let Err(ref e) = result {
+                self.record_error(e.to_string());
+            }
+            result
+        }
+    };
+}
+
 impl UdfContext for HostContextBridge<'_> {
     fn num_columns(&self) -> usize {
         self.input_cols.len()
     }
 
-    fn memory_limit(&self) -> u64 {
-        self.handshake.memory_limit
-    }
-
-    fn session_id(&self) -> u64 {
-        self.handshake.session_id
-    }
-
-    fn statement_id(&self) -> u32 {
-        self.handshake.statement_id
-    }
-
-    fn node_id(&self) -> u32 {
-        self.handshake.node_id
-    }
-
-    fn node_count(&self) -> u32 {
-        self.handshake.node_count
-    }
-
-    fn vm_id(&self) -> u64 {
-        self.handshake.vm_id
-    }
-
-    fn database_name(&self) -> String {
-        self.handshake.database_name.clone()
-    }
-
-    fn database_version(&self) -> String {
-        self.handshake.database_version.clone()
-    }
-
-    fn script_name(&self) -> String {
-        self.handshake.script_name.clone()
-    }
-
-    fn script_schema(&self) -> String {
-        self.handshake.script_schema.clone()
-    }
-
-    fn current_user(&self) -> Option<String> {
-        self.handshake.current_user.clone()
-    }
-
-    fn current_schema(&self) -> Option<String> {
-        self.handshake.current_schema.clone()
-    }
-
-    fn scope_user(&self) -> Option<String> {
-        self.handshake.scope_user.clone()
-    }
-
-    fn debug_level(&self) -> tracing::Level {
-        current_debug_level()
-    }
+    delegate_handshake_meta!();
 
     fn get(&self, col: usize) -> Result<&Value, UdfError> {
         self.input
@@ -1818,38 +1850,7 @@ impl UdfContext for HostContextBridge<'_> {
         }
     }
 
-    #[cfg(feature = "connect-back")]
-    fn cluster_ip(&self) -> Result<String, UdfError> {
-        let result = first_nonloopback_ipv4();
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
-
-    #[cfg(feature = "connect-back")]
-    fn connection(
-        &self,
-        name: &str,
-    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-        let result = request_connection(&self.conn_requester, name);
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
-
-    #[cfg(feature = "connect-back")]
-    fn connect_back(
-        &mut self,
-        conn: &exasol_udf_sdk::connect_back::ConnectionObject,
-    ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
-        let result = open_connect_back(conn);
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
+    delegate_connect_back_hooks!();
 }
 
 /// A `UdfContext` for single-call mode (e.g. the virtual-schema adapter call).
@@ -1907,61 +1908,7 @@ impl UdfContext for SingleCallContext<'_> {
         0
     }
 
-    fn memory_limit(&self) -> u64 {
-        self.handshake.memory_limit
-    }
-
-    fn session_id(&self) -> u64 {
-        self.handshake.session_id
-    }
-
-    fn statement_id(&self) -> u32 {
-        self.handshake.statement_id
-    }
-
-    fn node_id(&self) -> u32 {
-        self.handshake.node_id
-    }
-
-    fn node_count(&self) -> u32 {
-        self.handshake.node_count
-    }
-
-    fn vm_id(&self) -> u64 {
-        self.handshake.vm_id
-    }
-
-    fn database_name(&self) -> String {
-        self.handshake.database_name.clone()
-    }
-
-    fn database_version(&self) -> String {
-        self.handshake.database_version.clone()
-    }
-
-    fn script_name(&self) -> String {
-        self.handshake.script_name.clone()
-    }
-
-    fn script_schema(&self) -> String {
-        self.handshake.script_schema.clone()
-    }
-
-    fn current_user(&self) -> Option<String> {
-        self.handshake.current_user.clone()
-    }
-
-    fn current_schema(&self) -> Option<String> {
-        self.handshake.current_schema.clone()
-    }
-
-    fn scope_user(&self) -> Option<String> {
-        self.handshake.scope_user.clone()
-    }
-
-    fn debug_level(&self) -> tracing::Level {
-        current_debug_level()
-    }
+    delegate_handshake_meta!();
 
     fn get(&self, _col: usize) -> Result<&Value, UdfError> {
         Err(UdfError::Unimplemented(
@@ -1981,38 +1928,7 @@ impl UdfContext for SingleCallContext<'_> {
         ))
     }
 
-    #[cfg(feature = "connect-back")]
-    fn cluster_ip(&self) -> Result<String, UdfError> {
-        let result = first_nonloopback_ipv4();
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
-
-    #[cfg(feature = "connect-back")]
-    fn connection(
-        &self,
-        name: &str,
-    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-        let result = request_connection(&self.conn_requester, name);
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
-
-    #[cfg(feature = "connect-back")]
-    fn connect_back(
-        &mut self,
-        conn: &exasol_udf_sdk::connect_back::ConnectionObject,
-    ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
-        let result = open_connect_back(conn);
-        if let Err(ref e) = result {
-            self.record_error(e.to_string());
-        }
-        result
-    }
+    delegate_connect_back_hooks!();
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
+use crate::wire::{close_error, request};
 use exa_proto::SingleCallFunctionId;
-use exa_zmq_protocol::{HostAction, HostEvent, Protocol, UdfMeta, ZmqTransport};
+use exa_zmq_protocol::{HostEvent, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
 use std::ffi::{CStr, c_char};
 
@@ -155,25 +156,8 @@ fn invoke_vs_adapter_call(
     let proto_cell = std::cell::RefCell::new(proto);
 
     #[cfg(feature = "connect-back")]
-    let conn_requester: crate::rowset::ConnRequester = Box::new(move |conn_name: &str| {
-        let mut proto = proto_cell.borrow_mut();
-        let req = proto.import_connection_request(conn_name);
-        transport
-            .send(&req)
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        let resp = transport
-            .recv()
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        let (event, _) = proto
-            .step(resp)
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        match event {
-            HostEvent::ConnInfo(ci) => Ok(ci),
-            _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                "MT_IMPORT reply was not ConnInfo".into(),
-            )),
-        }
-    });
+    let conn_requester: crate::rowset::ConnRequester =
+        crate::wire::conn_requester(transport, &proto_cell);
 
     let mut bridge = crate::rowset::SingleCallContext::new(
         handshake,
@@ -198,29 +182,6 @@ fn invoke_vs_adapter_call(
 /// The wire name reported in `MT_UNDEFINED_CALL` for a single-call function.
 fn fn_name(fn_id: SingleCallFunctionId) -> &'static str {
     fn_id.as_str_name()
-}
-
-fn close_error(msg: Option<String>) -> Result<(), RuntimeError> {
-    Err(RuntimeError::Udf(
-        msg.unwrap_or_else(|| "connection closed by database".into()),
-    ))
-}
-
-/// Send one request and return the classified response event, replying to a
-/// ping transparently (REQ stays in lockstep: a ping reply is itself a
-/// request/reply).
-fn request(
-    transport: &ZmqTransport,
-    proto: &mut Protocol,
-    req: exa_proto::ExascriptRequest,
-) -> Result<HostEvent, RuntimeError> {
-    transport.send(&req)?;
-    let resp = transport.recv()?;
-    let (event, action) = proto.step(resp)?;
-    if let Some(HostAction::PingReply(s)) = action {
-        return request(transport, proto, proto.ping_reply(&s));
-    }
-    Ok(event)
 }
 
 /// Consume a heap-allocated C string produced by a vtable single-call hook.
