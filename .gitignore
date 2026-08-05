@@ -6,5 +6,8 @@
 # Built IT test-runner binary (CI artifact, produced by `cargo test --no-run`)
 /it-runner
 
+# cargo llvm-cov reports (CI artifact, produced by `cargo llvm-cov`)
+/lcov-*.info
+
 # Idea
 /.idea/
