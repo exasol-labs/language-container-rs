@@ -1,5 +1,15 @@
 use super::*;
 use crate::messages::{HostAction, HostEvent};
+
+impl Protocol {
+    pub(crate) fn connection_id(&self) -> u64 {
+        self.connection_id
+    }
+
+    pub(crate) fn phase(&self) -> &Phase {
+        &self.phase
+    }
+}
 use crate::meta::{ColumnMeta, ExaType, IterType};
 use exa_proto::exascript_metadata::ColumnDefinition;
 use exa_proto::{
