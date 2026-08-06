@@ -159,18 +159,12 @@ fn so_path(lib: &str) -> PathBuf {
     p
 }
 
-/// One connection id shared by every mock-DB session started through
-/// [`start_mock_session`] — there is exactly one connection per session, so a
-/// single constant covers every test that doesn't care about its value,
-/// instead of each test picking its own arbitrary prime.
+/// The one connection id every mock-DB session uses.
 const MOCK_CONN_ID: u64 = 7;
 
-/// Bring up one mock-DB session for a debug-built fixture `.so`: resolves
-/// `lib`'s path via [`so_path`], binds a fresh REP socket at an endpoint
-/// scoped by `tag` and the test process's pid, spawns the [`Runtime`] client
-/// thread against it, and drives the handshake (`MT_CLIENT` -> `MT_INFO`,
-/// `MT_META` -> `MT_META` carrying `meta`) so the caller can script the run
-/// cycle starting from the first `MT_RUN`.
+/// Bring up one mock-DB session for a debug-built fixture `.so`: binds a REP
+/// socket scoped by `tag`, spawns the [`Runtime`] client thread, and drives the
+/// handshake so the caller can script the run cycle from the first `MT_RUN`.
 fn start_mock_session(
     lib: &str,
     tag: &str,
@@ -664,13 +658,9 @@ fn annotated_schema_mismatch_closes_session() {
 
 #[test]
 fn run_error_out_pointer_text_reaches_close() {
-    // invoke_run's rc!=0 WITH out-pointer text: scalar_next_illegal's run()
-    // body calls ctx.next(), which the scalar-context ban rejects with
-    // UdfError::User("next() is not allowed in scalar context"). The run
-    // shim's Err path always writes that text through the error out-pointer
-    // (rc=1), and invoke_run's `Some(e)` branch appends it verbatim after
-    // "error code {rc}: ". This pins that exact "code N: text" formatting —
-    // not just some failure — reaching MT_CLOSE.
+    // invoke_run's rc!=0 WITH out-pointer text: scalar_next_illegal calls
+    // ctx.next(), banned in scalar context. Pins the exact "error code {rc}:
+    // {text}" formatting reaching MT_CLOSE.
     let outcome = drive_session(
         "SCALAR_NEXT_ILLEGAL",
         &so_path("scalar_next_illegal"),
@@ -696,12 +686,8 @@ fn run_error_out_pointer_text_reaches_close() {
 #[test]
 fn udf_error_closes_session_with_prefixed_message() {
     // invoke_run's rc!=0 WITHOUT out-pointer text: scalar_double's `i64::MAX`
-    // arm panics deliberately (a fixture-only arm added specifically to reach
-    // this dispatch path, independent of cargo profile), inside the run shim's
-    // catch_unwind. The shim's panic arm returns rc=2 without ever touching
-    // the error out-pointer, so invoke_run's `None` branch formats only "error
-    // code {rc}" with no appended text. The session must still close with the
-    // standard prefixed message.
+    // arm panics inside the shim's catch_unwind, which returns rc=2 without
+    // touching the error out-pointer, so only "error code {rc}" is formatted.
     let outcome = drive_session(
         "SCALAR_DOUBLE",
         &so_path("scalar_double"),
@@ -723,11 +709,8 @@ fn udf_error_closes_session_with_prefixed_message() {
 #[test]
 fn mid_group_cleanup_ends_session_cleanly() {
     // batch_fetcher's Cleanup arm (GroupExit::Session): a mid-group MT_CLEANUP
-    // — the DB answering a mid-group MT_NEXT, not the group-boundary MT_RUN —
-    // ends the whole session immediately and successfully. run_group skips the
-    // tail flush entirely on this exit, so the buffered output from the row
-    // already processed this group is discarded, and run_udf returns Ok(())
-    // without a further MT_DONE/MT_FINISHED exchange.
+    // ends the session successfully. run_group skips the tail flush on this
+    // exit, so the row already processed this group has its output discarded.
     let (server, client) = start_mock_session(
         "scalar_double",
         "midcleanup",
@@ -764,9 +747,8 @@ fn mid_group_cleanup_ends_session_cleanly() {
 #[test]
 fn mid_group_close_surfaces_message() {
     // batch_fetcher's Close arm (GroupExit::Closed): a mid-group MT_CLOSE
-    // surfaces its exception message as the run error exactly like the
-    // group-boundary MT_CLOSE paths, and the runtime relays that message back
-    // to the DB (prefixed) in its own MT_CLOSE before returning Err.
+    // surfaces its exception message as the run error, relayed back to the DB
+    // in the runtime's own MT_CLOSE.
     let (server, client) = start_mock_session(
         "scalar_double",
         "midclose",
@@ -829,13 +811,9 @@ fn mid_group_close_surfaces_message() {
 
 #[test]
 fn ping_pong_mid_exchange_retries_transparently() {
-    // wire::request's ping-transparent retry: if the DB answers a request with
-    // MT_PING_PONG instead of the real reply, the client echoes the ping
-    // (staying in REQ/REP lockstep) and treats the DB's answer to that echo as
-    // the outcome of the original request, rather than surfacing the ping
-    // itself as the answer. That must hold for every ping in a row, not only
-    // the first, so here the DB pings twice back-to-back with different tokens
-    // before it finally answers the MT_RUN.
+    // wire::request's ping-transparent retry: the client echoes a mid-exchange
+    // ping and treats the DB's answer to that echo as the original request's
+    // outcome. Must hold for every ping in a row, so the DB pings twice here.
     let (server, client) = start_mock_session(
         "scalar_double",
         "pingpong",
@@ -904,10 +882,8 @@ fn ping_pong_mid_exchange_retries_transparently() {
 
 #[test]
 fn close_after_initial_run_request_ends_session() {
-    // run_udf's post-MT_RUN match Close arm: the DB can end the session with
-    // MT_CLOSE as the direct answer to the very first MT_RUN, before any
-    // group ever starts. The runtime must surface it as a run error (relayed
-    // as its own MT_CLOSE) rather than proceeding into run_group.
+    // run_udf's post-MT_RUN match Close arm: MT_CLOSE answering the very first
+    // MT_RUN must surface as a run error rather than proceeding into run_group.
     let (server, client) = start_mock_session(
         "scalar_double",
         "closeonrun",
@@ -954,15 +930,11 @@ fn close_after_initial_run_request_ends_session() {
 #[test]
 fn wildcard_after_run_request_is_ignored_and_cleanup_after_done_ends_session() {
     // run_udf's post-MT_RUN match: an event other than Run/Cleanup/Close (here
-    // MT_TRY_AGAIN, classified as HostEvent::TryAgain) falls into the silent
-    // `_ => {}` fallthrough and the loop proceeds into run_group exactly as if
-    // MT_RUN had been answered normally -- dispatch tolerates a stray event
-    // here where single-call mode would hard-error (the two loops'
-    // unexpected-event policies differ on purpose).
-    //
-    // The DB then answers the group's own client-sent MT_DONE with
-    // MT_CLEANUP directly (skipping a further MT_RUN round-trip), exercising
-    // the post-MT_DONE match's Cleanup arm.
+    // MT_TRY_AGAIN) falls into the silent `_ => {}` arm and the loop proceeds
+    // into run_group as if MT_RUN had answered normally — dispatch tolerates a
+    // stray event here where single-call mode hard-errors, on purpose. The DB
+    // then answers the group's MT_DONE with MT_CLEANUP directly, exercising the
+    // post-MT_DONE Cleanup arm.
     let (server, client) = start_mock_session(
         "scalar_double",
         "runwildcard",
@@ -1000,9 +972,8 @@ fn wildcard_after_run_request_is_ignored_and_cleanup_after_done_ends_session() {
 
 #[test]
 fn close_after_done_request_ends_session() {
-    // run_udf's post-MT_DONE match Close arm: the DB can end the session with
-    // MT_CLOSE as the direct answer to the client's own MT_DONE (the group's
-    // teardown message), not only mid-group.
+    // run_udf's post-MT_DONE match Close arm: MT_CLOSE can answer the client's
+    // own MT_DONE, not only arrive mid-group.
     let (server, client) = start_mock_session(
         "scalar_double",
         "closeondone",
@@ -1055,8 +1026,8 @@ fn close_after_done_request_ends_session() {
 #[test]
 fn wildcard_after_done_request_continues_loop() {
     // run_udf's post-MT_DONE match wildcard arm: an event other than
-    // Done/Cleanup/Close (here MT_TRY_AGAIN) is ignored and the outer loop
-    // continues to a fresh MT_RUN round, rather than failing the session.
+    // Done/Cleanup/Close is ignored and the outer loop continues to a fresh
+    // MT_RUN round rather than failing the session.
     let (server, client) = start_mock_session(
         "scalar_double",
         "donewildcard",

@@ -142,19 +142,16 @@ impl InputRowSet {
 const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
 
 /// Fixed per-cell byte-cost widths shared by `value_byte_cost` (the `Value`
-/// axis, used by the row path) and `fixed_cell_cost` (the Arrow `DataType`
-/// axis, used by the batch path) — one owning table for both.
+/// axis) and `fixed_cell_cost` (the Arrow `DataType` axis).
 const BYTES_BOOL: usize = 1;
 const BYTES_INT32: usize = 4;
 const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
 const BYTES_DATE: usize = 10;
 const BYTES_TIMESTAMP: usize = 29;
-/// Fixed portion of a NUMERIC cell's cost; `d.scale`/`scale` digits are added
-/// on top by each caller. O(1) upper bound, no alloc: i128 renders in ≤39
-/// digits + sign (≤40), which also dominates the scale-padded form (sign +
-/// scale+1 + point). Over-counts → flushes early, matching the conservative
-/// intent below.
+/// Fixed portion of a NUMERIC cell's cost; callers add `scale` digits on top.
+/// O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign, which also
+/// dominates the scale-padded form. Over-counts → flushes early.
 const NUMERIC_COST_BASE: usize = 40;
 
 /// Conservative O(1) byte cost for one cell, approximating the width its
@@ -636,28 +633,23 @@ fn is_string_family_exatype(typ: &ExaType) -> bool {
     )
 }
 
-/// Days from CE day 1 to the Arrow/Unix epoch: 1970-01-01 is CE day 719163, so
-/// an Arrow `Date32` (days since 1970-01-01) becomes a `NaiveDate` by adding it.
+/// 1970-01-01 as a CE day number: an Arrow `Date32` becomes a `NaiveDate` by
+/// adding it.
 #[cfg(feature = "emit-arrow")]
 const ARROW_EPOCH_CE_DAY: i32 = 719163;
 
 /// Convert one non-NULL Arrow cell to the SDK `Value` the row path would have
 /// carried for it.
 ///
-/// This is the single owner of the Arrow decoding decisions — the `Date32`
-/// CE-day epoch offset, which `Timestamp` unit each variant divides by (the
-/// nanosecond split is euclidean, so a pre-epoch negative count still yields
-/// the non-negative sub-second remainder `chrono` requires), and how a
-/// `Decimal128`'s unscaled/scale pair becomes a `Decimal`. Both encoders are
-/// consumers: `arrow_batch_to_value_rows` buffers the returned `Value` as-is,
-/// and `encode_slice` renders it with `value_to_block_string` for the string
-/// block. Neither may re-derive any of it, or the two paths can disagree about
-/// the same cell and break the byte-identity contract with `to_proto`.
+/// The single owner of the Arrow decoding decisions — the `Date32` CE-day
+/// offset, each `Timestamp` unit's divisor (euclidean, so a pre-epoch negative
+/// count still yields the non-negative sub-second remainder `chrono` requires),
+/// and the `Decimal128` unscaled/scale pair. `arrow_batch_to_value_rows` and
+/// `encode_slice` are both consumers; neither may re-derive any of it, or the
+/// two paths can disagree and break byte-identity with `to_proto`.
 ///
-/// `row` must index a non-NULL cell: nullness is a bulk per-column read the
-/// callers already perform, and a NULL cell occupies no type-block slot at all.
-/// `ColAccessor::Unsupported` yields `Value::Null` — an `ExaType::Unsupported`
-/// column has no representation the DB reads back.
+/// `row` must index a non-NULL cell — callers read nullness in bulk per column.
+/// `ColAccessor::Unsupported` yields `Value::Null`.
 #[cfg(feature = "emit-arrow")]
 fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
     match acc {
@@ -708,12 +700,9 @@ fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
     }
 }
 
-/// Fixed per-cell byte cost for an Arrow `DataType` with a constant-width
-/// proto encoding — the batch-path counterpart of `value_byte_cost`'s `Value`
-/// match, drawing on the same width table. Returns `None` for variable-width
-/// types (`Utf8`/`LargeUtf8`, whose cost depends on each string's length) and
-/// for any other type this batch path does not cost (`Unsupported` columns
-/// cost 0, matching type validation already having run before this call).
+/// Fixed per-cell byte cost for an Arrow `DataType` of constant width — the
+/// batch-path counterpart of `value_byte_cost`. `None` for variable-width types
+/// (`Utf8`/`LargeUtf8`) and for anything this path does not cost.
 #[cfg(feature = "emit-arrow")]
 fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
     use arrow::datatypes::DataType;
@@ -729,12 +718,8 @@ fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
     }
 }
 
-/// Add `cell_cost(row)` to `costs[row]` for every row not marked null in
-/// `nulls`, leaving NULL rows untouched — a NULL cell occupies no type-block
-/// slot, matching `value_byte_cost`'s treatment of `Value::Null`. The one
-/// null-check-and-accumulate loop shared by every `DataType` arm in
-/// `compute_row_costs`, parameterized by how a non-null cell's cost is
-/// computed.
+/// Add `cell_cost(row)` to `costs[row]` for every non-NULL row — a NULL cell
+/// occupies no type-block slot, matching `value_byte_cost`.
 #[cfg(feature = "emit-arrow")]
 fn accumulate_costs(
     costs: &mut [usize],
@@ -800,13 +785,8 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
 /// EMITS schemas including multiple columns sharing one block type and any null
 /// pattern.
 ///
-/// Native-block cells (`Int32`/`Int64`/`Float64`/`Boolean`) are the Arrow
-/// array's own scalar and go straight into their block; every string-block cell
-/// is `accessor_value`'s `Value` rendered by `value_into_block_string`, which
-/// moves rather than copies a `Value::String` but yields the same bytes as the
-/// row path's `value_to_block_string` for every variant, which is what makes
-/// the two byte-identical. The accessor variants are listed exhaustively rather
-/// than matched by wildcard so a new `ColAccessor` has to choose its block here
+/// The string-block accessor variants are listed exhaustively rather than
+/// matched by wildcard so a new `ColAccessor` must choose its block here
 /// instead of silently landing in the string block.
 #[cfg(feature = "emit-arrow")]
 fn encode_slice(
@@ -910,11 +890,10 @@ fn encode_slice(
 /// Convert a (possibly sliced) RecordBatch into a `Vec<Vec<Value>>` for tail
 /// materialisation into the shared `EmitBuffer`.
 ///
-/// Shares `encode_slice`'s single downcast site (`build_accessors`) and its
-/// single conversion site (`accessor_value`), so a cell buffered here and the
-/// same cell flushed mid-batch carry the identical `Value` — which is what makes
-/// a batch split invisible to the DB, and what keeps subsequent `emit` calls and
-/// the end-of-`run` tail flush coherent with the row path's `push` + `to_proto`.
+/// Shares `encode_slice`'s downcast site (`build_accessors`) and conversion
+/// site (`accessor_value`), so a cell buffered here and the same cell flushed
+/// mid-batch carry the identical `Value` — which is what makes a batch split
+/// invisible to the DB.
 #[cfg(feature = "emit-arrow")]
 fn arrow_batch_to_value_rows(
     batch: &arrow::record_batch::RecordBatch,
@@ -1247,15 +1226,8 @@ fn value_to_block_string(v: &Value) -> String {
     }
 }
 
-/// `value_to_block_string` for a `Value` the caller owns and is about to drop.
-///
-/// Yields exactly the same bytes, but a `Value::String` moves into the block
-/// instead of being copied a second time — which matters because the batch path
-/// hands over a freshly built `Value` per cell, so the borrowing form would
-/// clone every `Value::String` a second time; the pre-refactor `encode_slice`
-/// moved the Arrow `to_string()` result straight into the block instead. Every
-/// other variant delegates, keeping `value_to_block_string` the single owner of
-/// the string-block wire form.
+/// `value_to_block_string` for a `Value` the caller owns, so a `Value::String`
+/// moves into the block instead of being cloned. Same bytes for every variant.
 #[cfg(feature = "emit-arrow")]
 fn value_into_block_string(v: Value) -> String {
     match v {
@@ -1656,11 +1628,8 @@ fn open_connect_back(
         .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>)
 }
 
-/// Expands to the `UdfContext` handshake-metadata getters (`memory_limit`
-/// through `scope_user`, plus `debug_level`). `HostContextBridge` and
-/// `SingleCallContext` both carry a `handshake: HandshakeMeta` field and
-/// forward these accessors to it identically; invoking this macro in each
-/// impl keeps that one decision textually owned in one place.
+/// The `UdfContext` handshake-metadata getters. `HostContextBridge` and
+/// `SingleCallContext` both forward them to their `handshake` field identically.
 macro_rules! delegate_handshake_meta {
     () => {
         fn memory_limit(&self) -> u64 {
@@ -1721,11 +1690,8 @@ macro_rules! delegate_handshake_meta {
     };
 }
 
-/// Expands to the `#[cfg(feature = "connect-back")]` `UdfContext` wrappers
-/// (`cluster_ip`, `connection`, `connect_back`). `HostContextBridge` and
-/// `SingleCallContext` both carry a `conn_requester` field and a
-/// `record_error` method and forward these three hooks to the shared
-/// connect-back machinery identically, each recording the error on failure.
+/// The `connect-back` `UdfContext` hooks. Both contexts forward them to the
+/// shared machinery identically, each recording the error on failure.
 macro_rules! delegate_connect_back_hooks {
     () => {
         #[cfg(feature = "connect-back")]

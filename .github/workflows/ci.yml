@@ -172,21 +172,8 @@ jobs:
 
       # cargo llvm-cov redirects target/ to target/llvm-cov-target, but the
       # fixture lookup expects target/debug/lib*.so. Drop once #54 lands.
-      # Full list is every fixture the runtime tests dlopen (gated
-      # emit_arrow_dlopen/connect_back suites included via feature unification
-      # from exaudfclient) — a cache-restored build-job target/ used to mask a
-      # short list here; this is the complete, cold-cache-safe set.
       - name: Build test fixture cdylibs
-        run: |
-          cargo build \
-            -p scalar-double \
-            -p annotated-fixture \
-            -p single-call-fixture \
-            -p set-sum \
-            -p emit-k \
-            -p scalar-next-illegal \
-            -p returns-with-emit \
-            -p emit-arrow-batch
+        run: cargo build --workspace --exclude it
 
       - name: Run unit tests with coverage
         run: |

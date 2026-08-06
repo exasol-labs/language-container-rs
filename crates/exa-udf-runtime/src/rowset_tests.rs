@@ -584,20 +584,15 @@ fn oversized_single_row_flushes_alone() {
 
 #[test]
 fn emit_buffer_limit_is_exactly_4_000_000() {
-    // Existing tests (e.g. emit_buffer_byte_estimate_and_should_flush) only
-    // exercise EMIT_BUFFER_LIMIT_BYTES symbolically, so a silent change to
-    // 4 MiB (4,194,304) would pass them. Pin the literal from CLAUDE.md: the
-    // MT_EMIT wire limit is exactly 4,000,000 bytes, matching the reference
-    // C++ SLC's SWIG_MAX_VAR_DATASIZE, not 4 MiB.
+    // The other tests use EMIT_BUFFER_LIMIT_BYTES symbolically, so a silent
+    // change to 4 MiB would pass them. The wire limit is 4,000,000 bytes.
     assert_eq!(EMIT_BUFFER_LIMIT_BYTES, 4_000_000);
 }
 
 #[test]
 fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
-    // Pins the row path (HostContextBridge::emit) mid-run flush behavior.
-    // bridge_emit_batch_buffers_and_flushes (arrow_tests) already pins the
-    // batch path; today the row path is pinned only at the buffer level via
-    // emit_buffer_byte_estimate_and_should_flush, not through the bridge.
+    // Pins the row path (HostContextBridge::emit) mid-run flush behavior; the
+    // batch path is pinned by bridge_emit_batch_buffers_and_flushes.
     let meta = vec![col("v", ExaType::String { size: None })];
     let empty_table = ExascriptTableData {
         rows: 0,
@@ -708,10 +703,8 @@ fn empty_batch_next_is_false() {
     assert!(!bridge.next().unwrap());
 }
 
-/// `refill`'s loop skips a zero-row `MT_NEXT` batch and keeps fetching until
-/// a non-empty one arrives (or the group ends) — pinned directly against the
-/// bridge with a stateful fetcher, rather than only through the mock-DB
-/// dispatch harness in `tests/dispatch.rs`.
+/// `refill`'s loop skips zero-row `MT_NEXT` batches and keeps fetching until a
+/// non-empty one arrives, or the group ends.
 #[test]
 fn refill_skips_empty_batches_until_a_nonempty_one_arrives() {
     let meta = vec![col("a", ExaType::Int64)];
@@ -1041,11 +1034,8 @@ fn emit_flush_path_instrumented() {
     );
 }
 
-/// `push`'s periodic full-state checkpoint fires every
-/// `TELEMETRY_ROW_CHECKPOINT` (10,000) cumulative rows, independently of the
-/// byte-threshold flush — pinned by pushing exactly that many cheap rows
-/// (well under the 4,000,000-byte limit) and asserting the `MT_EMIT flush`
-/// telemetry event still appears.
+/// `push`'s periodic checkpoint fires every `TELEMETRY_ROW_CHECKPOINT` rows,
+/// independently of the byte-threshold flush.
 #[test]
 fn emit_push_periodic_checkpoint_at_10_000_rows() {
     use std::sync::{Arc, Mutex};
@@ -1084,10 +1074,9 @@ fn emit_push_periodic_checkpoint_at_10_000_rows() {
     );
 }
 
-/// `InputRowSet::from_proto`'s `ExaType::Int32` arm decodes `data_int32`
-/// cells and advances the per-type cursor only for non-null cells, mirroring
-/// every other typed column — pinned with a NULL interleaved between two
-/// values so a cursor-advance-on-NULL regression would misalign row 1.
+/// `InputRowSet::from_proto`'s `ExaType::Int32` arm advances the per-type
+/// cursor only for non-null cells — a NULL is interleaved so a
+/// cursor-advance-on-NULL regression would misalign row 1.
 #[test]
 fn input_rowset_decodes_int32_column() {
     let meta = vec![col("a", ExaType::Int32)];
@@ -1103,9 +1092,8 @@ fn input_rowset_decodes_int32_column() {
     assert_eq!(rs.row(2).unwrap(), &[Value::Int32(-8)]);
 }
 
-/// A column declared `ExaType::Unsupported` has no backing type block, so
-/// `InputRowSet::from_proto` maps every one of its cells to `Value::Null`
-/// regardless of the NULL bitmap — there is no representation to decode.
+/// An `ExaType::Unsupported` column has no backing type block, so
+/// `from_proto` maps every cell to `Value::Null` regardless of the NULL bitmap.
 #[test]
 fn input_rowset_unsupported_column_decodes_to_null() {
     let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
@@ -1121,9 +1109,8 @@ fn input_rowset_unsupported_column_decodes_to_null() {
     assert_eq!(rs.row(0).unwrap(), &[Value::Int64(5), Value::Null]);
 }
 
-/// A column declared `ExaType::Unsupported` contributes no slot in either the
-/// column-tally pre-sizing pass or the row-packing loop of `to_proto` — the
-/// column is skipped entirely rather than landing in some other block.
+/// An `ExaType::Unsupported` column contributes no slot to either pass of
+/// `to_proto` — it is skipped rather than landing in some other block.
 #[test]
 fn to_proto_skips_unsupported_columns_in_both_tally_and_packing() {
     let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
@@ -1143,10 +1130,8 @@ fn to_proto_skips_unsupported_columns_in_both_tally_and_packing() {
     );
 }
 
-/// `value_to_block_string`'s `Value::Bool`/`Value::Null` arms are plain
-/// `Display`/empty-string renders with no fast-path counterpart — pinned
-/// directly since `value_to_block_string_matches_slow_path_for_numeric_date_timestamp`
-/// only exercises the NUMERIC/DATE/TIMESTAMP arms.
+/// `value_to_block_string`'s `Value::Bool`/`Value::Null` arms have no fast-path
+/// counterpart, so the slow-path parity test does not reach them.
 #[test]
 fn value_to_block_string_bool_and_null_render_as_text_and_empty() {
     assert_eq!(value_to_block_string(&Value::Bool(true)), "true");
@@ -1155,12 +1140,9 @@ fn value_to_block_string_bool_and_null_render_as_text_and_empty() {
 }
 
 /// `value_to_i64`/`value_to_f64`/`value_to_bool` coerce every `Value` variant
-/// for an EMITS column whose declared type disagrees with the runtime
-/// `Value` (e.g. a connect-back SELECT handing a DECIMAL to an INT64
-/// column). Each function's "natural" arm (`Int32`/`Int64` for
-/// `value_to_i64`, `Double` for `value_to_f64`, `Bool` for `value_to_bool`)
-/// is already exercised by the row/batch parity tests; this covers the
-/// remaining coercion and wildcard arms directly.
+/// for an EMITS column whose declared type disagrees with the runtime `Value`.
+/// The parity tests already cover each function's natural arm; this covers the
+/// remaining coercion and wildcard arms.
 mod value_coercion_tests {
     use super::*;
 
@@ -1238,11 +1220,9 @@ mod value_coercion_tests {
     }
 }
 
-/// `first_nonloopback_ipv4` walks the real `getifaddrs` list — not DB-bound,
-/// but its result depends on the host's network configuration. On a host with
-/// a non-loopback interface it must return a well-formed dotted-quad IPv4
-/// address that is not loopback; on a network-isolated host (no interface
-/// beyond `lo`) it must fail with `UdfError::ConnectBack` rather than panic.
+/// `first_nonloopback_ipv4` walks the real `getifaddrs` list, so its result
+/// depends on the host: a well-formed non-loopback dotted quad where one
+/// exists, `UdfError::ConnectBack` (never a panic) on an isolated host.
 #[cfg(feature = "connect-back")]
 #[test]
 fn first_nonloopback_ipv4_returns_a_valid_non_loopback_ipv4_address() {
@@ -1255,10 +1235,8 @@ fn first_nonloopback_ipv4_returns_a_valid_non_loopback_ipv4_address() {
     }
 }
 
-/// `HostContextBridge::cluster_ip` and `SingleCallContext::cluster_ip` (the
-/// `delegate_connect_back_hooks!` expansion in each impl) both just forward
-/// to `first_nonloopback_ipv4` — pinned by comparing the delegated `Result`
-/// (including the `Err` case on a network-isolated host) to a direct call.
+/// Both `cluster_ip` impls (the `delegate_connect_back_hooks!` expansion) just
+/// forward to `first_nonloopback_ipv4`.
 #[cfg(feature = "connect-back")]
 #[test]
 fn bridge_cluster_ip_delegates_to_first_nonloopback_ipv4() {
@@ -1287,9 +1265,8 @@ fn single_call_context_cluster_ip_delegates_to_first_nonloopback_ipv4() {
     );
 }
 
-/// `connection()`'s error branch (in both impls) records the failure via
-/// `record_error` so it surfaces through `take_last_error` / `RuntimeError::Udf`
-/// — pinned with an injected fake `ConnRequester` that always errors.
+/// `connection()`'s error branch records the failure via `record_error` so it
+/// surfaces through `take_last_error`.
 #[cfg(feature = "connect-back")]
 #[test]
 fn bridge_connection_error_is_recorded_via_record_error() {
@@ -1356,9 +1333,8 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
     );
 }
 
-/// Construct a `SingleCallContext` for the data-method-ban tests, supplying
-/// the connect-back arg only when the feature is enabled so the same call
-/// sites compile either way (mirrors `make_bridge`'s pattern).
+/// Construct a `SingleCallContext`, supplying the connect-back arg only when
+/// the feature is enabled so call sites compile either way.
 fn single_call_ctx() -> SingleCallContext<'static> {
     #[cfg(feature = "connect-back")]
     {
@@ -1557,11 +1533,9 @@ mod fast_string_block_tests {
         assert_eq!(fast_timestamp_to_string(&ts), None);
     }
 
-    /// chrono represents a leap second by storing the nanosecond field in
-    /// `1_000_000_000..2_000_000_000` at second 59 (`Timelike::nanosecond`'s
-    /// documented leap-second encoding). `fast_timestamp_to_string` declines
-    /// that case rather than reverse-engineer chrono's undocumented
-    /// leap-second rendering, deferring to `NaiveDateTime::format`.
+    /// chrono encodes a leap second as a nanosecond field in
+    /// `1_000_000_000..2_000_000_000`. `fast_timestamp_to_string` declines that
+    /// case and defers to `NaiveDateTime::format`.
     #[test]
     fn fast_timestamp_defers_for_leap_second_nanos() {
         let ts = NaiveDate::from_ymd_opt(2016, 12, 31)
@@ -1910,12 +1884,9 @@ mod fast_string_block_ingest_tests {
         }
     }
 
-    /// `parse_2digit` rejects anything that is not exactly two ASCII digit
-    /// bytes: wrong length (the length branch is otherwise unreachable via
-    /// `fast_parse_date`/`fast_parse_timestamp`, which always slice exactly
-    /// 2 bytes) and a non-digit byte at either position (the branch those
-    /// callers do reach, e.g. a malformed month/day/hour/minute/second
-    /// field in an otherwise correctly-shaped string).
+    /// `parse_2digit` rejects anything that is not exactly two ASCII digits.
+    /// The wrong-length branch is unreachable via the fixed-width callers, so
+    /// it is exercised directly here.
     #[test]
     fn parse_2digit_rejects_wrong_length_and_non_digit_bytes() {
         assert_eq!(parse_2digit(b"5"), None, "too short");
@@ -1925,10 +1896,8 @@ mod fast_string_block_ingest_tests {
         assert_eq!(parse_2digit(b"42"), Some(42), "valid 2-digit field");
     }
 
-    /// `parse_4digit` rejects anything that is not exactly four ASCII digit
-    /// bytes: wrong length (unreachable via the fixed-width callers above,
-    /// which always slice exactly 4 bytes, so exercised here directly) and a
-    /// non-digit byte anywhere in the field via the per-byte loop.
+    /// `parse_4digit` rejects anything that is not exactly four ASCII digits,
+    /// including the wrong-length branch the fixed-width callers never reach.
     #[test]
     fn parse_4digit_rejects_wrong_length_and_non_digit_bytes() {
         assert_eq!(parse_4digit(b"123"), None, "too short");
@@ -2082,13 +2051,10 @@ mod arrow_tests {
         assert_eq!(table.data_string, vec!["a", "b", "c"]);
     }
 
-    /// `encode_slice` — the encoder for every mid-batch ≤4 MB flush — is
-    /// byte-identical to the row path across all five proto blocks and every
-    /// Arrow source type that feeds the string block: `Utf8`, `LargeUtf8`,
-    /// `Date32` (CE-day epoch offset), all four `Timestamp` units,
-    /// `Decimal128` (scale), and the three `Numeric` widening sources. NULLs
-    /// are spread over different rows and both native and string blocks so the
-    /// bitmap and the no-slot-for-NULL interleaving are pinned as well.
+    /// `encode_slice` is byte-identical to the row path across all five proto
+    /// blocks and every Arrow source type feeding the string block. NULLs are
+    /// spread over different rows and both block kinds, so the bitmap and the
+    /// no-slot-for-NULL interleaving are pinned too.
     ///
     /// The expectation is the row path's own `to_proto` output for the
     /// equivalent `Value` rows, so this asserts the byte-identity contract
@@ -2999,19 +2965,14 @@ mod arrow_tests {
         assert_eq!(value, Value::Timestamp(expected));
     }
 
-    /// `accessor_value`'s `TsNanosecond` arm splits the raw `i64` count with
-    /// euclidean division: `ns.div_euclid(1_000_000_000)` floors the second
-    /// towards minus infinity and `ns.rem_euclid(1_000_000_000)` keeps the
-    /// nanosecond remainder in `[0, 1_000_000_000)`, the only range
-    /// `chrono::DateTime::from_timestamp` accepts. Both properties differ from
-    /// truncating `/` and `%` exactly for a negative `ns` — a pre-epoch
-    /// instant — whose truncated remainder is negative, wraps when cast to
-    /// `u32`, and is rejected, so `unwrap_or_default()` would swallow every
-    /// pre-epoch nanosecond timestamp into the Unix epoch.
+    /// `accessor_value`'s `TsNanosecond` arm splits the raw `i64` euclidean, so
+    /// the remainder stays in `[0, 1_000_000_000)` — the only range
+    /// `chrono::DateTime::from_timestamp` accepts. Truncating `/` and `%` yield
+    /// a negative remainder for a pre-epoch `ns`, which wraps as `u32` and is
+    /// rejected, so `unwrap_or_default()` would swallow it into the epoch.
     ///
-    /// A sub-second remainder (`-1`) and a whole-second-aligned value
-    /// (`-1_000_000_000`, whose remainder is 0 so only the floored second
-    /// separates the two divisions) must both decode to the instant they name.
+    /// `-1` has a sub-second remainder; `-1_000_000_000` has none, so only the
+    /// floored second separates the two divisions there.
     #[test]
     fn accessor_value_timestamp_nanosecond_negative_yields_pre_epoch_instant() {
         use arrow::array::TimestampNanosecondArray;

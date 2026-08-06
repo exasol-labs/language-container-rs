@@ -1,3 +1,9 @@
+//! Doubles a BIGINT input.
+//!
+//! `i64::MAX` is a test-only sentinel that panics, covering the runtime's
+//! rc!=0-without-out-pointer path. It cannot fire against a live DB, which
+//! delivers BIGINT as PB_NUMERIC rather than Int64.
+
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;

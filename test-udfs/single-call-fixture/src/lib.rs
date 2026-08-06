@@ -56,17 +56,16 @@ unsafe extern "C" fn virtual_schema_adapter_call(
             CStr::from_ptr(json_arg).to_str().unwrap_or("")
         };
 
-        // Test-only success path: covers the runtime's success arm for this
-        // hook, which the deliberate-failure default below never reaches.
+        // Covers the runtime's success arm, which the deliberate-failure
+        // default below never reaches.
         if arg == "SUCCEED" {
             write_result("VS_ADAPTER_OK", result);
             return 0;
         }
 
-        // Test-only connect-back probe: exercises ctx.connection(), which
-        // records its own error on the live SingleCallContext independently of
-        // this hook's own (also deliberate) failure below, so the runtime can
-        // combine both into one close message.
+        // ctx.connection() records its own error on the context, independent of
+        // this hook's failure below, so the runtime combines both into one
+        // close message.
         if arg == "CONNECTION_PROBE" {
             let _ = ctx.connection("PROBE_CONN");
             write_result("VS_ADAPTER_ERROR", result);
@@ -90,10 +89,8 @@ unsafe extern "C" fn virtual_schema_adapter_call(
     }
 }
 
-/// Deliberately fails, echoing the received spec in the error text: exercises
-/// the runtime's `ScFnGenerateSqlForImportSpec` dispatch arm and its
-/// hook-error mapping (its sibling `generate_sql_for_export_spec` is left
-/// `None` below to verify the runtime's undefined-hook reply instead).
+/// Deliberately fails, echoing the received spec: exercises the runtime's
+/// `ScFnGenerateSqlForImportSpec` arm and its hook-error mapping.
 unsafe extern "C" fn generate_sql_for_import_spec(
     json_spec: *const c_char,
     result: *mut *mut c_char,

@@ -69,12 +69,10 @@ enum GroupExit {
 /// `MT_DONE`; `Ok(Some(result))` if the DB closed or cleaned up mid-input so the
 /// caller short-circuits `run_udf`.
 ///
-/// `transport` and `proto` are shared (via a single `RefCell`) among the batch
-/// fetcher, the mid-group emit flusher, the tail flush, and — when the
-/// `connect-back` feature is enabled — the credential fetcher. Each borrows the
-/// cell mutably only for one send/recv exchange; the borrows never overlap
-/// because UDF execution is single-threaded and the dispatch loop is blocked
-/// here, so exactly one cell over the shared `&mut Protocol` is sound.
+/// `transport` and `proto` are shared via a single `RefCell` among the batch
+/// fetcher, the emit flusher, the tail flush and the credential fetcher. The
+/// borrows never overlap: UDF execution is single-threaded and each closure
+/// holds the cell for one send/recv exchange only.
 fn run_group(
     transport: &ZmqTransport,
     proto: &mut Protocol,
@@ -93,8 +91,8 @@ fn run_group(
     let mut fetch = batch_fetcher(transport, cell_ref, &exit);
     let mut run_err: Option<RuntimeError> = None;
 
-    // The bridge's borrows of the input, the fetcher and the group-scoped
-    // `emit_buf` end with this block, freeing `emit_buf` for the tail flush.
+    // The bridge's borrow of `emit_buf` ends with this block, freeing it for
+    // the tail flush.
     if let Some(mut input) = first_nonempty_input(&mut fetch, &meta.input_columns)? {
         let mut bridge = HostContextBridge::new(
             &mut input,
@@ -123,13 +121,8 @@ fn run_group(
     Ok(None)
 }
 
-/// Build the group's mid-group emit flusher: send one pre-built proto table as
-/// `MT_EMIT`. A zero-row table is a no-op, so no zero-row `MT_EMIT` ever reaches
-/// the wire.
-///
-/// Borrows the shared cell mutably only for the one send/recv exchange, so it
-/// never overlaps the batch fetcher's or the tail flush's borrows of the same
-/// cell.
+/// Send one pre-built proto table as `MT_EMIT`. A zero-row table is a no-op, so
+/// no zero-row `MT_EMIT` ever reaches the wire.
 fn emit_flusher<'a>(
     transport: &'a ZmqTransport,
     proto_cell: &'a RefCell<&'a mut Protocol>,
@@ -148,13 +141,13 @@ fn emit_flusher<'a>(
     )
 }
 
-/// Build the group's batch fetcher: pull the next `MT_NEXT` batch. `Ok(Some)` is
-/// a batch, `Ok(None)` the group boundary (`MT_DONE`).
+/// Pull the next `MT_NEXT` batch: `Ok(Some)` a batch, `Ok(None)` the group
+/// boundary (`MT_DONE`).
 ///
-/// A mid-input `MT_CLEANUP` / `MT_CLOSE` records the terminal reason in `exit`
-/// and reports the group as ended: a terminal event is not a UDF error, and the
-/// fetcher — reached from inside `run()` via `ctx.next()` — cannot unwind the
-/// session itself. `run_group` reads `exit` once the UDF returns.
+/// A mid-input `MT_CLEANUP` / `MT_CLOSE` records its reason in `exit` and
+/// reports the group as ended — the fetcher runs inside `run()` via
+/// `ctx.next()` and cannot unwind the session itself. `run_group` reads `exit`
+/// once the UDF returns.
 fn batch_fetcher<'a>(
     transport: &'a ZmqTransport,
     proto_cell: &'a RefCell<&'a mut Protocol>,
@@ -186,12 +179,9 @@ fn batch_fetcher<'a>(
     )
 }
 
-/// Advance the group's batch fetcher to its first row-bearing input batch,
-/// skipping zero-row batches.
+/// Advance to the first row-bearing input batch, skipping zero-row ones.
 ///
-/// `None` means the group delivered no rows at all — the DB answered `MT_DONE`
-/// immediately, sent only zero-row batches, or ended input with a terminal
-/// event — so `run()` is invoked zero times, a clean no-op matching empty input.
+/// `None` means the group delivered no rows, so `run()` is invoked zero times.
 fn first_nonempty_input(
     fetch: &mut BatchFetcher,
     input_cols: &[ColumnMeta],
@@ -205,15 +195,11 @@ fn first_nonempty_input(
     Ok(None)
 }
 
-/// Drive the UDF over one group on the DB-declared input iteration axis,
-/// returning the error that ended the group early, if any.
+/// Drive the UDF over one group, returning the error that ended it early.
 ///
-/// `ExactlyOnce` (SCALAR) is framework-driven: invoke `run()` for the current
-/// row, then advance the cursor (fetching the next batch on drain) until the
-/// group boundary. `Multiple` (SET) is UDF-driven: invoke `run()` once and let
-/// `ctx.next()` span the group's batches. The failure is reported rather than
-/// propagated: `run_group` owns the decision of how a failed group ends the
-/// session, and this reports only that the group stopped early.
+/// `ExactlyOnce` (SCALAR) is framework-driven: `run()` per row, advancing the
+/// cursor until the group boundary. `Multiple` (SET) is UDF-driven: `run()`
+/// once, with `ctx.next()` spanning the group's batches.
 fn drive_group_rows(
     bridge: &mut HostContextBridge,
     udf: &LoadedUdf,
@@ -234,11 +220,8 @@ fn drive_group_rows(
     }
 }
 
-/// Flush the group's residual output as one `MT_EMIT` before its `MT_DONE`.
-///
-/// Always flushes a non-empty buffer, even if the byte threshold was never
-/// reached; threshold crossings already flushed mid-group inside `emit`, so this
-/// carries only the trailing rows.
+/// Flush the group's residual output as one `MT_EMIT` before its `MT_DONE`,
+/// even if the byte threshold was never reached.
 fn tail_flush(
     emit_buf: &mut EmitBuffer,
     meta: &UdfMeta,

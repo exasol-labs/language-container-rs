@@ -23,8 +23,7 @@ fn fixture_so_path() -> PathBuf {
 }
 
 /// A `#[exasol_udf]`-macro fixture, which leaves every single-call hook
-/// unregistered (`None`) -- used to drive the runtime's undefined-hook path
-/// for a hook the dedicated single-call fixture always wires up.
+/// unregistered (`None`) -- used to drive the runtime's undefined-hook path.
 fn scalar_double_so_path() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
@@ -342,10 +341,8 @@ fn mt_return_ack_terminates_session() {
 }
 
 /// No other message is valid as the direct answer to MT_RUN in single-call
-/// mode: retrying here would risk a livelock, so an unrecognized event — here
-/// MT_DONE, which belongs to the MT_NEXT/MT_DONE run-loop exchange, never to
-/// MT_RUN — is a hard error rather than something the client tolerates or
-/// retries.
+/// mode: retrying would risk a livelock, so an unrecognized event is a hard
+/// error rather than something the client tolerates.
 #[test]
 fn unexpected_event_in_single_call_mode_is_hard_error() {
     let so = fixture_so_path();
@@ -440,9 +437,8 @@ fn single_call_mode_routes_to_dispatcher() {
 
 #[test]
 fn close_ack_after_call_reply_ends_session() {
-    // run_single_call's reply-ack match Close arm: after the container sends
-    // MT_RETURN, the DB can end the session with MT_CLOSE as that reply's ack
-    // instead of MT_RETURN (SingleCallAck) or MT_CLEANUP.
+    // run_single_call's reply-ack match Close arm: the DB can ack the
+    // container's MT_RETURN with MT_CLOSE instead of SingleCallAck/MT_CLEANUP.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -511,10 +507,8 @@ fn close_ack_after_call_reply_ends_session() {
 #[test]
 fn unexpected_ack_after_call_reply_is_hard_error() {
     // run_single_call's reply-ack match wildcard arm: any event other than
-    // SingleCallAck/Cleanup/Close (here MT_DONE, which belongs to the
-    // MT_NEXT/MT_DONE run-loop exchange) as the ack to the container's own
-    // MT_RETURN is a hard error, exactly like an unexpected event anywhere
-    // else in single-call mode.
+    // SingleCallAck/Cleanup/Close as the ack to the container's MT_RETURN is a
+    // hard error, like an unexpected event anywhere else in single-call mode.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -578,9 +572,8 @@ fn unexpected_ack_after_call_reply_is_hard_error() {
 
 #[test]
 fn close_directly_after_run_request_with_no_call_pending() {
-    // run_single_call's top-level post-MT_RUN match Close arm: the DB can end
-    // the session with MT_CLOSE as the direct answer to MT_RUN itself,
-    // before any MT_CALL is ever issued.
+    // run_single_call's top-level post-MT_RUN match Close arm: MT_CLOSE can
+    // answer MT_RUN directly, before any MT_CALL is issued.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -631,10 +624,9 @@ fn close_directly_after_run_request_with_no_call_pending() {
 
 #[test]
 fn done_continues_to_second_call_cycle() {
-    // run_single_call's post-MT_DONE match Done arm: the DB can answer the
-    // container's own MT_DONE with MT_DONE (not MT_CLEANUP), continuing the
-    // session into a second MT_RUN/MT_CALL cycle rather than ending it. Every
-    // other mock test ends the session via MT_CLEANUP on the first MT_DONE.
+    // run_single_call's post-MT_DONE match Done arm: answering the container's
+    // MT_DONE with MT_DONE (not MT_CLEANUP) continues the session into a
+    // second MT_RUN/MT_CALL cycle rather than ending it.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -770,8 +762,8 @@ fn close_after_done_request_in_single_call_mode() {
 #[test]
 fn unexpected_after_done_request_in_single_call_mode() {
     // run_single_call's post-MT_DONE match wildcard arm: any event other than
-    // Done/Cleanup/Close (here MT_RUN, classified as HostEvent::Run) as the
-    // answer to the container's own MT_DONE is a hard error.
+    // Done/Cleanup/Close as the answer to the container's MT_DONE is a hard
+    // error.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -834,13 +826,9 @@ fn unexpected_after_done_request_in_single_call_mode() {
 
 #[test]
 fn import_spec_hook_error_surfaces_as_run_error() {
-    // invoke_hook's ScFnGenerateSqlForImportSpec arm (its sibling
-    // ScFnGenerateSqlForExportSpec is exercised by
-    // unimplemented_hook_replies_undefined_call, which leaves that hook
-    // unregistered instead) and the Some(Err(e)) => Err(e) arm of the
-    // result-mapping match: the fixture's import-spec hook deliberately
-    // returns rc=1 with the echoed spec in the out-pointer, so the hook error
-    // propagates as a run error rather than an MT_RETURN/MT_UNDEFINED_CALL.
+    // invoke_hook's ScFnGenerateSqlForImportSpec arm and the Some(Err(e)) arm
+    // of the result-mapping match: the fixture's hook returns rc=1 with the
+    // echoed spec, so the hook error propagates as a run error.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -899,10 +887,8 @@ fn import_spec_hook_error_surfaces_as_run_error() {
 
 #[test]
 fn unrecognized_call_fn_id_replies_undefined_call() {
-    // invoke_hook's ScFnNil sentinel arm: the DB can send an MT_CALL naming a
-    // function id this container's SingleCallFunctionId enum doesn't
-    // recognize (Protocol::step falls back to ScFnNil via
-    // `try_from(..).unwrap_or(ScFnNil)`); the dispatcher must treat it as an
+    // invoke_hook's ScFnNil sentinel arm: an MT_CALL naming an unrecognized
+    // function id (Protocol::step falls back to ScFnNil) must be treated as an
     // unimplemented hook rather than panic or misroute.
     let so = fixture_so_path();
     assert!(
@@ -950,10 +936,9 @@ fn unrecognized_call_fn_id_replies_undefined_call() {
 
 #[test]
 fn adapter_hook_success_returns_via_mt_return() {
-    // invoke_vs_adapter_call's success arm (Some(Ok(s))): when the adapter
-    // hook succeeds, the runtime replies MT_RETURN with its result. Every
-    // other adapter test drives the fixture's deliberate-failure default
-    // path instead.
+    // invoke_vs_adapter_call's success arm (Some(Ok(s))): the runtime replies
+    // MT_RETURN with the hook's result. Every other adapter test drives the
+    // fixture's deliberate-failure default instead.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -1005,11 +990,8 @@ fn adapter_hook_success_returns_via_mt_return() {
 
 #[test]
 fn vs_adapter_hook_undefined_when_not_registered() {
-    // invoke_vs_adapter_call's None arm: when the loaded UDF's vtable leaves
-    // virtual_schema_adapter_call unset -- true of every #[exasol_udf]-macro
-    // fixture, unlike the dedicated single-call fixture used everywhere else
-    // in this file -- the runtime must reply MT_UNDEFINED_CALL rather than
-    // treat the missing hook as an error.
+    // invoke_vs_adapter_call's None arm: an unset virtual_schema_adapter_call
+    // must reply MT_UNDEFINED_CALL rather than count as an error.
     let so = scalar_double_so_path();
     assert!(so.exists(), "build libscalar_double.so first: {:?}", so);
     let conn_id = 109u64;
@@ -1073,15 +1055,70 @@ fn vs_adapter_hook_undefined_when_not_registered() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
+/// `wire::conn_requester`'s Close arm: when the DB answers a mid-call
+/// `MT_IMPORT` with `MT_CLOSE`, the connect-back error must carry the DB's own
+/// exception message rather than the generic "not ConnInfo" text.
+#[cfg(feature = "connect-back")]
+#[test]
+fn adapter_connection_probe_close_preserves_db_exception_message() {
+    let so = fixture_so_path();
+    let conn_id = 114u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("connectionprobeclose");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+            Some("CONNECTION_PROBE"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtImport as i32);
+    let mut close = response(MessageType::MtClose, conn_id);
+    close.close = Some(exa_proto::ExascriptClose {
+        exception_message: Some("import denied by db".into()),
+    });
+    send_resp(&server, &close);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtClose as i32);
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("import denied by db"),
+        "the DB's own MT_CLOSE message must survive into the connect-back \
+         error, not be replaced by the generic not-ConnInfo text: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    let err = result.expect_err("the closed connect-back must surface as Err");
+    assert!(
+        err.to_string().contains("import denied by db"),
+        "runtime error carries the DB's close message: {err}"
+    );
+}
+
 #[cfg(feature = "connect-back")]
 #[test]
 fn adapter_connection_probe_combines_hook_and_recorded_errors() {
-    // invoke_vs_adapter_call's Some(detail) sub-arm: when the adapter hook
-    // itself fails (its own deliberate rc=1) *and* it called
-    // ctx.connection(...) during the call, the connect-back error recorded on
-    // the live SingleCallContext (via record_error) is folded into the
-    // surfaced message alongside the hook's own error text, rather than only
-    // one of the two ever reaching the DB.
+    // invoke_vs_adapter_call's Some(detail) sub-arm: when the hook fails *and*
+    // it called ctx.connection(...), the connect-back error recorded on the
+    // context is folded into the surfaced message alongside the hook's own.
     let so = fixture_so_path();
     assert!(
         so.exists(),
@@ -1110,10 +1147,9 @@ fn adapter_connection_probe_combines_hook_and_recorded_errors() {
         ),
     );
 
-    // The hook blocks mid-call on ctx.connection("PROBE_CONN"), which sends
-    // its own MT_IMPORT over the same wire. Answer with anything that isn't
-    // ConnInfo (here MT_CLEANUP) so the connect-back request itself fails and
-    // records an error on the context before the hook returns its own rc=1.
+    // The hook blocks mid-call on ctx.connection("PROBE_CONN"), which sends its
+    // own MT_IMPORT. Answer with anything that isn't ConnInfo (here MT_CLEANUP)
+    // so the connect-back fails and records an error on the context.
     let req = recv_req(&server);
     assert_eq!(
         req.r#type,
