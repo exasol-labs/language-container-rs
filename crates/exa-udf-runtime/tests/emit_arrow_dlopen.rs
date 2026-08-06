@@ -11,6 +11,9 @@ use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
 
+mod common;
+use common::fixture_so_path;
+
 fn col(name: &str, typ: ExaType) -> ColumnMeta {
     ColumnMeta {
         name: name.to_string(),
@@ -24,13 +27,7 @@ fn col(name: &str, typ: ExaType) -> ColumnMeta {
 
 #[test]
 fn emit_arrow_batch_so_round_trips_via_ipc() {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("../../target/debug/libemit_arrow_batch.so");
-    assert!(
-        p.exists(),
-        "build first: cargo build -p emit-arrow-batch ({p:?})"
-    );
-
+    let p = fixture_so_path("emit_arrow_batch");
     let udf = LoadedUdf::open(&p, "EMIT_ARROW_BATCH").expect("load .so");
 
     let input_cols = vec![col("dummy", ExaType::Boolean)];
