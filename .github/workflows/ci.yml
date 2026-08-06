@@ -9,6 +9,11 @@ on:
     paths-ignore: ["specs/**", "*.md", "**/*.md"]
   workflow_dispatch:
 
+# Never cancel a main-push run: `release` needs that exact run's jobs to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   # RAM guard for the standard 4-vCPU / 16 GB runner: cap concurrent codegen
@@ -351,26 +356,10 @@ jobs:
         with:
           name: lc-tarball
 
-      # Cache the (multi-GB) Exasol DB image per matrix version so each leg
-      # loads it from a tarball instead of re-pulling from Docker Hub every run.
-      - name: Cache Exasol DB image
-        id: exa-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/exasol-db-${{ matrix.exasol_version }}.tar
-          key: exasol-db-${{ matrix.exasol_version }}
-
-      - name: Load or pull Exasol image
-        run: |
-          TAR=/tmp/exasol-db-${{ matrix.exasol_version }}.tar
-          if [ -f "$TAR" ]; then
-            echo "Loading Exasol image from cache..."
-            docker load -i "$TAR"
-          else
-            echo "Pulling Exasol image from registry..."
-            docker pull exasol/docker-db:${{ matrix.exasol_version }}
-            docker save exasol/docker-db:${{ matrix.exasol_version }} -o "$TAR"
-          fi
+      # Do NOT cache this image as a tarball: measured, `docker load` (1m51s+) is
+      # slower than this pull (1m35s) and the tarballs evict the cargo caches.
+      - name: Pull Exasol image
+        run: docker pull exasol/docker-db:${{ matrix.exasol_version }}
 
       # Cache the exapump release binary per pinned version so each matrix leg
       # installs it from cache instead of re-downloading from GitHub releases
