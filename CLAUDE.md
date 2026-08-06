@@ -68,6 +68,11 @@ Project mission in: @specs/mission.md
 - The test module remains a child module of its parent, so `use super::*;` still reaches the parent's private items and its imports.
 - A test-only helper (e.g. an accessor or a `to_pb`-style debug converter) that exists solely for tests belongs in the sibling `_tests.rs` file, not in the production module — add it there as `impl super::TypeName { ... }` (or a plain free fn), not gated by `#[cfg(test)]` since the whole file is already test-only via the `mod tests;` declaration.
 
+## Runtime dlopen fixtures
+
+- `exa-udf-runtime`'s integration tests load `test-udfs/*` cdylibs declared as its `[dev-dependencies]`; that edge is what builds and rebuilds them, and `tests/common/mod.rs` resolves the path (cargo-driven host runs only). A new fixture needs a dev-dependency entry, plus the CI `-p` allowlist if an IT scenario also loads it.
+- `tests/emit_arrow_dlopen.rs` is behind the dev-only `emit-arrow-test` feature, so it runs only under `--features emit-arrow-test` or `--all-features` (what CI's coverage job uses). With any other flag set — including plain `--features emit-arrow` — it silently compiles out instead of failing.
+
 ## Misc
 
 - Keep the three "connection" concepts distinct: Exasol CONNECTION object (credential store) vs exarrow-rs session (the connect-back act) vs cluster node IP (`ctx.cluster_ip()`).

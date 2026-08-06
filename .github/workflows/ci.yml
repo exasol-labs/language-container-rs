@@ -50,9 +50,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # Debug compile warms target/ for lint + unit-tests. This also builds the
-      # dlopen fixtures (scalar-double / annotated-fixture / single-call-fixture)
-      # that exa-udf-runtime's dispatch/single_call tests load at runtime.
+      # Warms target/ for the lint job; unit-tests builds into
+      # target/llvm-cov-target and only shares the registry cache.
       - name: Build workspace (debug, warm cache)
         run: |
           cargo build \
@@ -139,9 +138,8 @@ jobs:
 
       - name: Clippy
         # it requires a live Exasol container; it is checked in the integration job.
-        # --all-targets covers tests/benches, --all-features covers feature-gated
-        # code (e.g. the emit-arrow-test dlopen fixture); without both, neither is
-        # linted here. Matches the lint command documented in CLAUDE.md.
+        # --all-targets lints test/bench targets, --all-features lints
+        # feature-gated code (e.g. the emit-arrow-test dlopen test).
         run: |
           cargo clippy \
             --exclude it \

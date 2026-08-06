@@ -3,9 +3,8 @@
 //! to Arrow IPC bytes UDF-side and crossing the boundary only as `&[u8]`. The
 //! pre-IPC design SIGSEGV'd here; with IPC the `.so`-built batch must round-trip
 //! cleanly into the host's emit buffer.
-// `emit-arrow-test` (not `emit-arrow`) gates this: the fixture cdylib it dlopens
-// is an optional dependency behind that feature, which keeps it out of both the
-// production and the default test graph.
+// `emit-arrow-test`, not `emit-arrow`: the fixture cdylib is an optional
+// dependency behind that feature. See `Cargo.toml`.
 #![cfg(feature = "emit-arrow-test")]
 
 use exa_proto::ExascriptTableData;
