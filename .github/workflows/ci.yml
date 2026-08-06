@@ -139,10 +139,15 @@ jobs:
 
       - name: Clippy
         # it requires a live Exasol container; it is checked in the integration job.
+        # --all-targets covers tests/benches, --all-features covers feature-gated
+        # code (e.g. the emit-arrow-test dlopen fixture); without both, neither is
+        # linted here. Matches the lint command documented in CLAUDE.md.
         run: |
           cargo clippy \
             --exclude it \
-            --workspace -- -D warnings
+            --workspace \
+            --all-targets \
+            --all-features -- -D warnings
 
   unit-tests:
     name: Unit Tests
