@@ -3,7 +3,10 @@
 //! to Arrow IPC bytes UDF-side and crossing the boundary only as `&[u8]`. The
 //! pre-IPC design SIGSEGV'd here; with IPC the `.so`-built batch must round-trip
 //! cleanly into the host's emit buffer.
-#![cfg(feature = "emit-arrow")]
+// `emit-arrow-test` (not `emit-arrow`) gates this: the fixture cdylib it dlopens
+// is an optional dependency behind that feature, which keeps it out of both the
+// production and the default test graph.
+#![cfg(feature = "emit-arrow-test")]
 
 use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet, LoadedUdf};
@@ -12,7 +15,7 @@ use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
 
 mod common;
-use common::fixture_so_path;
+use common::fixture_cdylib_path;
 
 fn col(name: &str, typ: ExaType) -> ColumnMeta {
     ColumnMeta {
@@ -27,7 +30,7 @@ fn col(name: &str, typ: ExaType) -> ColumnMeta {
 
 #[test]
 fn emit_arrow_batch_so_round_trips_via_ipc() {
-    let p = fixture_so_path("emit_arrow_batch");
+    let p = fixture_cdylib_path("emit_arrow_batch");
     let udf = LoadedUdf::open(&p, "EMIT_ARROW_BATCH").expect("load .so");
 
     let input_cols = vec![col("dummy", ExaType::Boolean)];

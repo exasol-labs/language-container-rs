@@ -22,10 +22,23 @@ tokio = { workspace = true, optional = true }
 # Fast digit formatter for the string-block emit fast-path
 # (`fast_decimal_to_string`); always compiled.
 itoa = { workspace = true }
+# Fixture cdylib for the `emit-arrow-test` gated test. It lives here rather than
+# in `[dev-dependencies]` only because Cargo rejects optional dev-dependencies,
+# and it must stay optional: as a plain dev-dependency it enables
+# `exasol-udf-sdk/emit-arrow` for every test run (dev-dependency features unify
+# into the crate under test), so a featureless `cargo test` would stop covering
+# the SDK's emit-arrow-off configuration. Nothing links it — it is cdylib-only;
+# the entry exists purely so Cargo builds and rebuilds the artifact.
+emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch", optional = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
 connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
+# Test-only. Deliberately NOT implied by `connect-back`, so the fixture enters
+# neither the production graph nor the default test graph. Implies `emit-arrow`,
+# so `--features emit-arrow-test` alone runs `tests/emit_arrow_dlopen.rs`;
+# `--all-features` (what CI's coverage job uses) also covers it.
+emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch"]
 
 [dev-dependencies]
 zmq = { workspace = true }
@@ -35,12 +48,6 @@ tracing-subscriber = { workspace = true }
 # is what makes Cargo build them before the tests and rebuild them when their
 # sources change; `tests/common/mod.rs` resolves the artifact path.
 annotated-fixture = { path = "../../test-udfs/annotated-fixture" }
-# Only `tests/emit_arrow_dlopen.rs` (gated by the `emit-arrow` feature) dlopens
-# this one. A dev-dependency cannot be optional, so it builds on every test run
-# regardless of features; that is deliberate — the alternative, an optional
-# *regular* dependency, puts a test fixture into the production graph, since
-# `exaudfclient` enables `connect-back`, which implies `emit-arrow`.
-emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch" }
 emit-k = { path = "../../test-udfs/emit-k" }
 returns-with-emit = { path = "../../test-udfs/returns-with-emit" }
 scalar-double = { path = "../../test-udfs/scalar-double" }

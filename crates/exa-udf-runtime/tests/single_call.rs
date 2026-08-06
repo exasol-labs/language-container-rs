@@ -14,7 +14,7 @@ use exa_udf_runtime::Runtime;
 use prost::Message;
 
 mod common;
-use common::fixture_so_path;
+use common::fixture_cdylib_path;
 
 fn response(mt: MessageType, conn: u64) -> ExascriptResponse {
     ExascriptResponse {
@@ -87,7 +87,7 @@ fn endpoint_for(tag: &str) -> String {
 
 #[test]
 fn dispatch_invokes_default_output_columns() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 7u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("doc");
@@ -140,7 +140,7 @@ fn dispatch_invokes_default_output_columns() {
 /// assert the exact echoed metadata rather than a non-zero gate.
 #[test]
 fn dispatch_surfaces_adapter_hook_error() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 11u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("vsa");
@@ -203,7 +203,7 @@ fn dispatch_surfaces_adapter_hook_error() {
 
 #[test]
 fn unimplemented_hook_replies_undefined_call() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 13u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("undef");
@@ -251,7 +251,7 @@ fn unimplemented_hook_replies_undefined_call() {
 /// loop (`send_run` -> `send_return` -> `send_done` -> `send_finished`).
 #[test]
 fn mt_return_ack_terminates_session() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 19u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("ret-ack");
@@ -309,7 +309,7 @@ fn mt_return_ack_terminates_session() {
 /// error rather than something the client tolerates.
 #[test]
 fn unexpected_event_in_single_call_mode_is_hard_error() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 31u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("unexpected");
@@ -361,7 +361,7 @@ fn single_call_mode_routes_to_dispatcher() {
     // A bare cleanup right after MT_RUN must end the single-call session
     // cleanly, proving meta.single_call_mode routed to the single-call loop
     // (the scalar loop would instead try to pull input with MT_NEXT).
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 17u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("route");
@@ -393,7 +393,7 @@ fn single_call_mode_routes_to_dispatcher() {
 fn close_ack_after_call_reply_ends_session() {
     // run_single_call's reply-ack match Close arm: the DB can ack the
     // container's MT_RETURN with MT_CLOSE instead of SingleCallAck/MT_CLEANUP.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 71u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("closeack");
@@ -458,7 +458,7 @@ fn unexpected_ack_after_call_reply_is_hard_error() {
     // run_single_call's reply-ack match wildcard arm: any event other than
     // SingleCallAck/Cleanup/Close as the ack to the container's MT_RETURN is a
     // hard error, like an unexpected event anywhere else in single-call mode.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 73u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("unexpectedack");
@@ -518,7 +518,7 @@ fn unexpected_ack_after_call_reply_is_hard_error() {
 fn close_directly_after_run_request_with_no_call_pending() {
     // run_single_call's top-level post-MT_RUN match Close arm: MT_CLOSE can
     // answer MT_RUN directly, before any MT_CALL is issued.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 79u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("closenocall");
@@ -566,7 +566,7 @@ fn done_continues_to_second_call_cycle() {
     // run_single_call's post-MT_DONE match Done arm: answering the container's
     // MT_DONE with MT_DONE (not MT_CLEANUP) continues the session into a
     // second MT_RUN/MT_CALL cycle rather than ending it.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 83u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("secondcycle");
@@ -631,7 +631,7 @@ fn done_continues_to_second_call_cycle() {
 fn close_after_done_request_in_single_call_mode() {
     // run_single_call's post-MT_DONE match Close arm: the DB can end the
     // session with MT_CLOSE as the answer to the container's own MT_DONE.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 89u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("closeafterdone");
@@ -693,7 +693,7 @@ fn unexpected_after_done_request_in_single_call_mode() {
     // run_single_call's post-MT_DONE match wildcard arm: any event other than
     // Done/Cleanup/Close as the answer to the container's MT_DONE is a hard
     // error.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 97u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("unexpectedafterdone");
@@ -753,7 +753,7 @@ fn import_spec_hook_error_surfaces_as_run_error() {
     // invoke_hook's ScFnGenerateSqlForImportSpec arm and the Some(Err(e)) arm
     // of the result-mapping match: the fixture's hook returns rc=1 with the
     // echoed spec, so the hook error propagates as a run error.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 101u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("importspec");
@@ -809,7 +809,7 @@ fn unrecognized_call_fn_id_replies_undefined_call() {
     // invoke_hook's ScFnNil sentinel arm: an MT_CALL naming an unrecognized
     // function id (Protocol::step falls back to ScFnNil) must be treated as an
     // unimplemented hook rather than panic or misroute.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 103u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("unrecognizedfn");
@@ -853,7 +853,7 @@ fn adapter_hook_success_returns_via_mt_return() {
     // invoke_vs_adapter_call's success arm (Some(Ok(s))): the runtime replies
     // MT_RETURN with the hook's result. Every other adapter test drives the
     // fixture's deliberate-failure default instead.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 107u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("adaptersuccess");
@@ -901,7 +901,7 @@ fn adapter_hook_success_returns_via_mt_return() {
 fn vs_adapter_hook_undefined_when_not_registered() {
     // invoke_vs_adapter_call's None arm: an unset virtual_schema_adapter_call
     // must reply MT_UNDEFINED_CALL rather than count as an error.
-    let so = fixture_so_path("scalar_double");
+    let so = fixture_cdylib_path("scalar_double");
     let conn_id = 109u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("vsadapterundef");
@@ -969,7 +969,7 @@ fn vs_adapter_hook_undefined_when_not_registered() {
 #[cfg(feature = "connect-back")]
 #[test]
 fn adapter_connection_probe_close_preserves_db_exception_message() {
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 114u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("connectionprobeclose");
@@ -1027,7 +1027,7 @@ fn adapter_connection_probe_combines_hook_and_recorded_errors() {
     // invoke_vs_adapter_call's Some(detail) sub-arm: when the hook fails *and*
     // it called ctx.connection(...), the connect-back error recorded on the
     // context is folded into the surfaced message alongside the hook's own.
-    let so = fixture_so_path("single_call_fixture");
+    let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 113u64;
     let source = format!("%udf_object {}", so.display());
     let endpoint = endpoint_for("connectionprobe");

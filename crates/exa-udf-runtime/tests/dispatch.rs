@@ -15,7 +15,7 @@ use exa_udf_runtime::Runtime;
 use prost::Message;
 
 mod common;
-use common::fixture_so_path;
+use common::fixture_cdylib_path;
 
 fn int64_col(name: &str) -> ColumnDefinition {
     ColumnDefinition {
@@ -47,7 +47,7 @@ fn send_resp(sock: &zmq::Socket, resp: &ExascriptResponse) {
 
 #[test]
 fn scalar_dispatch_full_protocol() {
-    let so = fixture_so_path("scalar_double");
+    let so = fixture_cdylib_path("scalar_double");
 
     let endpoint = format!("ipc:///tmp/exa-mockdb-{}.ipc", std::process::id());
     let ctx = zmq::Context::new();
@@ -165,7 +165,7 @@ fn start_mock_session(
     zmq::Socket,
     std::thread::JoinHandle<Result<(), exa_udf_runtime::RuntimeError>>,
 ) {
-    let so = fixture_so_path(lib);
+    let so = fixture_cdylib_path(lib);
 
     let endpoint = format!("ipc:///tmp/exa-mockdb-{tag}-{}.ipc", std::process::id());
     let ctx = zmq::Context::new();
@@ -341,7 +341,7 @@ fn scalar_dispatch_invokes_run_per_row() {
     // group-scoped buffer and one tail MT_EMIT carries all rows.
     let outcome = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[Some(10), Some(11)]), int64_batch(&[Some(12)])],
     );
@@ -363,7 +363,7 @@ fn set_dispatch_next_spans_batches() {
     // aggregate covers the whole group. set-sum is SET RETURNS.
     let outcome = drive_session(
         "SET_SUM",
-        &fixture_so_path("set_sum"),
+        &fixture_cdylib_path("set_sum"),
         int64_meta(IterType::PbMultiple, IterType::PbExactlyOnce),
         vec![
             int64_batch(&[Some(1), Some(2), Some(3)]),
@@ -394,7 +394,7 @@ fn empty_group_invokes_run_zero_times_for_scalar_and_set() {
     // no-op here; emitting anything (e.g. by calling run() once) would be wrong.
     let scalar = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![],
     );
@@ -413,7 +413,7 @@ fn empty_group_invokes_run_zero_times_for_scalar_and_set() {
     // was invoked zero times.
     let set = drive_session(
         "SET_SUM",
-        &fixture_so_path("set_sum"),
+        &fixture_cdylib_path("set_sum"),
         int64_meta(IterType::PbMultiple, IterType::PbExactlyOnce),
         vec![],
     );
@@ -435,7 +435,7 @@ fn scalar_next_returns_error() {
     // prefixed F-UDF-CL-RUST error rather than running to completion.
     let outcome = drive_session(
         "SCALAR_NEXT_ILLEGAL",
-        &fixture_so_path("scalar_next_illegal"),
+        &fixture_cdylib_path("scalar_next_illegal"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
         vec![int64_batch(&[Some(1)])],
     );
@@ -463,7 +463,7 @@ fn returns_set_return_and_emit_ban() {
     // returns Ok(Some(2n)) for a value and Ok(None) for a NULL input.
     let outcome = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[Some(21), None])],
     );
@@ -490,7 +490,7 @@ fn returns_set_return_and_emit_ban() {
     // and the session closes with a prefixed error.
     let banned = drive_session(
         "RETURNS_WITH_EMIT",
-        &fixture_so_path("returns_with_emit"),
+        &fixture_cdylib_path("returns_with_emit"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[Some(1)])],
     );
@@ -517,7 +517,7 @@ fn output_shape_marker_mismatch_errors() {
     // mid-stream misdispatch — and it closes before any MT_RUN.
     let outcome = drive_session(
         "EMIT_K",
-        &fixture_so_path("emit_k"),
+        &fixture_cdylib_path("emit_k"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[Some(1)])],
     );
@@ -549,7 +549,7 @@ fn emit_buffer_spans_group_and_tail_flushes() {
     // rows never cross the 4,000,000-byte threshold mid-group).
     let outcome = drive_session(
         "EMIT_K",
-        &fixture_so_path("emit_k"),
+        &fixture_cdylib_path("emit_k"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
         vec![int64_batch(&[Some(2), Some(3)])],
     );
@@ -575,7 +575,7 @@ fn emit_buffer_spans_group_and_tail_flushes() {
 
 #[test]
 fn annotated_schema_mismatch_closes_session() {
-    let so = fixture_so_path("annotated_fixture");
+    let so = fixture_cdylib_path("annotated_fixture");
 
     let endpoint = format!("ipc:///tmp/exa-mockdb-schema-{}.ipc", std::process::id());
     let ctx = zmq::Context::new();
@@ -643,7 +643,7 @@ fn run_error_out_pointer_text_reaches_close() {
     // {text}" formatting reaching MT_CLOSE.
     let outcome = drive_session(
         "SCALAR_NEXT_ILLEGAL",
-        &fixture_so_path("scalar_next_illegal"),
+        &fixture_cdylib_path("scalar_next_illegal"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
         vec![int64_batch(&[Some(1)])],
     );
@@ -670,7 +670,7 @@ fn udf_error_closes_session_with_prefixed_message() {
     // touching the error out-pointer, so only "error code {rc}" is formatted.
     let outcome = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[Some(i64::MAX)])],
     );
@@ -1066,7 +1066,7 @@ fn emit_buffer_flushes_mid_group_before_tail_flush() {
 
     let outcome = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&vals)],
     );
@@ -1101,7 +1101,7 @@ fn first_nonempty_input_skips_leading_empty_batch() {
     // run() on it.
     let outcome = drive_session(
         "SCALAR_DOUBLE",
-        &fixture_so_path("scalar_double"),
+        &fixture_cdylib_path("scalar_double"),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![int64_batch(&[]), int64_batch(&[Some(7)])],
     );
