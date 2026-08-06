@@ -55,7 +55,6 @@ jobs:
       - name: Build workspace (debug, warm cache)
         run: |
           cargo build \
-            --exclude it \
             --workspace
 
       - name: Build UDF .so artifacts (release)
@@ -137,12 +136,8 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        # it requires a live Exasol container; it is checked in the integration job.
-        # --all-targets lints test/bench targets, --all-features lints
-        # feature-gated code (e.g. the emit-arrow-test dlopen test).
         run: |
           cargo clippy \
-            --exclude it \
             --workspace \
             --all-targets \
             --all-features -- -D warnings
@@ -174,6 +169,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Run unit tests with coverage
+        # it excluded: its db_roundtrip test needs a live Exasol container.
         run: |
           cargo llvm-cov \
             --exclude it \
