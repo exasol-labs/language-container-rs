@@ -22,14 +22,9 @@ tokio = { workspace = true, optional = true }
 # Fast digit formatter for the string-block emit fast-path
 # (`fast_decimal_to_string`); always compiled.
 itoa = { workspace = true }
-# Fixture cdylib for the `emit-arrow` gated test. Dev-dependencies cannot be
-# optional, so the feature-gated fixture has to live here; nothing in the
-# library links it (it is cdylib-only), it exists purely so Cargo builds and
-# rebuilds the artifact `tests/emit_arrow_dlopen.rs` dlopens.
-emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch", optional = true }
 
 [features]
-emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow", "dep:emit-arrow-batch"]
+emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
 connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 
 [dev-dependencies]
@@ -40,6 +35,12 @@ tracing-subscriber = { workspace = true }
 # is what makes Cargo build them before the tests and rebuild them when their
 # sources change; `tests/common/mod.rs` resolves the artifact path.
 annotated-fixture = { path = "../../test-udfs/annotated-fixture" }
+# Only `tests/emit_arrow_dlopen.rs` (gated by the `emit-arrow` feature) dlopens
+# this one. A dev-dependency cannot be optional, so it builds on every test run
+# regardless of features; that is deliberate — the alternative, an optional
+# *regular* dependency, puts a test fixture into the production graph, since
+# `exaudfclient` enables `connect-back`, which implies `emit-arrow`.
+emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch" }
 emit-k = { path = "../../test-udfs/emit-k" }
 returns-with-emit = { path = "../../test-udfs/returns-with-emit" }
 scalar-double = { path = "../../test-udfs/scalar-double" }
