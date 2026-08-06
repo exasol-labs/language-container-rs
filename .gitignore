@@ -3,6 +3,9 @@
 # Serena MCP cache
 /.serena/
 
+# Claude local settings
+.claude/
+
 # Built IT test-runner binary (CI artifact, produced by `cargo test --no-run`)
 /it-runner
 
