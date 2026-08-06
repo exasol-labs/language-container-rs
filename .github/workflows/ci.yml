@@ -173,13 +173,14 @@ jobs:
       # cargo llvm-cov redirects target/ to target/llvm-cov-target, but the
       # fixture lookup expects target/debug/lib*.so. Drop once #54 lands.
       - name: Build test fixture cdylibs
-        run: cargo build -p scalar-double -p annotated-fixture -p single-call-fixture
+        run: cargo build --workspace --exclude it
 
       - name: Run unit tests with coverage
         run: |
           cargo llvm-cov \
             --exclude it \
             --workspace \
+            --all-features \
             --lcov --output-path lcov-unit.info
 
       - name: Upload unit coverage

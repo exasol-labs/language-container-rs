@@ -1,3 +1,9 @@
+//! Doubles a BIGINT input.
+//!
+//! `i64::MAX` is a test-only sentinel that panics, covering the runtime's
+//! rc!=0-without-out-pointer path. It cannot fire against a live DB, which
+//! delivers BIGINT as PB_NUMERIC rather than Int64.
+
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
@@ -6,6 +12,9 @@ use exasol_udf_sdk::value::{Decimal, Value};
 #[exasol_udf]
 pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
     let doubled = match ctx.get(0)? {
+        Value::Int64(i64::MAX) => {
+            panic!("scalar-double fixture: deliberate panic for the no-out-pointer dispatch path")
+        }
         Value::Int64(n) => Value::Int64(n * 2),
         // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
         Value::Numeric(d) if d.scale == 0 => {
