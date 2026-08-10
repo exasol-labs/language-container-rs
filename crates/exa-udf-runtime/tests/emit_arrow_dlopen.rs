@@ -3,13 +3,18 @@
 //! to Arrow IPC bytes UDF-side and crossing the boundary only as `&[u8]`. The
 //! pre-IPC design SIGSEGV'd here; with IPC the `.so`-built batch must round-trip
 //! cleanly into the host's emit buffer.
-#![cfg(feature = "emit-arrow")]
+// `emit-arrow-test`, not `emit-arrow`: the fixture cdylib is an optional
+// dependency behind that feature. See `Cargo.toml`.
+#![cfg(feature = "emit-arrow-test")]
 
 use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet, LoadedUdf};
 use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
+
+mod common;
+use common::fixture_cdylib_path;
 
 fn col(name: &str, typ: ExaType) -> ColumnMeta {
     ColumnMeta {
@@ -24,13 +29,7 @@ fn col(name: &str, typ: ExaType) -> ColumnMeta {
 
 #[test]
 fn emit_arrow_batch_so_round_trips_via_ipc() {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("../../target/debug/libemit_arrow_batch.so");
-    assert!(
-        p.exists(),
-        "build first: cargo build -p emit-arrow-batch ({p:?})"
-    );
-
+    let p = fixture_cdylib_path("emit_arrow_batch");
     let udf = LoadedUdf::open(&p, "EMIT_ARROW_BATCH").expect("load .so");
 
     let input_cols = vec![col("dummy", ExaType::Boolean)];

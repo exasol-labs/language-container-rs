@@ -9,6 +9,11 @@ on:
     paths-ignore: ["specs/**", "*.md", "**/*.md"]
   workflow_dispatch:
 
+# Never cancel a main-push run: `release` needs that exact run's jobs to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   # RAM guard for the standard 4-vCPU / 16 GB runner: cap concurrent codegen
@@ -50,13 +55,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # Debug compile warms target/ for lint + unit-tests. This also builds the
-      # dlopen fixtures (scalar-double / annotated-fixture / single-call-fixture)
-      # that exa-udf-runtime's dispatch/single_call tests load at runtime.
+      # Warms target/ for the lint job; unit-tests builds into
+      # target/llvm-cov-target and only shares the registry cache.
       - name: Build workspace (debug, warm cache)
         run: |
           cargo build \
-            --exclude it \
             --workspace
 
       - name: Build UDF .so artifacts (release)
@@ -138,11 +141,11 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        # it requires a live Exasol container; it is checked in the integration job.
         run: |
           cargo clippy \
-            --exclude it \
-            --workspace -- -D warnings
+            --workspace \
+            --all-targets \
+            --all-features -- -D warnings
 
   unit-tests:
     name: Unit Tests
@@ -170,16 +173,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # cargo llvm-cov redirects target/ to target/llvm-cov-target, but the
-      # fixture lookup expects target/debug/lib*.so. Drop once #54 lands.
-      - name: Build test fixture cdylibs
-        run: cargo build -p scalar-double -p annotated-fixture -p single-call-fixture
-
       - name: Run unit tests with coverage
+        # it excluded: its db_roundtrip test needs a live Exasol container.
         run: |
           cargo llvm-cov \
             --exclude it \
             --workspace \
+            --all-features \
             --lcov --output-path lcov-unit.info
 
       - name: Upload unit coverage
@@ -356,26 +356,10 @@ jobs:
         with:
           name: lc-tarball
 
-      # Cache the (multi-GB) Exasol DB image per matrix version so each leg
-      # loads it from a tarball instead of re-pulling from Docker Hub every run.
-      - name: Cache Exasol DB image
-        id: exa-cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/exasol-db-${{ matrix.exasol_version }}.tar
-          key: exasol-db-${{ matrix.exasol_version }}
-
-      - name: Load or pull Exasol image
-        run: |
-          TAR=/tmp/exasol-db-${{ matrix.exasol_version }}.tar
-          if [ -f "$TAR" ]; then
-            echo "Loading Exasol image from cache..."
-            docker load -i "$TAR"
-          else
-            echo "Pulling Exasol image from registry..."
-            docker pull exasol/docker-db:${{ matrix.exasol_version }}
-            docker save exasol/docker-db:${{ matrix.exasol_version }} -o "$TAR"
-          fi
+      # Do NOT cache this image as a tarball: measured, `docker load` (1m51s+) is
+      # slower than this pull (1m35s) and the tarballs evict the cargo caches.
+      - name: Pull Exasol image
+        run: docker pull exasol/docker-db:${{ matrix.exasol_version }}
 
       # Cache the exapump release binary per pinned version so each matrix leg
       # installs it from cache instead of re-downloading from GitHub releases

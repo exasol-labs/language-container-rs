@@ -1,8 +1,10 @@
 use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
-use crate::rowset::{EmitBuffer, HostContextBridge, InputRowSet};
-use exa_zmq_protocol::{HostAction, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
+use crate::rowset::{BatchFetcher, EmitBuffer, EmitFlusher, HostContextBridge, InputRowSet};
+use crate::wire::{close_error, request};
+use exa_zmq_protocol::{ColumnMeta, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::error::UdfError;
 use std::cell::{Cell, RefCell};
 
 /// Drive the run phase: process each input group and flush the UDF's output
@@ -67,12 +69,10 @@ enum GroupExit {
 /// `MT_DONE`; `Ok(Some(result))` if the DB closed or cleaned up mid-input so the
 /// caller short-circuits `run_udf`.
 ///
-/// `transport` and `proto` are shared (via a single `RefCell`) among the batch
-/// fetcher, the mid-group emit flusher, and — when the `connect-back` feature is
-/// enabled — the credential fetcher. Each closure borrows the cell mutably only
-/// for one send/recv exchange; the borrows never overlap because UDF execution
-/// is single-threaded and the dispatch loop is blocked here, so exactly one cell
-/// over the shared `&mut Protocol` is sound.
+/// `transport` and `proto` are shared via a single `RefCell` among the batch
+/// fetcher, the emit flusher, the tail flush and the credential fetcher. The
+/// borrows never overlap: UDF execution is single-threaded and each closure
+/// holds the cell for one send/recv exchange only.
 fn run_group(
     transport: &ZmqTransport,
     proto: &mut Protocol,
@@ -84,129 +84,28 @@ fn run_group(
     // MT_CLEANUP / MT_CLOSE); read after the run driving completes. `Option` so
     // `Cell::take` works without a `Copy` bound.
     let exit: Cell<Option<GroupExit>> = Cell::new(None);
-    let mut run_err: Option<RuntimeError> = None;
 
     let proto_cell = RefCell::new(proto);
     let cell_ref = &proto_cell;
 
-    // Mid-group flusher: send one pre-built proto table as MT_EMIT. A zero-row
-    // table is a no-op (no zero-row MT_EMIT on the wire).
-    let flusher: crate::rowset::EmitFlusher = Box::new(
-        move |table: exa_proto::ExascriptTableData| -> Result<(), exasol_udf_sdk::error::UdfError> {
-            if table.rows == 0 {
-                return Ok(());
-            }
-            let mut proto = cell_ref.borrow_mut();
-            let req = proto.emit_request(table);
-            request(transport, &mut proto, req)
-                .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-            Ok(())
-        },
-    );
+    let mut fetch = batch_fetcher(transport, cell_ref, &exit);
+    let mut run_err: Option<RuntimeError> = None;
 
-    #[cfg(feature = "connect-back")]
-    let conn_requester: crate::rowset::ConnRequester = Box::new(move |conn_name: &str| {
-        let mut proto = cell_ref.borrow_mut();
-        let req = proto.import_connection_request(conn_name);
-        transport
-            .send(&req)
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        let resp = transport
-            .recv()
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        let (event, _) = proto
-            .step(resp)
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        match event {
-            exa_zmq_protocol::HostEvent::ConnInfo(ci) => Ok(ci),
-            _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                "MT_IMPORT reply was not ConnInfo".into(),
-            )),
-        }
-    });
-
-    // Batch fetcher: pull the next MT_NEXT batch. `Ok(Some)` is a batch,
-    // `Ok(None)` the group boundary (MT_DONE); a mid-input MT_CLEANUP / MT_CLOSE
-    // records the terminal reason in `exit` and reports the group as ended.
-    let exit_ref = &exit;
-    let fetch = move || -> Result<Option<exa_proto::ExascriptTableData>, exasol_udf_sdk::error::UdfError> {
-        loop {
-            let mut proto = cell_ref.borrow_mut();
-            let req = proto.next_request();
-            let event = request(transport, &mut proto, req)
-                .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-            match event {
-                HostEvent::NextData(table) => return Ok(Some(table)),
-                HostEvent::Done => return Ok(None),
-                HostEvent::TryAgain | HostEvent::Reset => continue,
-                HostEvent::Cleanup => {
-                    exit_ref.set(Some(GroupExit::Session));
-                    return Ok(None);
-                }
-                HostEvent::Close(msg) => {
-                    exit_ref.set(Some(GroupExit::Closed(msg)));
-                    return Ok(None);
-                }
-                _ => continue,
-            }
-        }
-    };
-
-    // Confine the bridge and its borrows to this block so the group-scoped
-    // `emit_buf` is free for the tail flush once the UDF driving is done.
-    {
-        // Load the first non-empty batch. An immediately-empty group (the DB
-        // answered MT_DONE, or only zero-row batches, or a terminal event)
-        // invokes `run()` zero times — a clean no-op, matching empty input.
-        let mut first_input: Option<InputRowSet> = None;
-        while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
-            let rs = InputRowSet::from_proto(&table, &meta.input_columns);
-            if !rs.is_empty() {
-                first_input = Some(rs);
-                break;
-            }
-        }
-
-        if let Some(mut input) = first_input {
-            let mut bridge = HostContextBridge::new(
-                &mut input,
-                &mut emit_buf,
-                &meta.input_columns,
-                &meta.output_columns,
-                flusher,
-                crate::rowset::HandshakeMeta::from(meta),
-                #[cfg(feature = "connect-back")]
-                conn_requester,
-            );
-            bridge.configure_group_input(meta.input_iter(), meta.output_iter(), Box::new(fetch));
-
-            match meta.input_iter() {
-                // SCALAR: framework-driven per-row loop. Invoke run() for the
-                // current row, then advance the cursor (fetching the next batch
-                // on drain) until the group boundary.
-                IterType::ExactlyOnce => loop {
-                    if let Err(e) = invoke_run(&mut bridge, udf) {
-                        run_err = Some(e);
-                        break;
-                    }
-                    match bridge.advance_row() {
-                        Ok(true) => continue,
-                        Ok(false) => break,
-                        Err(e) => {
-                            run_err = Some(RuntimeError::Udf(e.to_string()));
-                            break;
-                        }
-                    }
-                },
-                // SET: UDF-driven per-group. Invoke run() once; ctx.next() spans
-                // the group's batches and returns false at the boundary.
-                IterType::Multiple => {
-                    if let Err(e) = invoke_run(&mut bridge, udf) {
-                        run_err = Some(e);
-                    }
-                }
-            }
-        }
+    // The bridge's borrow of `emit_buf` ends with this block, freeing it for
+    // the tail flush.
+    if let Some(mut input) = first_nonempty_input(&mut fetch, &meta.input_columns)? {
+        let mut bridge = HostContextBridge::new(
+            &mut input,
+            &mut emit_buf,
+            &meta.input_columns,
+            &meta.output_columns,
+            emit_flusher(transport, cell_ref),
+            crate::rowset::HandshakeMeta::from(meta),
+            #[cfg(feature = "connect-back")]
+            crate::wire::conn_requester(transport, cell_ref),
+        );
+        bridge.configure_group_input(meta.input_iter(), meta.output_iter(), fetch);
+        run_err = drive_group_rows(&mut bridge, udf, meta.input_iter());
     }
 
     if let Some(e) = run_err {
@@ -218,42 +117,127 @@ fn run_group(
         None => {}
     }
 
-    // Tail flush: always flush the group's residual output before its MT_DONE,
-    // even if the byte threshold was never reached. Threshold crossings already
-    // flushed mid-group inside `emit`, so this is only the trailing rows.
-    if !emit_buf.is_empty() {
-        emit_buf.record_flush_telemetry();
-        let table = emit_buf.to_proto(&meta.output_columns);
-        let mut proto = cell_ref.borrow_mut();
-        let req = proto.emit_request(table);
-        request(transport, &mut proto, req)?;
-        emit_buf.clear();
-    }
-
+    tail_flush(&mut emit_buf, meta, transport, cell_ref)?;
     Ok(None)
 }
 
-fn close_error(msg: Option<String>) -> Result<(), RuntimeError> {
-    Err(RuntimeError::Udf(
-        msg.unwrap_or_else(|| "connection closed by database".into()),
-    ))
+/// Send one pre-built proto table as `MT_EMIT`. A zero-row table is a no-op, so
+/// no zero-row `MT_EMIT` ever reaches the wire.
+fn emit_flusher<'a>(
+    transport: &'a ZmqTransport,
+    proto_cell: &'a RefCell<&'a mut Protocol>,
+) -> EmitFlusher<'a> {
+    Box::new(
+        move |table: exa_proto::ExascriptTableData| -> Result<(), UdfError> {
+            if table.rows == 0 {
+                return Ok(());
+            }
+            let mut proto = proto_cell.borrow_mut();
+            let req = proto.emit_request(table);
+            request(transport, &mut proto, req)
+                .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+            Ok(())
+        },
+    )
 }
 
-/// Send one request and return the classified response event, replying to a
-/// ping transparently and retrying the same request once if the DB pings mid
-/// exchange (REQ stays in lockstep: a ping reply is itself a request/reply).
-fn request(
-    transport: &ZmqTransport,
-    proto: &mut Protocol,
-    req: exa_proto::ExascriptRequest,
-) -> Result<HostEvent, RuntimeError> {
-    transport.send(&req)?;
-    let resp = transport.recv()?;
-    let (event, action) = proto.step(resp)?;
-    if let Some(HostAction::PingReply(s)) = action {
-        return request(transport, proto, proto.ping_reply(&s));
+/// Pull the next `MT_NEXT` batch: `Ok(Some)` a batch, `Ok(None)` the group
+/// boundary (`MT_DONE`).
+///
+/// A mid-input `MT_CLEANUP` / `MT_CLOSE` records its reason in `exit` and
+/// reports the group as ended — the fetcher runs inside `run()` via
+/// `ctx.next()` and cannot unwind the session itself. `run_group` reads `exit`
+/// once the UDF returns.
+fn batch_fetcher<'a>(
+    transport: &'a ZmqTransport,
+    proto_cell: &'a RefCell<&'a mut Protocol>,
+    exit: &'a Cell<Option<GroupExit>>,
+) -> BatchFetcher<'a> {
+    Box::new(
+        move || -> Result<Option<exa_proto::ExascriptTableData>, UdfError> {
+            loop {
+                let mut proto = proto_cell.borrow_mut();
+                let req = proto.next_request();
+                let event = request(transport, &mut proto, req)
+                    .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+                match event {
+                    HostEvent::NextData(table) => return Ok(Some(table)),
+                    HostEvent::Done => return Ok(None),
+                    HostEvent::TryAgain | HostEvent::Reset => continue,
+                    HostEvent::Cleanup => {
+                        exit.set(Some(GroupExit::Session));
+                        return Ok(None);
+                    }
+                    HostEvent::Close(msg) => {
+                        exit.set(Some(GroupExit::Closed(msg)));
+                        return Ok(None);
+                    }
+                    _ => continue,
+                }
+            }
+        },
+    )
+}
+
+/// Advance to the first row-bearing input batch, skipping zero-row ones.
+///
+/// `None` means the group delivered no rows, so `run()` is invoked zero times.
+fn first_nonempty_input(
+    fetch: &mut BatchFetcher,
+    input_cols: &[ColumnMeta],
+) -> Result<Option<InputRowSet>, RuntimeError> {
+    while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
+        let rows = InputRowSet::from_proto(&table, input_cols);
+        if !rows.is_empty() {
+            return Ok(Some(rows));
+        }
     }
-    Ok(event)
+    Ok(None)
+}
+
+/// Drive the UDF over one group, returning the error that ended it early.
+///
+/// `ExactlyOnce` (SCALAR) is framework-driven: `run()` per row, advancing the
+/// cursor until the group boundary. `Multiple` (SET) is UDF-driven: `run()`
+/// once, with `ctx.next()` spanning the group's batches.
+fn drive_group_rows(
+    bridge: &mut HostContextBridge,
+    udf: &LoadedUdf,
+    input_iter: IterType,
+) -> Option<RuntimeError> {
+    match input_iter {
+        IterType::ExactlyOnce => loop {
+            if let Err(e) = invoke_run(bridge, udf) {
+                return Some(e);
+            }
+            match bridge.advance_row() {
+                Ok(true) => continue,
+                Ok(false) => return None,
+                Err(e) => return Some(RuntimeError::Udf(e.to_string())),
+            }
+        },
+        IterType::Multiple => invoke_run(bridge, udf).err(),
+    }
+}
+
+/// Flush the group's residual output as one `MT_EMIT` before its `MT_DONE`,
+/// even if the byte threshold was never reached.
+fn tail_flush(
+    emit_buf: &mut EmitBuffer,
+    meta: &UdfMeta,
+    transport: &ZmqTransport,
+    proto_cell: &RefCell<&mut Protocol>,
+) -> Result<(), RuntimeError> {
+    if emit_buf.is_empty() {
+        return Ok(());
+    }
+    emit_buf.record_flush_telemetry();
+    let table = emit_buf.to_proto(&meta.output_columns);
+    let mut proto = proto_cell.borrow_mut();
+    let req = proto.emit_request(table);
+    request(transport, &mut proto, req)?;
+    emit_buf.clear();
+    Ok(())
 }
 
 /// Invoke the UDF's `run` shim once over the current context view.

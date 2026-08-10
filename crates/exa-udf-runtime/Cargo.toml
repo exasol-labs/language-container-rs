@@ -22,12 +22,31 @@ tokio = { workspace = true, optional = true }
 # Fast digit formatter for the string-block emit fast-path
 # (`fast_decimal_to_string`); always compiled.
 itoa = { workspace = true }
+# Test fixture, here rather than in `[dev-dependencies]` only because Cargo
+# rejects optional dev-dependencies — and it must stay optional: a plain
+# dev-dependency would enable `exasol-udf-sdk/emit-arrow` for every test run
+# (dev-dependency features unify into the crate under test), so a featureless
+# `cargo test` would no longer cover the emit-arrow-off configuration.
+emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch", optional = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
 connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
+# Test-only, and deliberately NOT implied by `connect-back`: the fixture enters
+# neither the production graph nor the default test graph. Runs
+# `tests/emit_arrow_dlopen.rs`, which is otherwise compiled out.
+emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch"]
 
 [dev-dependencies]
 zmq = { workspace = true }
 prost = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Fixture cdylibs the tests dlopen; the dependency edge is what makes Cargo
+# build and rebuild them. Path resolution: `tests/common/mod.rs`.
+annotated-fixture = { path = "../../test-udfs/annotated-fixture" }
+emit-k = { path = "../../test-udfs/emit-k" }
+returns-with-emit = { path = "../../test-udfs/returns-with-emit" }
+scalar-double = { path = "../../test-udfs/scalar-double" }
+scalar-next-illegal = { path = "../../test-udfs/scalar-next-illegal" }
+set-sum = { path = "../../test-udfs/set-sum" }
+single-call-fixture = { path = "../../test-udfs/single-call-fixture" }

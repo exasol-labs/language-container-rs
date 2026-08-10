@@ -583,6 +583,83 @@ fn oversized_single_row_flushes_alone() {
 }
 
 #[test]
+fn emit_buffer_limit_is_exactly_4_000_000() {
+    // The other tests use EMIT_BUFFER_LIMIT_BYTES symbolically, so a silent
+    // change to 4 MiB would pass them. The wire limit is 4,000,000 bytes.
+    assert_eq!(EMIT_BUFFER_LIMIT_BYTES, 4_000_000);
+}
+
+#[test]
+fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
+    // Pins the row path (HostContextBridge::emit) mid-run flush behavior; the
+    // batch path is pinned by bridge_emit_batch_buffers_and_flushes.
+    let meta = vec![col("v", ExaType::String { size: None })];
+    let empty_table = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+    let mut emit = EmitBuffer::new();
+    let flush_count = std::cell::Cell::new(0usize);
+    let flush_count_ref = &flush_count;
+    let row_value = || Value::String("x".repeat(1000));
+    let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000);
+
+    {
+        let mut bridge = HostContextBridge::new(
+            &mut rs,
+            &mut emit,
+            &meta,
+            &meta,
+            Box::new(move |t: exa_proto::ExascriptTableData| {
+                if t.rows > 0 {
+                    flush_count_ref.set(flush_count_ref.get() + 1);
+                }
+                Ok(())
+            }),
+            HandshakeMeta::default(),
+            #[cfg(feature = "connect-back")]
+            Box::new(|_name| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
+        );
+
+        for _ in 0..(rows_to_limit - 1) {
+            bridge.emit(&[row_value()]).unwrap();
+        }
+        assert_eq!(
+            flush_count.get(),
+            0,
+            "no flush expected while under the limit"
+        );
+
+        bridge.emit(&[row_value()]).unwrap();
+        assert_eq!(
+            flush_count.get(),
+            1,
+            "crossing the limit must flush exactly once"
+        );
+
+        // Rows pushed after the mid-run flush stay buffered for the eventual
+        // tail flush; they must not trigger a second flush on their own.
+        bridge.emit(&[row_value()]).unwrap();
+        bridge.emit(&[row_value()]).unwrap();
+        assert_eq!(
+            flush_count.get(),
+            1,
+            "residual rows below the limit must not trigger a second flush"
+        );
+    }
+    assert_eq!(
+        emit.len(),
+        2,
+        "residual rows must remain buffered for the tail flush"
+    );
+}
+
+#[test]
 fn timestamp_emit_nanosecond_roundtrip() {
     // GIVEN a Timestamp value with sub-microsecond (nanosecond) precision.
     // 123456789 ns = 123456 µs + 789 ns; %.6f would truncate to 123456 µs.
@@ -624,6 +701,51 @@ fn empty_batch_next_is_false() {
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     assert!(!bridge.next().unwrap());
+}
+
+/// `refill`'s loop skips zero-row `MT_NEXT` batches and keeps fetching until a
+/// non-empty one arrives, or the group ends.
+#[test]
+fn refill_skips_empty_batches_until_a_nonempty_one_arrives() {
+    let meta = vec![col("a", ExaType::Int64)];
+    let empty_table = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+    let mut emit = EmitBuffer::new();
+    let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+
+    let call_count = std::cell::Cell::new(0usize);
+    bridge.configure_group_input(
+        IterType::Multiple,
+        IterType::Multiple,
+        Box::new(move || {
+            let n = call_count.get();
+            call_count.set(n + 1);
+            match n {
+                // First MT_NEXT batch: zero rows, must be skipped.
+                0 => Ok(Some(ExascriptTableData {
+                    rows: 0,
+                    ..Default::default()
+                })),
+                // Second MT_NEXT batch: one row, must be the landing point.
+                1 => Ok(Some(ExascriptTableData {
+                    rows: 1,
+                    data_int64: vec![9],
+                    data_nulls: vec![false],
+                    ..Default::default()
+                })),
+                _ => Ok(None),
+            }
+        }),
+    );
+
+    assert!(
+        bridge.next().unwrap(),
+        "must skip the empty batch and land on the non-empty one"
+    );
+    assert_eq!(bridge.get(0).unwrap(), &Value::Int64(9));
 }
 
 #[test]
@@ -912,6 +1034,362 @@ fn emit_flush_path_instrumented() {
     );
 }
 
+/// `push`'s periodic checkpoint fires every `TELEMETRY_ROW_CHECKPOINT` rows,
+/// independently of the byte-threshold flush.
+#[test]
+fn emit_push_periodic_checkpoint_at_10_000_rows() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+    use tracing_subscriber::reload;
+
+    let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let initial = tracing_subscriber::EnvFilter::new("info");
+    let (filter_layer, filter_handle) = reload::Layer::new(initial);
+    let sub = tracing_subscriber::registry().with(filter_layer).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(LockedWriter(Arc::clone(&buf)))
+            .with_ansi(false),
+    );
+
+    tracing::subscriber::with_default(sub, || {
+        let _ = filter_handle.modify(|f| *f = tracing_subscriber::EnvFilter::new("debug"));
+
+        let mut emit = EmitBuffer::new();
+        for _ in 0..EmitBuffer::TELEMETRY_ROW_CHECKPOINT {
+            emit.push(vec![Value::Bool(true)]);
+        }
+        assert!(
+            !emit.should_flush(),
+            "10,000 cheap rows must stay well under the byte threshold"
+        );
+    });
+
+    let captured = buf.lock().unwrap();
+    let output = String::from_utf8_lossy(&captured);
+    assert!(
+        output.contains("MT_EMIT flush"),
+        "the 10,000-row checkpoint must call record_flush_telemetry, got: {output:?}"
+    );
+}
+
+/// `InputRowSet::from_proto`'s `ExaType::Int32` arm advances the per-type
+/// cursor only for non-null cells — a NULL is interleaved so a
+/// cursor-advance-on-NULL regression would misalign row 1.
+#[test]
+fn input_rowset_decodes_int32_column() {
+    let meta = vec![col("a", ExaType::Int32)];
+    let table = ExascriptTableData {
+        rows: 3,
+        data_int32: vec![7, -8],
+        data_nulls: vec![false, true, false],
+        ..Default::default()
+    };
+    let rs = InputRowSet::from_proto(&table, &meta);
+    assert_eq!(rs.row(0).unwrap(), &[Value::Int32(7)]);
+    assert_eq!(rs.row(1).unwrap(), &[Value::Null]);
+    assert_eq!(rs.row(2).unwrap(), &[Value::Int32(-8)]);
+}
+
+/// An `ExaType::Unsupported` column has no backing type block, so
+/// `from_proto` maps every cell to `Value::Null` regardless of the NULL bitmap.
+#[test]
+fn input_rowset_unsupported_column_decodes_to_null() {
+    let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
+    let table = ExascriptTableData {
+        rows: 1,
+        data_int64: vec![5],
+        // Neither cell is marked NULL; the Unsupported column still yields
+        // Value::Null because it has no type-block slot to read.
+        data_nulls: vec![false, false],
+        ..Default::default()
+    };
+    let rs = InputRowSet::from_proto(&table, &meta);
+    assert_eq!(rs.row(0).unwrap(), &[Value::Int64(5), Value::Null]);
+}
+
+/// An `ExaType::Unsupported` column contributes no slot to either pass of
+/// `to_proto` — it is skipped rather than landing in some other block.
+#[test]
+fn to_proto_skips_unsupported_columns_in_both_tally_and_packing() {
+    let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
+    let mut emit = EmitBuffer::new();
+    emit.push(vec![Value::Int64(7), Value::String("ignored".into())]);
+    let table = emit.to_proto(&meta);
+
+    assert_eq!(table.data_int64, vec![7]);
+    assert!(
+        table.data_string.is_empty(),
+        "an Unsupported column must not occupy the string block"
+    );
+    assert_eq!(
+        table.data_nulls,
+        vec![false, false],
+        "the Unsupported cell is not NULL, just unrepresented"
+    );
+}
+
+/// `value_to_block_string`'s `Value::Bool`/`Value::Null` arms have no fast-path
+/// counterpart, so the slow-path parity test does not reach them.
+#[test]
+fn value_to_block_string_bool_and_null_render_as_text_and_empty() {
+    assert_eq!(value_to_block_string(&Value::Bool(true)), "true");
+    assert_eq!(value_to_block_string(&Value::Bool(false)), "false");
+    assert_eq!(value_to_block_string(&Value::Null), "");
+}
+
+/// `value_to_i64`/`value_to_f64`/`value_to_bool` coerce every `Value` variant
+/// for an EMITS column whose declared type disagrees with the runtime `Value`.
+/// The parity tests already cover each function's natural arm; this covers the
+/// remaining coercion and wildcard arms.
+mod value_coercion_tests {
+    use super::*;
+
+    #[test]
+    fn value_to_i64_coerces_every_non_natural_variant() {
+        assert_eq!(value_to_i64(&Value::Double(3.9)), 3);
+        assert_eq!(
+            value_to_i64(&Value::Numeric(Decimal {
+                unscaled: 12345,
+                scale: 2
+            })),
+            123
+        );
+        assert_eq!(value_to_i64(&Value::String("42".into())), 42);
+        assert_eq!(
+            value_to_i64(&Value::String("not a number".into())),
+            0,
+            "an unparseable string must fall back to 0"
+        );
+        assert_eq!(value_to_i64(&Value::Bool(true)), 1);
+        assert_eq!(value_to_i64(&Value::Bool(false)), 0);
+        assert_eq!(
+            value_to_i64(&Value::Date(NaiveDate::from_ymd_opt(2020, 1, 1).unwrap())),
+            0,
+            "the wildcard arm must return 0 for a variant with no numeric reading"
+        );
+    }
+
+    #[test]
+    fn value_to_f64_coerces_every_non_natural_variant() {
+        assert_eq!(value_to_f64(&Value::Int32(4)), 4.0);
+        assert_eq!(value_to_f64(&Value::Int64(-5)), -5.0);
+        assert_eq!(
+            value_to_f64(&Value::Numeric(Decimal {
+                unscaled: 125,
+                scale: 2
+            })),
+            1.25
+        );
+        assert_eq!(value_to_f64(&Value::String("2.5".into())), 2.5);
+        assert_eq!(
+            value_to_f64(&Value::String("not a number".into())),
+            0.0,
+            "an unparseable string must fall back to 0.0"
+        );
+        assert_eq!(
+            value_to_f64(&Value::Bool(true)),
+            0.0,
+            "the wildcard arm must return 0.0 for a variant with no numeric reading"
+        );
+    }
+
+    #[test]
+    fn value_to_bool_coerces_every_non_natural_variant() {
+        assert!(!value_to_bool(&Value::Int32(0)));
+        assert!(value_to_bool(&Value::Int32(5)));
+        assert!(!value_to_bool(&Value::Int64(0)));
+        assert!(value_to_bool(&Value::Int64(-1)));
+        assert!(!value_to_bool(&Value::Numeric(Decimal {
+            unscaled: 0,
+            scale: 0
+        })));
+        assert!(value_to_bool(&Value::Numeric(Decimal {
+            unscaled: 7,
+            scale: 0
+        })));
+        assert!(value_to_bool(&Value::String("true".into())));
+        assert!(value_to_bool(&Value::String("TRUE".into())));
+        assert!(value_to_bool(&Value::String("1".into())));
+        assert!(!value_to_bool(&Value::String("no".into())));
+        assert!(
+            !value_to_bool(&Value::Double(1.0)),
+            "the wildcard arm must return false for a variant with no boolean reading"
+        );
+    }
+}
+
+/// `first_nonloopback_ipv4` walks the real `getifaddrs` list, so its result
+/// depends on the host: a well-formed non-loopback dotted quad where one
+/// exists, `UdfError::ConnectBack` (never a panic) on an isolated host.
+#[cfg(feature = "connect-back")]
+#[test]
+fn first_nonloopback_ipv4_returns_a_valid_non_loopback_ipv4_address() {
+    match first_nonloopback_ipv4() {
+        Ok(ip) => assert!(!ip.starts_with("127."), "must not be loopback: {ip}"),
+        Err(err) => assert!(
+            matches!(err, UdfError::ConnectBack(_)),
+            "no-interface host must fail with ConnectBack, got {err:?}"
+        ),
+    }
+}
+
+/// Both `cluster_ip` impls (the `delegate_connect_back_hooks!` expansion) just
+/// forward to `first_nonloopback_ipv4`.
+#[cfg(feature = "connect-back")]
+#[test]
+fn bridge_cluster_ip_delegates_to_first_nonloopback_ipv4() {
+    let meta = vec![col("a", ExaType::Int64)];
+    let table = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&table, &meta);
+    let mut emit = EmitBuffer::new();
+    let bridge = make_bridge(&mut rs, &mut emit, &meta);
+
+    assert_eq!(
+        format!("{:?}", bridge.cluster_ip()),
+        format!("{:?}", first_nonloopback_ipv4())
+    );
+}
+
+#[cfg(feature = "connect-back")]
+#[test]
+fn single_call_context_cluster_ip_delegates_to_first_nonloopback_ipv4() {
+    let ctx = single_call_ctx();
+    assert_eq!(
+        format!("{:?}", ctx.cluster_ip()),
+        format!("{:?}", first_nonloopback_ipv4())
+    );
+}
+
+/// `connection()`'s error branch records the failure via `record_error` so it
+/// surfaces through `take_last_error`.
+#[cfg(feature = "connect-back")]
+#[test]
+fn bridge_connection_error_is_recorded_via_record_error() {
+    let meta = vec![col("a", ExaType::Int64)];
+    let table = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&table, &meta);
+    let mut emit = EmitBuffer::new();
+    let mut bridge = HostContextBridge::new(
+        &mut rs,
+        &mut emit,
+        &meta,
+        &meta,
+        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        HandshakeMeta::default(),
+        Box::new(|name: &str| {
+            Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
+                "no such connection: {name}"
+            )))
+        }),
+    );
+
+    let result = bridge.connection("MISSING_CONN");
+    assert!(
+        matches!(result, Err(UdfError::ConnectBack(_))),
+        "expected a ConnectBack error, got {result:?}"
+    );
+
+    let recorded = bridge.take_last_error();
+    assert!(
+        recorded
+            .as_deref()
+            .is_some_and(|m| m.contains("MISSING_CONN")),
+        "record_error must capture the failure message, got {recorded:?}"
+    );
+}
+
+#[cfg(feature = "connect-back")]
+#[test]
+fn single_call_context_connection_error_is_recorded_via_record_error() {
+    let mut ctx = SingleCallContext::new(
+        HandshakeMeta::default(),
+        Box::new(|name: &str| {
+            Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
+                "no such connection: {name}"
+            )))
+        }),
+    );
+
+    let result = ctx.connection("MISSING_CONN");
+    assert!(
+        matches!(result, Err(UdfError::ConnectBack(_))),
+        "expected a ConnectBack error, got {result:?}"
+    );
+
+    let recorded = ctx.take_last_error();
+    assert!(
+        recorded
+            .as_deref()
+            .is_some_and(|m| m.contains("MISSING_CONN")),
+        "record_error must capture the failure message, got {recorded:?}"
+    );
+}
+
+/// Construct a `SingleCallContext`, supplying the connect-back arg only when
+/// the feature is enabled so call sites compile either way.
+fn single_call_ctx() -> SingleCallContext<'static> {
+    #[cfg(feature = "connect-back")]
+    {
+        SingleCallContext::new(
+            HandshakeMeta::default(),
+            Box::new(|_name: &str| {
+                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                    "no credential fetcher in test".into(),
+                ))
+            }),
+        )
+    }
+    #[cfg(not(feature = "connect-back"))]
+    {
+        SingleCallContext::new(HandshakeMeta::default())
+    }
+}
+
+/// Single-call mode presents no input columns: `num_columns` always reports
+/// 0 regardless of handshake or connection state.
+#[test]
+fn single_call_context_num_columns_is_always_zero() {
+    assert_eq!(single_call_ctx().num_columns(), 0);
+}
+
+/// Single-call mode has no input rows to read: `get` always rejects with
+/// `Unimplemented`.
+#[test]
+fn single_call_context_get_is_unimplemented() {
+    match single_call_ctx().get(0) {
+        Err(UdfError::Unimplemented(msg)) => assert!(msg.contains("input columns")),
+        other => panic!("expected Unimplemented, got {other:?}"),
+    }
+}
+
+/// Single-call mode emits no output rows: `emit` always rejects with
+/// `Unimplemented`.
+#[test]
+fn single_call_context_emit_is_unimplemented() {
+    match single_call_ctx().emit(&[Value::Int64(1)]) {
+        Err(UdfError::Unimplemented(msg)) => assert!(msg.contains("emit")),
+        other => panic!("expected Unimplemented, got {other:?}"),
+    }
+}
+
+/// Single-call mode has no input batches to iterate: `next` always rejects
+/// with `Unimplemented`.
+#[test]
+fn single_call_context_next_is_unimplemented() {
+    match single_call_ctx().next() {
+        Err(UdfError::Unimplemented(msg)) => assert!(msg.contains("input rows")),
+        other => panic!("expected Unimplemented, got {other:?}"),
+    }
+}
+
 // -----------------------------------------------------------------------
 // Permanent regression guard: the string-block fast-path formatters
 // (`value_to_block_string`'s NUMERIC/DATE/TIMESTAMP branches) must stay
@@ -1051,6 +1529,18 @@ mod fast_string_block_tests {
         let ts = NaiveDate::from_ymd_opt(10000, 1, 1)
             .unwrap()
             .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(fast_timestamp_to_string(&ts), None);
+    }
+
+    /// chrono encodes a leap second as a nanosecond field in
+    /// `1_000_000_000..2_000_000_000`. `fast_timestamp_to_string` declines that
+    /// case and defers to `NaiveDateTime::format`.
+    #[test]
+    fn fast_timestamp_defers_for_leap_second_nanos() {
+        let ts = NaiveDate::from_ymd_opt(2016, 12, 31)
+            .unwrap()
+            .and_hms_nano_opt(23, 59, 59, 1_000_000_000)
             .unwrap();
         assert_eq!(fast_timestamp_to_string(&ts), None);
     }
@@ -1393,6 +1883,28 @@ mod fast_string_block_ingest_tests {
             );
         }
     }
+
+    /// `parse_2digit` rejects anything that is not exactly two ASCII digits.
+    /// The wrong-length branch is unreachable via the fixed-width callers, so
+    /// it is exercised directly here.
+    #[test]
+    fn parse_2digit_rejects_wrong_length_and_non_digit_bytes() {
+        assert_eq!(parse_2digit(b"5"), None, "too short");
+        assert_eq!(parse_2digit(b"123"), None, "too long");
+        assert_eq!(parse_2digit(b"a1"), None, "non-digit first byte");
+        assert_eq!(parse_2digit(b"1a"), None, "non-digit second byte");
+        assert_eq!(parse_2digit(b"42"), Some(42), "valid 2-digit field");
+    }
+
+    /// `parse_4digit` rejects anything that is not exactly four ASCII digits,
+    /// including the wrong-length branch the fixed-width callers never reach.
+    #[test]
+    fn parse_4digit_rejects_wrong_length_and_non_digit_bytes() {
+        assert_eq!(parse_4digit(b"123"), None, "too short");
+        assert_eq!(parse_4digit(b"12345"), None, "too long");
+        assert_eq!(parse_4digit(b"202a"), None, "non-digit byte mid-field");
+        assert_eq!(parse_4digit(b"2026"), Some(2026), "valid 4-digit field");
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1537,6 +2049,243 @@ mod arrow_tests {
 
         let table = encode_slice(&batch, &meta).unwrap();
         assert_eq!(table.data_string, vec!["a", "b", "c"]);
+    }
+
+    /// `encode_slice` is byte-identical to the row path across all five proto
+    /// blocks and every Arrow source type feeding the string block. NULLs are
+    /// spread over different rows and both block kinds, so the bitmap and the
+    /// no-slot-for-NULL interleaving are pinned too.
+    ///
+    /// The expectation is the row path's own `to_proto` output for the
+    /// equivalent `Value` rows, so this asserts the byte-identity contract
+    /// itself rather than transcribing today's formatting; the two paths share
+    /// only `value_to_block_string`, which
+    /// `fast_path_to_proto_byte_identical_to_row_path` pins independently.
+    #[test]
+    fn encode_slice_matches_row_path_across_every_block_type() {
+        use arrow::array::{
+            Date32Array, Decimal128Array, Int32Array, LargeStringArray, TimestampMicrosecondArray,
+            TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        };
+        use arrow::datatypes::TimeUnit;
+
+        fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32, nano: u32) -> NaiveDateTime {
+            NaiveDate::from_ymd_opt(y, mo, d)
+                .unwrap()
+                .and_hms_nano_opt(h, mi, s, nano)
+                .unwrap()
+        }
+        fn days_since_epoch(d: NaiveDate) -> i32 {
+            (d - NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()).num_days() as i32
+        }
+        fn cell<T>(v: Option<T>, wrap: impl Fn(T) -> Value) -> Value {
+            v.map(wrap).unwrap_or(Value::Null)
+        }
+
+        // One value table per column drives both the Arrow array and the
+        // expected `Value` row, so the two paths cannot drift apart silently.
+        let i32_vals = [Some(7i32), None, Some(-8)];
+        let i64_vals = [Some(42i64), Some(43), Some(-44)];
+        let dbl_vals = [None, Some(2.5f64), Some(-3.5)];
+        let bln_vals = [Some(true), Some(false), None];
+        let str_vals = [Some("héllo"), None, Some("")];
+        let lstr_vals = [Some("large"), Some("x"), Some("y")];
+        let date_vals = [
+            Some(NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()),
+            None,
+            // Pre-epoch: a negative Arrow day count through the +719163 offset.
+            Some(NaiveDate::from_ymd_opt(1969, 7, 20).unwrap()),
+        ];
+        let ts_s_vals = [
+            Some(at(2023, 11, 14, 22, 13, 20, 0)),
+            Some(at(1970, 1, 1, 0, 0, 0, 0)),
+            Some(at(2038, 1, 19, 3, 14, 7, 0)),
+        ];
+        let ts_ms_vals = [
+            Some(at(2024, 2, 29, 1, 2, 3, 123_000_000)),
+            Some(at(1969, 12, 31, 23, 59, 59, 999_000_000)),
+            None,
+        ];
+        let ts_us_vals = [
+            Some(at(2026, 6, 5, 12, 0, 0, 123_456_000)),
+            Some(at(1970, 1, 1, 0, 0, 0, 1_000)),
+            Some(at(1900, 1, 1, 0, 0, 0, 0)),
+        ];
+        let ts_ns_vals = [
+            Some(at(1999, 12, 31, 23, 59, 59, 987_654_321)),
+            Some(at(1970, 1, 1, 0, 0, 0, 1)),
+            None,
+        ];
+        let dec_vals = [Some(12345i128), None, Some(-1)];
+        let num_i32_vals = [Some(1i32), Some(-2), Some(0)];
+        let num_i64_vals = [Some(-9i64), None, Some(0)];
+        let num_f64_vals = [Some(1.5f64), Some(-0.25), Some(0.0)];
+
+        let meta = vec![
+            col("i32", ExaType::Int32),
+            col("i64", ExaType::Int64),
+            col("dbl", ExaType::Double),
+            col("bln", ExaType::Boolean),
+            col("s", ExaType::String { size: None }),
+            col("ls", ExaType::String { size: None }),
+            col("dt", ExaType::Date),
+            col("ts_s", ExaType::Timestamp),
+            col("ts_ms", ExaType::Timestamp),
+            col("ts_us", ExaType::TimestampTz),
+            col("ts_ns", ExaType::Timestamp),
+            col(
+                "dec",
+                ExaType::Numeric {
+                    precision: Some(18),
+                    scale: Some(2),
+                },
+            ),
+            col(
+                "n32",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+            col(
+                "n64",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+            col(
+                "nf64",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            ),
+        ];
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("i32", DataType::Int32, true),
+            Field::new("i64", DataType::Int64, true),
+            Field::new("dbl", DataType::Float64, true),
+            Field::new("bln", DataType::Boolean, true),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("ls", DataType::LargeUtf8, true),
+            Field::new("dt", DataType::Date32, true),
+            Field::new("ts_s", DataType::Timestamp(TimeUnit::Second, None), true),
+            Field::new(
+                "ts_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_us",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new(
+                "ts_ns",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+            Field::new("dec", DataType::Decimal128(18, 2), true),
+            Field::new("n32", DataType::Int32, true),
+            Field::new("n64", DataType::Int64, true),
+            Field::new("nf64", DataType::Float64, true),
+        ]));
+
+        let columns: Vec<Arc<dyn arrow::array::Array>> = vec![
+            Arc::new(Int32Array::from(i32_vals.to_vec())),
+            Arc::new(Int64Array::from(i64_vals.to_vec())),
+            Arc::new(Float64Array::from(dbl_vals.to_vec())),
+            Arc::new(BooleanArray::from(bln_vals.to_vec())),
+            Arc::new(StringArray::from(str_vals.to_vec())),
+            Arc::new(LargeStringArray::from(lstr_vals.to_vec())),
+            Arc::new(Date32Array::from(
+                date_vals
+                    .iter()
+                    .map(|d| d.map(days_since_epoch))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampSecondArray::from(
+                ts_s_vals
+                    .iter()
+                    .map(|t| t.map(|t| t.and_utc().timestamp()))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampMillisecondArray::from(
+                ts_ms_vals
+                    .iter()
+                    .map(|t| t.map(|t| t.and_utc().timestamp_millis()))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampMicrosecondArray::from(
+                ts_us_vals
+                    .iter()
+                    .map(|t| t.map(|t| t.and_utc().timestamp_micros()))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampNanosecondArray::from(
+                ts_ns_vals
+                    .iter()
+                    .map(|t| t.map(|t| t.and_utc().timestamp_nanos_opt().unwrap()))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(
+                Decimal128Array::from(dec_vals.to_vec())
+                    .with_precision_and_scale(18, 2)
+                    .unwrap(),
+            ),
+            Arc::new(Int32Array::from(num_i32_vals.to_vec())),
+            Arc::new(Int64Array::from(num_i64_vals.to_vec())),
+            Arc::new(Float64Array::from(num_f64_vals.to_vec())),
+        ];
+        let batch = RecordBatch::try_new(schema, columns).unwrap();
+
+        let mut row_buf = EmitBuffer::new();
+        for r in 0..3 {
+            row_buf.push(vec![
+                cell(i32_vals[r], Value::Int32),
+                cell(i64_vals[r], Value::Int64),
+                cell(dbl_vals[r], Value::Double),
+                cell(bln_vals[r], Value::Bool),
+                cell(str_vals[r], |s: &str| Value::String(s.to_string())),
+                cell(lstr_vals[r], |s: &str| Value::String(s.to_string())),
+                cell(date_vals[r], Value::Date),
+                cell(ts_s_vals[r], Value::Timestamp),
+                cell(ts_ms_vals[r], Value::Timestamp),
+                cell(ts_us_vals[r], Value::Timestamp),
+                cell(ts_ns_vals[r], Value::Timestamp),
+                cell(dec_vals[r], |unscaled| {
+                    Value::Numeric(Decimal { unscaled, scale: 2 })
+                }),
+                cell(num_i32_vals[r], Value::Int32),
+                cell(num_i64_vals[r], Value::Int64),
+                cell(num_f64_vals[r], Value::Double),
+            ]);
+        }
+        let row_table = row_buf.to_proto(&meta);
+
+        let slice_table = encode_slice(&batch, &meta).unwrap();
+
+        assert_eq!(
+            row_table, slice_table,
+            "encode_slice must stay byte-identical to the row path"
+        );
+        // Anchors for the two riskiest conversions, so a wiring mistake names
+        // itself instead of surfacing as an opaque whole-table diff.
+        assert!(
+            slice_table.data_string.iter().any(|s| s == "2024-02-29"),
+            "Date32 CE-day epoch offset: {:?}",
+            slice_table.data_string
+        );
+        assert!(
+            slice_table
+                .data_string
+                .iter()
+                .any(|s| s == "1999-12-31 23:59:59.987654321"),
+            "nanosecond unit reaches the wire at full precision: {:?}",
+            slice_table.data_string
+        );
     }
 
     /// Test: two string-family columns interleave row-major in data_string.
@@ -1913,5 +2662,631 @@ mod arrow_tests {
         let rs2 = InputRowSet::from_proto(&table, &meta);
         assert_eq!(rs2.row(0).unwrap(), &[Value::Int64(2)]);
         assert_eq!(rs2.row(1).unwrap(), &[Value::Int64(3)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct unit tests: compute_row_costs / accessor_value / build_accessors
+    //
+    // These call the four extracted helpers themselves rather than only
+    // through encode_slice/push_batch, targeting the specific per-type,
+    // NULL, and error-arm edges the wider parity tests above do not isolate.
+    // -----------------------------------------------------------------------
+
+    /// Every constant-width `DataType` arm `fixed_cell_cost` recognizes must
+    /// charge exactly what `value_byte_cost` charges the equivalent `Value` —
+    /// the two tables are meant to describe the same widths from two axes.
+    #[test]
+    fn compute_row_costs_fixed_width_types_match_value_byte_cost() {
+        use arrow::array::{Date32Array, Int32Array, TimestampMillisecondArray};
+        use arrow::datatypes::TimeUnit;
+
+        fn single_column_cost(
+            dt: DataType,
+            array: Arc<dyn arrow::array::Array>,
+            typ: ExaType,
+        ) -> usize {
+            let schema = Arc::new(Schema::new(vec![Field::new("v", dt, false)]));
+            let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+            let meta = vec![col("v", typ)];
+            compute_row_costs(&batch, &meta)[0]
+        }
+
+        assert_eq!(
+            single_column_cost(
+                DataType::Boolean,
+                Arc::new(BooleanArray::from(vec![true])),
+                ExaType::Boolean
+            ),
+            value_byte_cost(&Value::Bool(true)),
+            "Boolean"
+        );
+        assert_eq!(
+            single_column_cost(
+                DataType::Int32,
+                Arc::new(Int32Array::from(vec![7i32])),
+                ExaType::Int32
+            ),
+            value_byte_cost(&Value::Int32(7)),
+            "Int32"
+        );
+        assert_eq!(
+            single_column_cost(
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![9i64])),
+                ExaType::Int64
+            ),
+            value_byte_cost(&Value::Int64(9)),
+            "Int64"
+        );
+        assert_eq!(
+            single_column_cost(
+                DataType::Float64,
+                Arc::new(Float64Array::from(vec![1.5f64])),
+                ExaType::Double
+            ),
+            value_byte_cost(&Value::Double(1.5)),
+            "Float64"
+        );
+        assert_eq!(
+            single_column_cost(
+                DataType::Date32,
+                Arc::new(Date32Array::from(vec![100i32])),
+                ExaType::Date
+            ),
+            value_byte_cost(&Value::Date(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())),
+            "Date32 cost is a fixed width, independent of the actual date"
+        );
+        assert_eq!(
+            single_column_cost(
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                Arc::new(TimestampMillisecondArray::from(vec![0i64])),
+                ExaType::Timestamp
+            ),
+            value_byte_cost(&Value::Timestamp(NaiveDateTime::default())),
+            "Timestamp cost is a fixed width, independent of unit or value"
+        );
+    }
+
+    /// `compute_row_costs`'s `Decimal128` arm adds the column's `scale` to
+    /// `NUMERIC_COST_BASE`, exactly like `value_byte_cost`'s `Value::Numeric`
+    /// arm adds `d.scale` — verified across several distinct scales so the
+    /// term is confirmed to actually vary, not just present at one value.
+    #[test]
+    fn compute_row_costs_decimal128_scale_term_matches_value_byte_cost() {
+        use arrow::array::Decimal128Array;
+
+        for scale in [0i8, 2, 9] {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "d",
+                DataType::Decimal128(18, scale),
+                false,
+            )]));
+            let arr: Arc<dyn arrow::array::Array> = Arc::new(
+                Decimal128Array::from(vec![12345i128])
+                    .with_precision_and_scale(18, scale)
+                    .unwrap(),
+            );
+            let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+            let meta = vec![col(
+                "d",
+                ExaType::Numeric {
+                    precision: Some(18),
+                    scale: Some(scale as u32),
+                },
+            )];
+
+            let cost = compute_row_costs(&batch, &meta)[0];
+            let expected = value_byte_cost(&Value::Numeric(Decimal {
+                unscaled: 12345,
+                scale: scale as u8,
+            }));
+            assert_eq!(cost, expected, "scale {scale}");
+        }
+    }
+
+    /// `Utf8`/`LargeUtf8` are the only variable-width arms: cost is the raw
+    /// byte length of the string, matching `value_byte_cost`'s `s.len()` —
+    /// checked with a multi-byte UTF-8 string so a char-count regression
+    /// would be caught.
+    #[test]
+    fn compute_row_costs_variable_width_strings_match_value_byte_cost() {
+        use arrow::array::LargeStringArray;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["hello world"]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("s", ExaType::String { size: None })];
+        assert_eq!(
+            compute_row_costs(&batch, &meta)[0],
+            value_byte_cost(&Value::String("hello world".to_string())),
+            "Utf8"
+        );
+
+        // "héllo" — é is 2 bytes in UTF-8, so byte length (6) differs from
+        // char count (5); this pins the cost to bytes, not chars.
+        let schema2 = Arc::new(Schema::new(vec![Field::new(
+            "ls",
+            DataType::LargeUtf8,
+            false,
+        )]));
+        let arr2: Arc<dyn arrow::array::Array> = Arc::new(LargeStringArray::from(vec!["héllo"]));
+        let batch2 = RecordBatch::try_new(schema2, vec![arr2]).unwrap();
+        let meta2 = vec![col("ls", ExaType::String { size: None })];
+        assert_eq!(
+            compute_row_costs(&batch2, &meta2)[0],
+            value_byte_cost(&Value::String("héllo".to_string())),
+            "LargeUtf8"
+        );
+    }
+
+    /// A NULL cell contributes 0 regardless of column type (mirrors
+    /// `value_byte_cost`'s `Value::Null => 0`), and a row's total cost is the
+    /// sum of its non-null cells across every column — both properties
+    /// exercised together across three rows spanning "no NULLs", "one NULL
+    /// column", and "every column NULL".
+    #[test]
+    fn compute_row_costs_null_cells_cost_zero_and_multi_column_rows_sum() {
+        use arrow::array::Int32Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("i", DataType::Int32, true),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("b", DataType::Boolean, true),
+        ]));
+        let i_arr: Arc<dyn arrow::array::Array> =
+            Arc::new(Int32Array::from(vec![Some(7i32), None, None]));
+        let s_arr: Arc<dyn arrow::array::Array> =
+            Arc::new(StringArray::from(vec![Some("abcd"), Some("xy"), None]));
+        let b_arr: Arc<dyn arrow::array::Array> =
+            Arc::new(BooleanArray::from(vec![Some(true), Some(false), None]));
+        let batch = RecordBatch::try_new(schema, vec![i_arr, s_arr, b_arr]).unwrap();
+        let meta = vec![
+            col("i", ExaType::Int32),
+            col("s", ExaType::String { size: None }),
+            col("b", ExaType::Boolean),
+        ];
+
+        let costs = compute_row_costs(&batch, &meta);
+
+        assert_eq!(
+            costs[0],
+            value_byte_cost(&Value::Int32(7))
+                + value_byte_cost(&Value::String("abcd".into()))
+                + value_byte_cost(&Value::Bool(true)),
+            "row 0: no NULLs, three-column sum"
+        );
+        assert_eq!(
+            costs[1],
+            value_byte_cost(&Value::String("xy".into())) + value_byte_cost(&Value::Bool(false)),
+            "row 1: NULL Int32 contributes 0, only the other two columns count"
+        );
+        assert_eq!(costs[2], 0, "row 2: every column NULL, total cost 0");
+    }
+
+    /// `accessor_value`'s four `Timestamp` arms each divide by a different
+    /// unit; each is checked against `chrono`'s own conversion for that unit
+    /// so a wrong divisor (e.g. swapping `_millis`/`_micros`) fails here
+    /// rather than only inside the wider byte-identity parity test.
+    #[test]
+    fn accessor_value_timestamp_second_matches_chrono_from_timestamp() {
+        use arrow::array::TimestampSecondArray;
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Second, None),
+            false,
+        )]));
+        let arr: Arc<dyn arrow::array::Array> =
+            Arc::new(TimestampSecondArray::from(vec![1_700_000_000i64]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let value = accessor_value(&accessors[0], 0);
+
+        let expected = chrono::DateTime::from_timestamp(1_700_000_000, 0)
+            .unwrap()
+            .naive_utc();
+        assert_eq!(value, Value::Timestamp(expected));
+    }
+
+    #[test]
+    fn accessor_value_timestamp_millisecond_matches_chrono_from_timestamp_millis() {
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let arr: Arc<dyn arrow::array::Array> =
+            Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_123i64]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let value = accessor_value(&accessors[0], 0);
+
+        let expected = chrono::DateTime::from_timestamp_millis(1_700_000_000_123)
+            .unwrap()
+            .naive_utc();
+        assert_eq!(value, Value::Timestamp(expected));
+    }
+
+    #[test]
+    fn accessor_value_timestamp_microsecond_matches_chrono_from_timestamp_micros() {
+        use arrow::array::TimestampMicrosecondArray;
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        )]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(TimestampMicrosecondArray::from(vec![
+            1_700_000_000_123_456i64,
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let value = accessor_value(&accessors[0], 0);
+
+        let expected = chrono::DateTime::from_timestamp_micros(1_700_000_000_123_456)
+            .unwrap()
+            .naive_utc();
+        assert_eq!(value, Value::Timestamp(expected));
+    }
+
+    #[test]
+    fn accessor_value_timestamp_nanosecond_positive_matches_chrono_from_timestamp() {
+        use arrow::array::TimestampNanosecondArray;
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        )]));
+        let ns = 1_700_000_000_123_456_789i64;
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(TimestampNanosecondArray::from(vec![ns]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let value = accessor_value(&accessors[0], 0);
+
+        let expected =
+            chrono::DateTime::from_timestamp(ns / 1_000_000_000, (ns % 1_000_000_000) as u32)
+                .unwrap()
+                .naive_utc();
+        assert_eq!(value, Value::Timestamp(expected));
+    }
+
+    /// `accessor_value`'s `TsNanosecond` arm splits the raw `i64` euclidean, so
+    /// the remainder stays in `[0, 1_000_000_000)` — the only range
+    /// `chrono::DateTime::from_timestamp` accepts. Truncating `/` and `%` yield
+    /// a negative remainder for a pre-epoch `ns`, which wraps as `u32` and is
+    /// rejected, so `unwrap_or_default()` would swallow it into the epoch.
+    ///
+    /// `-1` has a sub-second remainder; `-1_000_000_000` has none, so only the
+    /// floored second separates the two divisions there.
+    #[test]
+    fn accessor_value_timestamp_nanosecond_negative_yields_pre_epoch_instant() {
+        use arrow::array::TimestampNanosecondArray;
+        use arrow::datatypes::TimeUnit;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        )]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(TimestampNanosecondArray::from(vec![
+            -1i64,
+            -1_000_000_000i64,
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("ts", ExaType::Timestamp)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let last_nanosecond_of_1969 = NaiveDate::from_ymd_opt(1969, 12, 31)
+            .unwrap()
+            .and_hms_nano_opt(23, 59, 59, 999_999_999)
+            .unwrap();
+        let last_second_of_1969 = NaiveDate::from_ymd_opt(1969, 12, 31)
+            .unwrap()
+            .and_hms_nano_opt(23, 59, 59, 0)
+            .unwrap();
+
+        assert_eq!(
+            accessor_value(&accessors[0], 0),
+            Value::Timestamp(last_nanosecond_of_1969),
+            "ns = -1 must decode to one nanosecond before the epoch"
+        );
+        assert_eq!(
+            accessor_value(&accessors[0], 1),
+            Value::Timestamp(last_second_of_1969),
+            "ns = -1_000_000_000 must decode to one second before the epoch"
+        );
+    }
+
+    /// `Date32`'s CE-day epoch offset (`ARROW_EPOCH_CE_DAY`) must apply for a
+    /// pre-epoch value too, not just the post-epoch case the wider parity
+    /// test already covers.
+    #[test]
+    fn accessor_value_date32_applies_ce_day_epoch_offset_pre_epoch() {
+        use arrow::array::Date32Array;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, false)]));
+        let days_since_epoch = -200i32;
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(Date32Array::from(vec![days_since_epoch]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("d", ExaType::Date)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        let value = accessor_value(&accessors[0], 0);
+
+        let expected = NaiveDate::from_ymd_opt(1969, 6, 15).unwrap();
+        assert_eq!(value, Value::Date(expected));
+    }
+
+    /// The three `Numeric`-widening accessors (`Int32`/`Int64`/`Float64`
+    /// Arrow columns declared `ExaType::Numeric`) extract the natural typed
+    /// value — `encode_slice` is what stringifies it for the wire, not
+    /// `accessor_value` — so each must yield the plain `Value` variant, not a
+    /// `Value::Numeric`.
+    #[test]
+    fn accessor_value_numeric_widening_variants_extract_natural_types() {
+        use arrow::array::Int32Array;
+
+        let numeric_meta = || {
+            vec![col(
+                "n",
+                ExaType::Numeric {
+                    precision: None,
+                    scale: None,
+                },
+            )]
+        };
+
+        let schema32 = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, false)]));
+        let arr32: Arc<dyn arrow::array::Array> = Arc::new(Int32Array::from(vec![-42i32]));
+        let batch32 = RecordBatch::try_new(schema32, vec![arr32]).unwrap();
+        let acc32 = build_accessors(&batch32, &numeric_meta()).unwrap();
+        assert_eq!(accessor_value(&acc32[0], 0), Value::Int32(-42));
+
+        let schema64 = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
+        let arr64: Arc<dyn arrow::array::Array> =
+            Arc::new(Int64Array::from(vec![9_999_999_999i64]));
+        let batch64 = RecordBatch::try_new(schema64, vec![arr64]).unwrap();
+        let acc64 = build_accessors(&batch64, &numeric_meta()).unwrap();
+        assert_eq!(accessor_value(&acc64[0], 0), Value::Int64(9_999_999_999));
+
+        let schemaf = Arc::new(Schema::new(vec![Field::new("n", DataType::Float64, false)]));
+        let arrf: Arc<dyn arrow::array::Array> = Arc::new(Float64Array::from(vec![3.25f64]));
+        let batchf = RecordBatch::try_new(schemaf, vec![arrf]).unwrap();
+        let accf = build_accessors(&batchf, &numeric_meta()).unwrap();
+        assert_eq!(accessor_value(&accf[0], 0), Value::Double(3.25));
+    }
+
+    /// A column declared `ExaType::Unsupported` gets `ColAccessor::Unsupported`
+    /// regardless of its Arrow type, and `accessor_value` maps that variant to
+    /// `Value::Null` — the column has no representation the DB reads back.
+    #[test]
+    fn accessor_value_unsupported_column_maps_to_null() {
+        let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::Utf8, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["ignored"]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("u", ExaType::Unsupported)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        assert!(matches!(accessors[0], ColAccessor::Unsupported));
+        assert_eq!(accessor_value(&accessors[0], 0), Value::Null);
+    }
+
+    /// `accessor_value`'s `ColAccessor::Int32` arm — the one native-type
+    /// arm not otherwise exercised: `mixed_meta`/`make_batch`'s Int64
+    /// column already covers `Int64`, and `push_batch_int64_into_numeric_block`
+    /// etc. cover the `NumericFromInt32` widening variant, but no existing
+    /// test declares a plain `ExaType::Int32` column.
+    #[test]
+    fn accessor_value_int32_native_column_extracts_i32() {
+        use arrow::array::Int32Array;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(Int32Array::from(vec![-42i32]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("a", ExaType::Int32)];
+        let accessors = build_accessors(&batch, &meta).unwrap();
+
+        assert_eq!(accessor_value(&accessors[0], 0), Value::Int32(-42));
+    }
+
+    /// `compute_row_costs`'s wildcard arm costs an Arrow column 0 when its
+    /// `DataType` is neither a `fixed_cell_cost` type nor `Utf8`/`LargeUtf8`
+    /// — reachable for an `ExaType::Unsupported` column, which `build_accessors`
+    /// accepts paired with any Arrow type, since `compute_row_costs` inspects
+    /// only the raw Arrow `DataType` (it ignores `ColumnMeta` entirely).
+    #[test]
+    fn compute_row_costs_wildcard_arm_costs_zero_for_unrecognized_arrow_type() {
+        use arrow::array::UInt32Array;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("u", DataType::UInt32, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(UInt32Array::from(vec![7u32]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("u", ExaType::Unsupported)];
+
+        assert_eq!(compute_row_costs(&batch, &meta), vec![0]);
+    }
+
+    /// A zero-row `RecordBatch` is a no-op: `push_batch` returns `Ok(())`
+    /// without invoking `flush` and without buffering a tail, after flushing
+    /// whatever was already pending (step 1).
+    #[test]
+    fn push_batch_zero_row_batch_is_noop() {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(Vec::<i64>::new()));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("a", ExaType::Int64)];
+
+        let mut buf = EmitBuffer::new();
+        let mut flush_called = false;
+        buf.push_batch(&batch, &meta, &mut |_| {
+            flush_called = true;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(!flush_called, "a zero-row batch must not flush");
+        assert!(buf.is_empty(), "a zero-row batch must not buffer a tail");
+    }
+
+    /// When the last row's cost crosses the threshold, the final slice
+    /// covers every remaining row and `slice_start` reaches `n_rows` —
+    /// `push_batch` must leave nothing to materialise into the tail (the
+    /// `if slice_start < n_rows` guard's false branch, which every other
+    /// `push_batch` test — all of which leave a non-empty tail — never
+    /// takes).
+    #[test]
+    fn push_batch_fully_flushed_by_final_row_leaves_no_tail() {
+        // A single row whose cost alone exceeds the threshold: the loop
+        // flushes it as one slice and slice_start lands exactly on n_rows.
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+        let s = "x".repeat(EMIT_BUFFER_LIMIT_BYTES + 1);
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec![s.as_str()]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        let meta = vec![col("v", ExaType::String { size: None })];
+
+        let mut flush_count = 0usize;
+        let mut buf = EmitBuffer::new();
+        buf.push_batch(&batch, &meta, &mut |t| {
+            assert_eq!(t.rows, 1);
+            flush_count += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(flush_count, 1, "the oversized row must flush exactly once");
+        assert!(
+            buf.is_empty(),
+            "a batch fully consumed by the final slice must leave no tail"
+        );
+    }
+
+    /// `emit_record_batch_ipc` bans `emit_batch` in a RETURNS output context,
+    /// mirroring `emit`'s ban (`returns_output_bans_emit`) — no existing
+    /// arrow test configures the bridge with `IterType::ExactlyOnce` output
+    /// before calling `emit_batch`.
+    #[test]
+    fn bridge_emit_batch_bans_returns_output_context() {
+        let meta = mixed_meta();
+        let batch = make_batch(&[1], &[Some("x")], &[1.0], &[true]);
+        let empty_table = ExascriptTableData {
+            rows: 0,
+            ..Default::default()
+        };
+        let mut rs = InputRowSet::from_proto(&empty_table, &meta);
+        let mut emit = EmitBuffer::new();
+        let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+        bridge.configure_group_input(
+            IterType::ExactlyOnce,
+            IterType::ExactlyOnce,
+            Box::new(|| Ok(None)),
+        );
+
+        match bridge.emit_batch(&batch) {
+            Err(UdfError::User(msg)) => assert!(
+                msg.contains("RETURNS"),
+                "unexpected emit_batch-ban message: {msg}"
+            ),
+            other => panic!("expected a RETURNS-context ban error, got {other:?}"),
+        }
+    }
+
+    /// `encode_slice`'s `ColAccessor::Unsupported` arm is a no-op in both the
+    /// column-tally pre-sizing pass and the row-packing loop, mirroring
+    /// `to_proto`'s `ExaType::Unsupported` arms
+    /// (`to_proto_skips_unsupported_columns_in_both_tally_and_packing`) —
+    /// `accessor_value_unsupported_column_maps_to_null` only calls
+    /// `build_accessors`/`accessor_value` directly, not `encode_slice`.
+    #[test]
+    fn encode_slice_skips_unsupported_columns_in_both_tally_and_packing() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int64, false),
+            Field::new("u", DataType::Utf8, false),
+        ]));
+        let int_arr: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(vec![7i64]));
+        let unsupported_arr: Arc<dyn arrow::array::Array> =
+            Arc::new(StringArray::from(vec!["ignored"]));
+        let batch = RecordBatch::try_new(schema, vec![int_arr, unsupported_arr]).unwrap();
+        let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
+
+        let table = encode_slice(&batch, &meta).unwrap();
+
+        assert_eq!(table.data_int64, vec![7]);
+        assert!(
+            table.data_string.is_empty(),
+            "an Unsupported column must not occupy the string block"
+        );
+        assert_eq!(
+            table.data_nulls,
+            vec![false, false],
+            "the Unsupported cell is not NULL, just unrepresented"
+        );
+    }
+
+    /// `build_accessors`' first guard rejects a batch whose column count
+    /// doesn't match the declared EMITS schema, before any per-column
+    /// downcast is attempted.
+    #[test]
+    fn build_accessors_column_count_mismatch_errors() {
+        use arrow::array::Int32Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]));
+        let arr_a: Arc<dyn arrow::array::Array> = Arc::new(Int32Array::from(vec![1i32]));
+        let arr_b: Arc<dyn arrow::array::Array> = Arc::new(Int32Array::from(vec![2i32]));
+        let batch = RecordBatch::try_new(schema, vec![arr_a, arr_b]).unwrap();
+        // Only one column declared, but the batch carries two.
+        let meta = vec![col("a", ExaType::Int32)];
+
+        let result = build_accessors(&batch, &meta);
+
+        match result {
+            Err(UdfError::Type(msg)) => assert!(
+                msg.contains('2') && msg.contains('1'),
+                "error must name both column counts: {msg}"
+            ),
+            Ok(_) => panic!("expected Err(Type) for a column-count mismatch, got Ok"),
+            Err(other) => panic!("expected Err(Type), got a different variant: {other}"),
+        }
+    }
+
+    /// The per-column `(dt, typ)` match's wildcard arm rejects any Arrow
+    /// type / declared `ExaType` combination none of the named arms cover —
+    /// tested directly against `build_accessors` rather than only through
+    /// `push_batch`'s `push_batch_type_mismatch_errors`.
+    #[test]
+    fn build_accessors_arrow_exatype_mismatch_returns_type_error() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, false)]));
+        let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["x"]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+        // Utf8 cannot feed a Boolean column — no accessor variant matches.
+        let meta = vec![col("v", ExaType::Boolean)];
+
+        let result = build_accessors(&batch, &meta);
+
+        match result {
+            Err(UdfError::Type(msg)) => assert!(
+                msg.contains("Utf8") || msg.contains("Boolean"),
+                "error should name the offending types: {msg}"
+            ),
+            Ok(_) => panic!("expected Err(Type) for an Arrow/ExaType mismatch, got Ok"),
+            Err(other) => panic!("expected Err(Type), got a different variant: {other}"),
+        }
     }
 }
