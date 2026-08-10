@@ -19,6 +19,10 @@ fn rustup_available() -> bool {
     Command::new("rustup").arg("--version").output().is_ok()
 }
 
+fn host_triple() -> String {
+    format!("{}-unknown-linux-musl", std::env::consts::ARCH)
+}
+
 /// Scaffold a minimal cdylib crate in `dir` using cargo-exasol-udf new,
 /// then return the path to it.
 fn scaffold_udf_crate(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
@@ -54,9 +58,46 @@ fn build_produces_musl_so() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let triple = host_triple();
     assert!(
-        stdout.contains("x86_64-unknown-linux-musl") && stdout.contains(".so"),
+        stdout.contains(&triple) && stdout.contains(".so"),
         "stdout should print .so path: {stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires musl toolchain and cargo; run with --ignored"]
+fn build_honors_target_override() {
+    if !rustup_available() {
+        eprintln!("SKIP: rustup not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let udf_path = scaffold_udf_crate(dir.path(), "test-target-override-udf");
+    let triple = host_triple();
+
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args([
+            "exasol-udf",
+            "build",
+            udf_path.to_str().unwrap(),
+            "--target",
+            &triple,
+        ])
+        .output()
+        .expect("failed to run cargo-exasol-udf build");
+
+    assert!(
+        output.status.success(),
+        "build should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&triple) && stdout.contains(".so"),
+        "stdout should print .so path for the overridden target: {stdout}"
     );
 }
 

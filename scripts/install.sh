@@ -81,6 +81,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/script_languages.sh
+source "$SCRIPT_DIR/lib/script_languages.sh"
 
 # ── step 1: build ──────────────────────────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
@@ -120,7 +122,7 @@ exapump bucketfs cp "$TMP_TAR" "$BFS_PATH" \
 echo "==> Upload complete."
 
 # ── step 4: register SCRIPT_LANGUAGES ─────────────────────────────────────────
-SCRIPT_LANGUAGES="RUST=localzmq+protobuf:///${BFS_SERVICE}/${BUCKET}/slc/${SLC_NAME}?lang=rust#buckets/${BFS_SERVICE}/${BUCKET}/slc/${SLC_NAME}/exaudf/exaudfclient"
+SCRIPT_LANGUAGES="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "slc/${SLC_NAME}")"
 DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
 
 echo "==> Registering RUST language (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"

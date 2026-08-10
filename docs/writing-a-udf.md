@@ -6,9 +6,9 @@
 
 ## Prerequisites
 
-- Rust 1.94+ with the musl target:
+- Rust 1.94+ with the musl target matching your host architecture (`cargo exasol-udf build` installs it automatically if missing; to add it manually):
   ```bash
-  rustup target add x86_64-unknown-linux-musl
+  rustup target add x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl on ARM
   ```
 - `cargo-exasol-udf` installed from crates.io (or `--path crates/cargo-exasol-udf` from this workspace):
   ```bash
@@ -595,11 +595,11 @@ Use the returned IP when constructing the `CONNECTION` object, or store it in a 
 ## 13. Build and deploy
 
 ```bash
-# Cross-compile to a musl .so (release profile, stripped)
+# Compile to a musl .so for the host architecture (release profile, stripped)
 cargo exasol-udf build
 
 # Artifact:
-#   target/x86_64-unknown-linux-musl/release/libmy_udf.so
+#   target/<host-arch>-unknown-linux-musl/release/libmy_udf.so
 
 # Upload to BucketFS via the HTTP API or your admin tooling, then register:
 ```
@@ -611,7 +611,13 @@ RETURNS BIGINT AS
 /
 ```
 
-`cargo exasol-udf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
+`cargo exasol-udf build` is equivalent to `cargo build --target <host-arch>-unknown-linux-musl --release`, defaulting to the host's architecture; it sets the correct target and profile without requiring you to remember the flags. Pass `--target <triple>` to build for a different musl target.
+
+### Alternative: a host-glibc cdylib
+
+A glibc build is a valid alternative to the musl `cargo exasol-udf build` path: `cargo build --release -p my-udf` — no `--target`, no musl toolchain required. The resulting `.so` loads without change, because the container bundles the glibc runtime matching its own architecture. CI builds every `test-udfs/*` fixture this way.
+
+Use this path when the musl target isn't installed for your host architecture (e.g. aarch64 without `rustup target add aarch64-unknown-linux-musl`), or as a general alternative to the musl build — both artifacts run identically once loaded.
 
 ## 14. Unit testing
 

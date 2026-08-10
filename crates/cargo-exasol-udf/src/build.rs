@@ -4,30 +4,70 @@ use std::process::Command;
 
 use crate::validate::{VTableProbe, enumerate_entry_symbols};
 
-const MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
+/// Map a Rust `std::env::consts::ARCH` value to its musl target triple.
+fn host_triple(arch: &str) -> String {
+    format!("{arch}-unknown-linux-musl")
+}
 
-/// Build the UDF crate at `path` for the musl target and verify the produced artifact exports named entry points.
+#[derive(Debug)]
+struct BuildArgs {
+    path: String,
+    target: String,
+}
+
+/// Parse an optional `--target <triple>` flag out of `args`, along with the
+/// positional crate path. Defaults to the host's musl triple when absent.
+/// Errors if `--target` is given with no following value.
+fn parse_build_args(args: &[String]) -> Result<BuildArgs, String> {
+    let mut path: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--target" {
+            target = Some(
+                args.get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| "--target requires a value".to_string())?,
+            );
+            i += 2;
+        } else {
+            if path.is_none() {
+                path = Some(args[i].clone());
+            }
+            i += 1;
+        }
+    }
+
+    Ok(BuildArgs {
+        path: path.unwrap_or_else(|| ".".to_string()),
+        target: target.unwrap_or_else(|| host_triple(std::env::consts::ARCH)),
+    })
+}
+
+/// Build the UDF crate at `path` for the given (or host) musl target and verify
+/// the produced artifact exports named entry points.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let path = args.first().map(|s| s.as_str()).unwrap_or(".");
-    let crate_dir = Path::new(path);
+    let build_args = parse_build_args(args)?;
+    let target = build_args.target;
+    let crate_dir = Path::new(&build_args.path);
     let cargo_toml = crate_dir.join("Cargo.toml");
 
     if !cargo_toml.exists() {
         return Err(format!(
             "Cargo.toml not found in '{}' — is this a Rust crate?",
-            path
+            build_args.path
         ));
     }
 
     // Parse crate name from Cargo.toml
     let crate_name = parse_crate_name(&cargo_toml)?;
 
-    // Ensure the musl target is installed
-    ensure_musl_target()?;
+    // Ensure the target musl toolchain is installed
+    ensure_musl_target(&target)?;
 
     // Run cargo build
     let status = Command::new("cargo")
-        .args(["build", "--release", "--target", MUSL_TARGET])
+        .args(["build", "--release", "--target", &target])
         .current_dir(crate_dir)
         .status()
         .map_err(|e| format!("failed to run cargo: {}", e))?;
@@ -40,7 +80,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let so_name = format!("lib{}.so", crate_name.replace('-', "_"));
     let so_path = crate_dir
         .join("target")
-        .join(MUSL_TARGET)
+        .join(&target)
         .join("release")
         .join(&so_name);
 
@@ -100,26 +140,26 @@ fn parse_crate_name(cargo_toml: &Path) -> Result<String, String> {
     ))
 }
 
-/// Ensure `x86_64-unknown-linux-musl` target is installed, adding it if missing.
-fn ensure_musl_target() -> Result<(), String> {
+/// Ensure the given musl `target` triple is installed, adding it if missing.
+fn ensure_musl_target(target: &str) -> Result<(), String> {
     let output = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
         .map_err(|e| format!("failed to run rustup: {}", e))?;
 
     let installed = String::from_utf8_lossy(&output.stdout);
-    if installed.lines().any(|l| l.trim() == MUSL_TARGET) {
+    if installed.lines().any(|l| l.trim() == target) {
         return Ok(());
     }
 
-    eprintln!("Installing target {}...", MUSL_TARGET);
+    eprintln!("Installing target {}...", target);
     let status = Command::new("rustup")
-        .args(["target", "add", MUSL_TARGET])
+        .args(["target", "add", target])
         .status()
         .map_err(|e| format!("failed to run rustup target add: {}", e))?;
 
     if !status.success() {
-        return Err(format!("rustup target add {} failed", MUSL_TARGET));
+        return Err(format!("rustup target add {} failed", target));
     }
 
     Ok(())
@@ -192,3 +232,7 @@ fn maybe_emit_sidecar(so_path: &Path, crate_name: &str) -> Result<(), String> {
     println!("Schema sidecar: {}", sidecar_path.display());
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "build_tests.rs"]
+mod tests;

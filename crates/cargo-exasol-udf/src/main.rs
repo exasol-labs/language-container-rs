@@ -8,9 +8,11 @@ use std::process;
 fn usage() -> ! {
     eprintln!("Usage: cargo exasol-udf <subcommand> [args]");
     eprintln!("Subcommands:");
-    eprintln!("  new <path>       Scaffold a new UDF crate at <path>");
-    eprintln!("  build [<path>]   Build the UDF crate (defaults to .)");
-    eprintln!("  validate <path>  Validate a compiled UDF .so");
+    eprintln!("  new <path>                Scaffold a new UDF crate at <path>");
+    eprintln!("  build [<path>] [--target <triple>]");
+    eprintln!("                            Build the UDF crate (defaults to .)");
+    eprintln!("                            --target defaults to the host's musl triple");
+    eprintln!("  validate <path>           Validate a compiled UDF .so");
     process::exit(1);
 }
 
