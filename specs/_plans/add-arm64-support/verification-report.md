@@ -4,17 +4,18 @@
 
 | Result | Details |
 |--------|---------|
-| **PASS** | All automated checks green; every unit-level scenario is covered by a passing test. aarch64 end-to-end and the x86_64 integration suite are gated outside this phase (manual field-test / `it` crate), by plan design. |
+| **PASS** | All automated checks green; the x86_64 integration suite passed live (29 scenarios). aarch64 end-to-end stays manual per decision [6] (no arm64 Exasol DB image). |
 | Code review | 3 findings — 3 fixed |
 
 | Check | Status |
 |-------|--------|
 | Build | ✓ |
-| Tests | ✓ |
+| Tests (unit) | ✓ 306 passed |
+| Integration (x86_64, live DB) | ✓ 29 scenarios |
 | Lint | ✓ |
 | Format | ✓ |
-| Scenario Coverage | ✓ (unit-level; IT + aarch64 manual out of phase) |
-| Manual Tests | Deferred — aarch64/Personal are manual/live per decision [6]; not run here |
+| Scenario Coverage | ✓ (unit + x86_64 IT; aarch64 manual out of phase) |
+| Manual Tests (aarch64/Personal) | Deferred — manual/live per decision [6]; no arm64 DB image |
 
 ## Test Evidence
 
@@ -25,6 +26,7 @@
 | Rust unit + doc (`cargo test`) | 311 | 306 | 5 |
 | Shell — `dist/tests/about_toml_test.sh` | 2 | 2 | 0 |
 | Shell — `scripts/tests/install-personal-test.sh` | 18 | 18 | 0 |
+| Integration — `it` db-roundtrip (`ci-it-local.sh`, x86_64 live DB, `exasol/docker-db:2026.1.0`) | 1 (29 scenarios) | 1 | 0 |
 | Rust cargo-exaudf integration (`tests/build.rs`) | — | — | 3 (`#[ignore]`d; need a musl toolchain) |
 
 The 5 ignored Rust tests are the 3 `cargo-exaudf` build-integration tests (`build_produces_musl_so`, `build_installs_missing_target`, `build_honors_target_override`) plus 2 pre-existing `cli.rs` ignored tests. They build a real musl `.so`; run with `cargo test -p cargo-exasol-udf -- --ignored` on a musl-capable host.
@@ -87,4 +89,6 @@ cargo fmt --check                → exit 0 (no changes)
 - **Cross-language triplication resolved as a cross-reference.** `crates/it/src/lib.rs` `SlcRef::script_languages` rebuilds the same `SCRIPT_LANGUAGES` fragment in Rust; full dedup is infeasible across the shell/`.so` boundary, so review fix added a sync-cross-reference comment in `scripts/lib/script_languages.sh` (finding `[INFORMATION_LEAKAGE]`).
 - **Review fixes:** `[MISSING_BOUNDARY_TEST]` — `parse_build_args` now returns `Result` and errors on a dangling `--target`, with 5 fast unit tests. `[SKIPPED_TEST]` — `dist/tests/about_toml_test.sh` wired into the x86_64 unit-test CI leg. `[INFORMATION_LEAKAGE]` — cross-reference comment as above.
 - **CI:** the arm64 leg (`ubuntu-24.04-arm`) runs `cargo build --workspace` + unit tests only; IT stays x86_64 (decision [6]). Both new shell test suites run in the x86_64 unit-test job.
-- **Deferred to the outer gate / manual field test:** the x86_64 `it` integration suite (orchestrator step 6) and all aarch64/Personal live scenarios (no arm64 Exasol DB image exists).
+- **Integration suite passed live.** `scripts/ci-it-local.sh` (replays the CI `integration` job: fresh `0.22.0` SLC build → `exasol/docker-db:2026.1.0` → 29 db-roundtrip scenarios) → exit 0, all scenarios ok. Ran with the fix-validating memory config (`DB_MEM='4 GiB' MEM=12g SHM=2g`).
+- **Local-harness note (not a code defect, follow-up):** the first IT run false-failed with a fingerprint mismatch (`.so` at `0.21.3` vs SLC `0.22.0`) because `scripts/ci-it-local.sh`'s step-2 `-p` build list omits three fixtures (`numeric-temporal-emit`, `numeric-temporal-ingest`, `handshake-meta`) that `.github/workflows/ci.yml` DOES build. CI is unaffected (clean runner builds all fixtures fresh); only stale local `target/release` copies triggered it. Rebuilding those three at `0.22.0` made the suite green. Worth syncing `ci-it-local.sh`'s list to `ci.yml` in a separate change.
+- **Deferred to manual field test:** all aarch64/Personal live scenarios (no arm64 Exasol DB image exists).
