@@ -6,10 +6,7 @@
 
 ## Prerequisites
 
-- Rust 1.94+ with the musl target:
-  ```bash
-  rustup target add x86_64-unknown-linux-musl
-  ```
+- Rust 1.94+.
 - `cargo-exasol-udf` installed from crates.io (or `--path crates/cargo-exasol-udf` from this workspace):
   ```bash
   cargo install cargo-exasol-udf
@@ -595,11 +592,11 @@ Use the returned IP when constructing the `CONNECTION` object, or store it in a 
 ## 13. Build and deploy
 
 ```bash
-# Cross-compile to a musl .so (release profile, stripped)
+# Build a glibc cdylib .so (release profile, stripped)
 cargo exasol-udf build
 
 # Artifact:
-#   target/x86_64-unknown-linux-musl/release/libmy_udf.so
+#   target/release/libmy_udf.so
 
 # Upload to BucketFS via the HTTP API or your admin tooling, then register:
 ```
@@ -611,7 +608,7 @@ RETURNS BIGINT AS
 /
 ```
 
-`cargo exasol-udf build` is equivalent to `cargo build --target x86_64-unknown-linux-musl --release`; it sets the correct target and profile without requiring you to remember the flags.
+`cargo exasol-udf build` defaults to the host glibc target and the release profile; pass `--target <triple>` to override the target without remembering the underlying `cargo build` flags.
 
 ## 14. Unit testing
 

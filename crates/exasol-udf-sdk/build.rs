@@ -5,9 +5,8 @@ fn main() {
     // The rustc version string identifies the ABI-relevant toolchain. It must be
     // derived the same way for both the host runtime and the UDF `.so`, so it is
     // taken purely from `rustc --version` and never from build-time toggles like
-    // `RUSTC_BOOTSTRAP` (which the UDF `cargo -Z build-std` invocation sets but
-    // the client build does not — conflating them made the two fingerprints
-    // disagree and every UDF load fail the fingerprint check).
+    // `RUSTC_BOOTSTRAP` — conflating a toggle-dependent value here would make the
+    // two fingerprints disagree and every UDF load fail the fingerprint check.
     let rustc_hash = {
         let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
         let output = std::process::Command::new(rustc)

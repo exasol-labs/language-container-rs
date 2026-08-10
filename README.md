@@ -58,14 +58,14 @@ pub fn double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
 ```bash
 cargo exasol-udf build
-# → target/x86_64-unknown-linux-musl/release/libdouble.so
+# → target/release/libdouble.so
 ```
 
 **Deploy**
 
 ```bash
 exapump bfs upload \
-    target/x86_64-unknown-linux-musl/release/libdouble.so \
+    target/release/libdouble.so \
     /buckets/bfsdefault/default/udf/libdouble.so
 ```
 
@@ -116,7 +116,7 @@ Three crates are published to [crates.io](https://crates.io) for UDF authors; th
 |-------|----------|---------|
 | [`exasol-udf-sdk`](https://crates.io/crates/exasol-udf-sdk) | UDF authors | `UdfRun`/`UdfContext` traits, `Value`/`ExaType`, Arrow bridge |
 | [`exasol-udf-macros`](https://crates.io/crates/exasol-udf-macros) | UDF authors | `#[exasol_udf]` proc-macro |
-| [`cargo-exasol-udf`](https://crates.io/crates/cargo-exasol-udf) | Build tooling | Scaffold, build (static musl `.so`), validate |
+| [`cargo-exasol-udf`](https://crates.io/crates/cargo-exasol-udf) | Build tooling | Scaffold, build (glibc cdylib `.so`), validate |
 
 ## Documentation
 

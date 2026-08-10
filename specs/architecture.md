@@ -38,7 +38,7 @@ their rationale are recorded in [`decision-log.md`](decision-log.md).
                           │
                           ▼
 ┌────────────────────────────────────────────────────┐
-│  user libudf.so  (static musl cdylib)              │
+│  user libudf.so  (glibc cdylib)                    │
 │  #[exasol_udf]  →  UdfRun / UdfContext             │
 │  trait objects stay host-side; only Value crosses  │
 └────────────────────────────────────────────────────┘
@@ -88,7 +88,7 @@ lc-rs/
 │   ├── exasol-udf-macros/      # PUBLIC: proc-macro #[exasol_udf]
 │   ├── exa-udf-runtime/        # host: loads .so, drives protocol ↔ SDK
 │   ├── exaudfclient/           # binary: /exaudf/exaudfclient
-│   ├── cargo-exasol-udf/       # PUBLIC: CLI — scaffold + build musl .so
+│   ├── cargo-exasol-udf/       # PUBLIC: CLI — scaffold + build the cdylib .so
 │   └── it/                     # integration tests (live Exasol Docker, `--features integration`)
 ├── test-udfs/                  # example/fixture UDF crates exercised by the integration tests
 ├── scripts/                    # install.sh (build + upload + register), ci-it-local.sh
