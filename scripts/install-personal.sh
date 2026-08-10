@@ -62,7 +62,9 @@ Environment:
   SLC_TARBALL                Use this prebuilt tarball instead of running
                              \`docker build\`
 
-Requires: jq, ssh/scp, exapump, and Docker unless SLC_TARBALL is set.
+Requires: jq, ssh/scp, exapump, and (unless SLC_TARBALL is set) Docker plus
+cargo-about (with network access for the GCC-exception fetch), used by the
+default license-bundle build via dist/generate-licenses.sh.
 
 Registration uses ALTER SYSTEM so it survives a restart, and preserves every
 pre-existing SCRIPT_LANGUAGES entry. Re-run the script after

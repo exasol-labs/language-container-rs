@@ -79,6 +79,13 @@ SLC_TARBALL=/path/to/lc-rs.tar.gz \
 Requires `jq`, `ssh`/`scp`, `exapump`, and Docker unless `SLC_TARBALL` is set.
 Full option reference: `scripts/install-personal.sh --help`.
 
+> **Building UDFs for Personal:** the UDF `.so` itself must be built on — or
+> inside — a Linux environment matching the deployment's architecture (an aarch64
+> Linux host or container for an Apple Silicon Personal). A macOS host cannot emit
+> a Linux `.so` natively: there is no Linux cross-linker or sysroot, so neither a
+> native `cargo` build nor `cargo exasol-udf build` produces a loadable artifact
+> there. Build in the same Linux aarch64 environment the SLC uses.
+
 | Step | What it does, and why |
 |------|-----------------------|
 | Read the connection details | Takes `connection.sshPort` and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. |
