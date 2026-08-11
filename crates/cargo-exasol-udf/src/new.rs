@@ -40,8 +40,11 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk = {{ version = "0.1", features = [] }}
-exasol-udf-macros = {{ version = "0.1" }}
+exasol-udf-sdk = {{ version = "0.21", features = [] }}
+exasol-udf-macros = {{ version = "0.21" }}
+
+[profile.release]
+strip = true
 "#
     );
     let cargo_path = target.join("Cargo.toml");

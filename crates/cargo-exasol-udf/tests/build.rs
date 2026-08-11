@@ -1,6 +1,7 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn cargo_exasol_udf_bin() -> std::path::PathBuf {
+fn cargo_exasol_udf_bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     loop {
         p.pop();
@@ -15,17 +16,9 @@ fn cargo_exasol_udf_bin() -> std::path::PathBuf {
     p
 }
 
-fn rustup_available() -> bool {
-    Command::new("rustup").arg("--version").output().is_ok()
-}
-
-fn host_triple() -> String {
-    format!("{}-unknown-linux-musl", std::env::consts::ARCH)
-}
-
 /// Scaffold a minimal cdylib crate in `dir` using cargo-exasol-udf new,
 /// then return the path to it.
-fn scaffold_udf_crate(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+fn scaffold_udf_crate(parent: &Path, name: &str) -> PathBuf {
     let udf_path = parent.join(name);
     let status = Command::new(cargo_exasol_udf_bin())
         .args(["exasol-udf", "new", udf_path.to_str().unwrap()])
@@ -35,16 +28,94 @@ fn scaffold_udf_crate(parent: &std::path::Path, name: &str) -> std::path::PathBu
     udf_path
 }
 
-#[test]
-#[ignore = "requires musl toolchain and cargo; run with --ignored"]
-fn build_produces_musl_so() {
-    if !rustup_available() {
-        eprintln!("SKIP: rustup not available");
-        return;
-    }
+/// Point the scaffold's crates.io SDK/macros deps at the in-repo workspace
+/// crates so the build resolves against the LOCAL SDK, with no dependency on a
+/// published crates.io version. Paths are canonicalized to absolute form —
+/// a relative path written into the tempdir Cargo.toml would resolve against
+/// the tempdir, not the repo.
+fn patch_scaffold_to_local_sdk(udf_path: &Path) {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let sdk = workspace_root
+        .join("crates/exasol-udf-sdk")
+        .canonicalize()
+        .expect("exasol-udf-sdk crate path");
+    let macros = workspace_root
+        .join("crates/exasol-udf-macros")
+        .canonicalize()
+        .expect("exasol-udf-macros crate path");
 
+    let cargo_toml = udf_path.join("Cargo.toml");
+    let mut contents = std::fs::read_to_string(&cargo_toml).unwrap();
+    contents.push_str(&format!(
+        "\n[patch.crates-io]\nexasol-udf-sdk = {{ path = \"{}\" }}\nexasol-udf-macros = {{ path = \"{}\" }}\n",
+        sdk.display(),
+        macros.display(),
+    ));
+    std::fs::write(&cargo_toml, contents).unwrap();
+}
+
+/// Read the host target triple from `rustc -vV` (the `host:` line). The host
+/// target is installed by definition, so a native `--target <host>` build needs
+/// no `rustup target add`.
+fn host_target_triple() -> String {
+    let output = Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("failed to run rustc -vV");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc -vV has no host: line")
+        .trim()
+        .to_string()
+}
+
+/// Set an explicit `[lib] name` on the scaffold, diverging the cdylib output
+/// filename from the package name. `build` must honor it when computing the
+/// artifact path.
+fn set_lib_name(udf_path: &Path, lib_name: &str) {
+    let cargo_toml = udf_path.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&cargo_toml).unwrap();
+    let patched = contents.replacen(
+        "[lib]\ncrate-type = [\"cdylib\"]",
+        &format!("[lib]\nname = \"{lib_name}\"\ncrate-type = [\"cdylib\"]"),
+        1,
+    );
+    std::fs::write(&cargo_toml, patched).unwrap();
+}
+
+/// Drop the `cdylib` crate-type so `cargo build --release` still succeeds but
+/// produces no `.so` — reproducing the case where the artifact is missing at
+/// the path `build` computed.
+fn drop_cdylib_crate_type(udf_path: &Path) {
+    let cargo_toml = udf_path.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&cargo_toml).unwrap();
+    let patched = contents.replacen("crate-type = [\"cdylib\"]", "crate-type = [\"rlib\"]", 1);
+    std::fs::write(&cargo_toml, patched).unwrap();
+}
+
+/// Enumerate exported `__exa_udf_entry_<NAME>` symbols in the built `.so` via
+/// `nm`, returning the `<NAME>` suffixes.
+fn entry_symbols(so_path: &Path) -> Vec<String> {
+    let output = Command::new("nm")
+        .args(["--dynamic", "--defined-only"])
+        .arg(so_path)
+        .output()
+        .expect("failed to run nm");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter_map(|sym| sym.strip_prefix("__exa_udf_entry_").map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn build_produces_host_cdylib() {
     let dir = tempfile::tempdir().unwrap();
     let udf_path = scaffold_udf_crate(dir.path(), "test-build-udf");
+    patch_scaffold_to_local_sdk(&udf_path);
 
     let output = Command::new(cargo_exasol_udf_bin())
         .args(["exasol-udf", "build", udf_path.to_str().unwrap()])
@@ -53,29 +124,41 @@ fn build_produces_musl_so() {
 
     assert!(
         output.status.success(),
-        "build should succeed: {}",
+        "build should succeed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let triple = host_triple();
     assert!(
-        stdout.contains(&triple) && stdout.contains(".so"),
-        "stdout should print .so path: {stdout}"
+        stdout.contains("target/release/libtest_build_udf.so"),
+        "stdout should print the host cdylib path: {stdout}"
+    );
+    assert!(
+        !stdout.contains("x86_64-unknown-linux-musl"),
+        "stdout must not reference the musl triple: {stdout}"
+    );
+
+    let so_path = udf_path.join("target/release/libtest_build_udf.so");
+    assert!(
+        so_path.exists(),
+        "built .so should exist at {}",
+        so_path.display()
+    );
+
+    let entries = entry_symbols(&so_path);
+    assert!(
+        !entries.is_empty(),
+        "built .so should export at least one __exa_udf_entry_<NAME> symbol, found none"
     );
 }
 
 #[test]
-#[ignore = "requires musl toolchain and cargo; run with --ignored"]
 fn build_honors_target_override() {
-    if !rustup_available() {
-        eprintln!("SKIP: rustup not available");
-        return;
-    }
-
+    let host = host_target_triple();
     let dir = tempfile::tempdir().unwrap();
-    let udf_path = scaffold_udf_crate(dir.path(), "test-target-override-udf");
-    let triple = host_triple();
+    let udf_path = scaffold_udf_crate(dir.path(), "test-target-udf");
+    patch_scaffold_to_local_sdk(&udf_path);
 
     let output = Command::new(cargo_exasol_udf_bin())
         .args([
@@ -83,47 +166,88 @@ fn build_honors_target_override() {
             "build",
             udf_path.to_str().unwrap(),
             "--target",
-            &triple,
+            &host,
         ])
         .output()
         .expect("failed to run cargo-exasol-udf build");
 
     assert!(
         output.status.success(),
-        "build should succeed: {}",
+        "build --target {host} should succeed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("target/{host}/release/libtest_target_udf.so");
     assert!(
-        stdout.contains(&triple) && stdout.contains(".so"),
-        "stdout should print .so path for the overridden target: {stdout}"
+        stdout.contains(&expected),
+        "stdout should print the per-target cdylib path {expected}: {stdout}"
+    );
+
+    let so_path = udf_path.join(&expected);
+    assert!(
+        so_path.exists(),
+        "built .so should exist at {}",
+        so_path.display()
     );
 }
 
 #[test]
-#[ignore = "requires musl toolchain and cargo; run with --ignored"]
-fn build_installs_missing_target() {
-    if !rustup_available() {
-        eprintln!("SKIP: rustup not available");
-        return;
-    }
-    // We just verify the binary runs without crashing even if target needs installing
+fn build_honors_explicit_lib_name() {
     let dir = tempfile::tempdir().unwrap();
-    let udf_path = scaffold_udf_crate(dir.path(), "test-install-target-udf");
+    let udf_path = scaffold_udf_crate(dir.path(), "test-libname-udf");
+    patch_scaffold_to_local_sdk(&udf_path);
+    set_lib_name(&udf_path, "renamed_output");
 
-    // The build command should attempt rustup target add if needed and proceed
     let output = Command::new(cargo_exasol_udf_bin())
         .args(["exasol-udf", "build", udf_path.to_str().unwrap()])
         .output()
         .expect("failed to run cargo-exasol-udf build");
 
-    // Either it succeeds (target already present or freshly installed) or fails on
-    // compilation error — but it must not panic or skip the rustup step
+    assert!(
+        output.status.success(),
+        "build should honor [lib] name and succeed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("target/release/librenamed_output.so"),
+        "stdout should print the [lib] name-derived cdylib path: {stdout}"
+    );
+
+    let so_path = udf_path.join("target/release/librenamed_output.so");
+    assert!(
+        so_path.exists(),
+        "built .so should exist at {}",
+        so_path.display()
+    );
+}
+
+#[test]
+fn build_fails_when_artifact_missing_at_expected_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let udf_path = scaffold_udf_crate(dir.path(), "test-missing-artifact-udf");
+    patch_scaffold_to_local_sdk(&udf_path);
+    drop_cdylib_crate_type(&udf_path);
+
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "build", udf_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run cargo-exasol-udf build");
+
+    assert!(
+        !output.status.success(),
+        "build must fail when cargo succeeds but no artifact exists at the expected path:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("thread 'main' panicked"),
-        "build must not panic: {stderr}"
+        stderr.contains("no artifact was produced"),
+        "error should explain the missing artifact: {stderr}"
     );
 }
 

@@ -25,9 +25,9 @@ Pick a row by where the target database runs, then follow that row's install pat
 
 | Platform | Release tarball | Install path | UDF build target |
 |----------|------------------|---------------|-------------------|
-| Docker-db (local, x86_64) | `lc-rust-<version>.tar.gz` | [Automated](#automated-install-scriptsinstallsh) | `cargo exasol-udf build` (host default: `x86_64-unknown-linux-musl`) |
-| Exasol SaaS (x86_64 backend) | `lc-rust-<version>.tar.gz` | [Manual](#manual-install) | `cargo exasol-udf build` on an x86_64 host, or `--target x86_64-unknown-linux-musl` |
-| Exasol Personal (Apple Silicon, aarch64) | `lc-rust-<version>-aarch64.tar.gz` | [Exasol Personal](#exasol-personal-install-scriptsinstall-personalsh) | `cargo exasol-udf build` (host default: `aarch64-unknown-linux-musl`), or `--target aarch64-unknown-linux-musl` on an x86_64 host |
+| Docker-db (local, x86_64) | `lc-rust-<version>.tar.gz` | [Automated](#automated-install-scriptsinstallsh) | `cargo exasol-udf build` (glibc cdylib, host default `x86_64-unknown-linux-gnu`) |
+| Exasol SaaS (x86_64 backend) | `lc-rust-<version>.tar.gz` | [Manual](#manual-install) | `cargo exasol-udf build` on an x86_64 host (glibc cdylib), or `--target x86_64-unknown-linux-gnu` |
+| Exasol Personal (Apple Silicon, aarch64) | `lc-rust-<version>-aarch64.tar.gz` | [Exasol Personal](#exasol-personal-install-scriptsinstall-personalsh) | `cargo exasol-udf build` on/in a Linux aarch64 host (glibc cdylib, host default `aarch64-unknown-linux-gnu`); a macOS host cannot emit a Linux `.so` natively |
 
 The UDF `.so`'s architecture must match the SLC's. Build on a host of the same architecture as the target database, or cross the gap with `--target` (see [Writing a Rust UDF §13](writing-a-udf.md#13-build-and-deploy)).
 

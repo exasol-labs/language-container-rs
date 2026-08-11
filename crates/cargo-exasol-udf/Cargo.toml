@@ -5,7 +5,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 edition = "2024"
-description = "Cargo subcommand to scaffold, build (static musl .so), and validate Exasol Rust UDF crates."
+description = "Cargo subcommand to scaffold, build (glibc cdylib .so), and validate Exasol Rust UDF crates."
 
 [[bin]]
 name = "cargo-exasol-udf"

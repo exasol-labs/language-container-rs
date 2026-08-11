@@ -6,15 +6,30 @@
 
 ## Prerequisites
 
-- Rust 1.94+ with the musl target matching your host architecture (`cargo exasol-udf build` installs it automatically if missing; to add it manually):
-  ```bash
-  rustup target add x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl on ARM
-  ```
+- Rust 1.94+.
 - `cargo-exasol-udf` installed from crates.io (or `--path crates/cargo-exasol-udf` from this workspace):
   ```bash
   cargo install cargo-exasol-udf
   ```
 - A running Exasol cluster with BucketFS write access.
+
+### Build environment
+
+`cargo exasol-udf build` runs a **host** `cargo build --release`, so the `.so` is
+linked against the build machine's C library. The deployable artifact must be a
+Linux `x86_64` ELF whose glibc version is **no newer than the SLC's** (the shipped
+container bundles glibc ~2.36, from `rust:1.94-bookworm`). Otherwise:
+
+- Building on a host with a **newer glibc** (e.g. Ubuntu 24.04 ships glibc 2.39)
+  produces a `.so` that references `GLIBC_2.3x` symbols the container lacks. It
+  uploads fine, then fails at `dlopen` in the container at runtime as a raw loader
+  error — the ABI fingerprint check covers the SDK version and rustc, not glibc.
+- On **macOS/Windows** the host build emits a `.dylib`/`.dll`, not a Linux ELF; the
+  tool has no deployable artifact to produce and errors with "no artifact produced".
+
+Build inside `rust:1.94-bookworm` (or an equivalent Linux `x86_64` host whose glibc
+is ≤ the SLC's) to guarantee a loadable artifact. Use `--target <triple>` only for a
+native build on another installed target, not to cross the glibc boundary.
 
 ## 1. Scaffold a UDF crate
 
@@ -595,11 +610,11 @@ Use the returned IP when constructing the `CONNECTION` object, or store it in a 
 ## 13. Build and deploy
 
 ```bash
-# Compile to a musl .so for the host architecture (release profile, stripped)
+# Build a glibc cdylib .so (release profile; the scaffold strips symbols)
 cargo exasol-udf build
 
 # Artifact:
-#   target/<host-arch>-unknown-linux-musl/release/libmy_udf.so
+#   target/release/libmy_udf.so
 
 # Upload to BucketFS via the HTTP API or your admin tooling, then register:
 ```
@@ -611,13 +626,7 @@ RETURNS BIGINT AS
 /
 ```
 
-`cargo exasol-udf build` is equivalent to `cargo build --target <host-arch>-unknown-linux-musl --release`, defaulting to the host's architecture; it sets the correct target and profile without requiring you to remember the flags. Pass `--target <triple>` to build for a different musl target.
-
-### Alternative: a host-glibc cdylib
-
-A glibc build is a valid alternative to the musl `cargo exasol-udf build` path: `cargo build --release -p my-udf` — no `--target`, no musl toolchain required. The resulting `.so` loads without change, because the container bundles the glibc runtime matching its own architecture. CI builds every `test-udfs/*` fixture this way.
-
-Use this path when the musl target isn't installed for your host architecture (e.g. aarch64 without `rustup target add aarch64-unknown-linux-musl`), or as a general alternative to the musl build — both artifacts run identically once loaded.
+`cargo exasol-udf build` defaults to the host glibc target and the release profile; pass `--target <triple>` to override the target without remembering the underlying `cargo build` flags.
 
 ## 14. Unit testing
 

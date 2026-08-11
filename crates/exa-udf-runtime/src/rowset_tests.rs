@@ -891,17 +891,16 @@ fn single_call_context_returns_handshake_metadata() {
 // -----------------------------------------------------------------------
 // Telemetry tests (tasks 2.15 — 5.4)
 // -----------------------------------------------------------------------
-
-/// Serialises tests that install tracing subscribers via `with_default`.
-///
-/// Any `tracing::subscriber::with_default` call that installs a
-/// DEBUG-level subscriber can, upon first use of a `debug!` callsite,
-/// trigger `rebuild_interest_cache` which updates the process-global
-/// `MAX_LEVEL` atomic.  Concurrent tests that also assert on captured
-/// debug output may see the wrong `MAX_LEVEL` and have their events
-/// silently dropped by the macro fast-path check.  Holding this lock for
-/// the full duration of any such test eliminates the race.
-static GLOBAL_LEVEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+//
+// The tracing-capture tests below (`telemetry_emitted_at_debug_level_only`,
+// `emit_flush_path_instrumented`, `emit_push_periodic_checkpoint_at_10_000_rows`)
+// depend on process-global `tracing` callsite state: a test that touches an
+// `emit_push`/`emit_flush` callsite with no debug subscriber installed caches
+// its `Interest` as `never()` process-wide, which then silently drops these
+// tests' events. This binary is therefore run single-threaded in CI (see the
+// dedicated `-p exa-udf-runtime -- --test-threads=1` coverage invocation in
+// `.github/workflows/ci.yml`); serialising the whole binary — not just these
+// three tests — is what removes the race, so no per-test lock is used here.
 
 /// A `MakeWriter` that appends to a shared `Mutex<Vec<u8>>`.
 ///
@@ -935,15 +934,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LockedWriter {
 /// Uses a `Mutex<Vec<u8>>` capture writer and `tracing::subscriber::with_default`
 /// with a `reload::Layer` so `filter_handle.modify` triggers
 /// `rebuild_interest_cache()`, which resets any previously cached callsite
-/// interests.  Holds `GLOBAL_LEVEL_LOCK` to prevent concurrent tests from
-/// racing on the global `MAX_LEVEL` atomic.
+/// interests.  Relies on this binary running single-threaded (see the module
+/// header) so no concurrent test can re-poison the callsite cache.
 #[test]
 fn telemetry_emitted_at_debug_level_only() {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use tracing_subscriber::reload;
-
-    let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let capture_with_level = |level: tracing::Level| -> String {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1007,8 +1004,6 @@ fn emit_flush_path_instrumented() {
     use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use tracing_subscriber::reload;
 
-    let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let initial = tracing_subscriber::EnvFilter::new("info");
     let (filter_layer, filter_handle) = reload::Layer::new(initial);
@@ -1041,8 +1036,6 @@ fn emit_push_periodic_checkpoint_at_10_000_rows() {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use tracing_subscriber::reload;
-
-    let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let initial = tracing_subscriber::EnvFilter::new("info");

@@ -4,70 +4,32 @@ use std::process::Command;
 
 use crate::validate::{VTableProbe, enumerate_entry_symbols};
 
-/// Map a Rust `std::env::consts::ARCH` value to its musl target triple.
-fn host_triple(arch: &str) -> String {
-    format!("{arch}-unknown-linux-musl")
-}
-
-#[derive(Debug)]
-struct BuildArgs {
-    path: String,
-    target: String,
-}
-
-/// Parse an optional `--target <triple>` flag out of `args`, along with the
-/// positional crate path. Defaults to the host's musl triple when absent.
-/// Errors if `--target` is given with no following value.
-fn parse_build_args(args: &[String]) -> Result<BuildArgs, String> {
-    let mut path: Option<String> = None;
-    let mut target: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--target" {
-            target = Some(
-                args.get(i + 1)
-                    .cloned()
-                    .ok_or_else(|| "--target requires a value".to_string())?,
-            );
-            i += 2;
-        } else {
-            if path.is_none() {
-                path = Some(args[i].clone());
-            }
-            i += 1;
-        }
-    }
-
-    Ok(BuildArgs {
-        path: path.unwrap_or_else(|| ".".to_string()),
-        target: target.unwrap_or_else(|| host_triple(std::env::consts::ARCH)),
-    })
-}
-
-/// Build the UDF crate at `path` for the given (or host) musl target and verify
-/// the produced artifact exports named entry points.
+/// Build the UDF crate at `path` as a host glibc-dynamic cdylib and verify the
+/// produced artifact exports named entry points. A `--target <triple>` override
+/// builds natively for an installed target, into `target/<triple>/release`.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let build_args = parse_build_args(args)?;
-    let target = build_args.target;
-    let crate_dir = Path::new(&build_args.path);
+    let (path, target) = parse_build_args(args)?;
+    let crate_dir = Path::new(path);
     let cargo_toml = crate_dir.join("Cargo.toml");
 
     if !cargo_toml.exists() {
         return Err(format!(
             "Cargo.toml not found in '{}' — is this a Rust crate?",
-            build_args.path
+            path
         ));
     }
 
-    // Parse crate name from Cargo.toml
     let crate_name = parse_crate_name(&cargo_toml)?;
+    // Cargo derives the cdylib filename from `[lib] name` when it is set,
+    // falling back to the package name otherwise.
+    let lib_name = parse_lib_name(&cargo_toml)?.unwrap_or_else(|| crate_name.clone());
 
-    // Ensure the target musl toolchain is installed
-    ensure_musl_target(&target)?;
-
-    // Run cargo build
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--target", &target])
+    let mut cargo = Command::new("cargo");
+    cargo.args(["build", "--release"]);
+    if let Some(triple) = target {
+        cargo.args(["--target", triple]);
+    }
+    let status = cargo
         .current_dir(crate_dir)
         .status()
         .map_err(|e| format!("failed to run cargo: {}", e))?;
@@ -76,36 +38,59 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err(format!("cargo build failed with status: {}", status));
     }
 
-    // Print the .so path
-    let so_name = format!("lib{}.so", crate_name.replace('-', "_"));
-    let so_path = crate_dir
-        .join("target")
-        .join(&target)
-        .join("release")
-        .join(&so_name);
+    let so_name = format!("lib{}.so", lib_name.replace('-', "_"));
+    let mut release_dir = crate_dir.join("target");
+    if let Some(triple) = target {
+        release_dir = release_dir.join(triple);
+    }
+    let so_path = release_dir.join("release").join(&so_name);
 
     println!("{}", so_path.display());
 
-    // Verify the artifact exports at least one named entry point.
-    if so_path.exists() {
-        let entry_names = enumerate_entry_symbols(&so_path).unwrap_or_default();
-        if entry_names.is_empty() {
-            return Err(format!(
-                "build produced '{}' but it exports no __exa_udf_entry_<NAME> symbols; \
-                 annotate at least one function with #[exasol_udf]",
-                so_path.display()
-            ));
-        }
+    if !so_path.exists() {
+        return Err(format!(
+            "cargo build succeeded but no artifact was produced at '{}'",
+            so_path.display()
+        ));
     }
 
-    // Try to emit schema sidecar if annotated schemas are present
-    if so_path.exists()
-        && let Err(e) = maybe_emit_sidecar(&so_path, &crate_name)
-    {
+    let entry_names = enumerate_entry_symbols(&so_path)
+        .map_err(|e| format!("could not inspect '{}': {}", so_path.display(), e))?;
+    if entry_names.is_empty() {
+        return Err(format!(
+            "build produced '{}' but it exports no __exa_udf_entry_<NAME> symbols; \
+             annotate at least one function with #[exasol_udf]",
+            so_path.display()
+        ));
+    }
+
+    if let Err(e) = maybe_emit_sidecar(&so_path, &crate_name) {
         eprintln!("warning: could not emit schema sidecar: {}", e);
     }
 
     Ok(())
+}
+
+/// Parse the build subcommand args into `(crate_path, optional_target_triple)`.
+/// `--target <triple>` selects a native build into `target/<triple>/release`;
+/// the first bare argument is the crate path (default `.`).
+fn parse_build_args(args: &[String]) -> Result<(&str, Option<&str>), String> {
+    let mut path: Option<&str> = None;
+    let mut target: Option<&str> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--target" => {
+                let triple = iter
+                    .next()
+                    .ok_or_else(|| "--target requires a target triple".to_string())?;
+                target = Some(triple.as_str());
+            }
+            other if path.is_none() => path = Some(other),
+            _ => {}
+        }
+    }
+    Ok((path.unwrap_or("."), target))
 }
 
 /// Parse `name = "..."` from the `[package]` section of Cargo.toml.
@@ -140,29 +125,36 @@ fn parse_crate_name(cargo_toml: &Path) -> Result<String, String> {
     ))
 }
 
-/// Ensure the given musl `target` triple is installed, adding it if missing.
-fn ensure_musl_target(target: &str) -> Result<(), String> {
-    let output = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .map_err(|e| format!("failed to run rustup: {}", e))?;
+/// Parse an explicit `name = "..."` from the `[lib]` section of Cargo.toml, if
+/// present. Cargo derives the cdylib output filename from this when set, so the
+/// build must honor it rather than assuming the artifact is named after the
+/// package. Returns `Ok(None)` when no `[lib] name` is declared.
+fn parse_lib_name(cargo_toml: &Path) -> Result<Option<String>, String> {
+    let contents = std::fs::read_to_string(cargo_toml)
+        .map_err(|e| format!("cannot read '{}': {}", cargo_toml.display(), e))?;
 
-    let installed = String::from_utf8_lossy(&output.stdout);
-    if installed.lines().any(|l| l.trim() == target) {
-        return Ok(());
+    let mut in_lib = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[lib]" {
+            in_lib = true;
+            continue;
+        }
+        if in_lib && trimmed.starts_with('[') {
+            // Left the [lib] section
+            break;
+        }
+        if in_lib
+            && trimmed.starts_with("name")
+            && let Some(value) = trimmed
+                .split_once('=')
+                .map(|x| x.1.trim().trim_matches('"'))
+        {
+            return Ok(Some(value.to_string()));
+        }
     }
 
-    eprintln!("Installing target {}...", target);
-    let status = Command::new("rustup")
-        .args(["target", "add", target])
-        .status()
-        .map_err(|e| format!("failed to run rustup target add: {}", e))?;
-
-    if !status.success() {
-        return Err(format!("rustup target add {} failed", target));
-    }
-
-    Ok(())
+    Ok(None)
 }
 
 /// Attempt to dlopen the `.so` and emit a `<name>.udf-meta.json` sidecar
@@ -232,7 +224,3 @@ fn maybe_emit_sidecar(so_path: &Path, crate_name: &str) -> Result<(), String> {
     println!("Schema sidecar: {}", sidecar_path.display());
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "build_tests.rs"]
-mod tests;

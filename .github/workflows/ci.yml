@@ -182,11 +182,26 @@ jobs:
 
       - name: Run unit tests with coverage
         # it excluded: its db_roundtrip test needs a live Exasol container.
+        #
+        # exa-udf-runtime is split into its own single-threaded pass. Its
+        # tracing-capture telemetry tests share process-global `tracing`
+        # callsite state: a sibling test that touches an emit_push/emit_flush
+        # callsite with no debug subscriber caches its Interest as never()
+        # process-wide, silently dropping the capture tests' events. Running
+        # that one binary with --test-threads=1 removes the race without
+        # serialising the whole workspace. Coverage from both passes is
+        # accumulated (--no-report) and merged into a single report.
         run: |
-          cargo llvm-cov \
+          cargo llvm-cov --no-report \
             --exclude it \
+            --exclude exa-udf-runtime \
             --workspace \
+            --all-features
+          cargo llvm-cov --no-report \
+            --package exa-udf-runtime \
             --all-features \
+            -- --test-threads=1
+          cargo llvm-cov report \
             --lcov --output-path lcov-unit.info
 
       - name: Upload unit coverage

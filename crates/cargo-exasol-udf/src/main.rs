@@ -10,8 +10,9 @@ fn usage() -> ! {
     eprintln!("Subcommands:");
     eprintln!("  new <path>                Scaffold a new UDF crate at <path>");
     eprintln!("  build [<path>] [--target <triple>]");
-    eprintln!("                            Build the UDF crate (defaults to .)");
-    eprintln!("                            --target defaults to the host's musl triple");
+    eprintln!("                            Build the UDF crate as a host glibc-dynamic");
+    eprintln!("                            cdylib (defaults to .); --target overrides the");
+    eprintln!("                            build target (native builds only)");
     eprintln!("  validate <path>           Validate a compiled UDF .so");
     process::exit(1);
 }
