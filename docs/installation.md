@@ -116,6 +116,35 @@ Re-running after `exasol stop && exasol start` is the supported way to recover:
 it picks up the reassigned SSH port and replaces its own `RUST` entry without
 disturbing the others.
 
+### Exasol Personal on a cloud backend
+
+The steps above cover a **local** Personal deployment (a VM on this machine).
+Personal can also run on a cloud backend (`aws`/`azure`/`exoscale`/`stackit`):
+that VM reaches the DB over the network and exposes the ordinary BucketFS HTTP
+endpoint, so the SSH transport above does not apply to it — it uses the same
+HTTP upload-and-register path as the [automated install](#automated-install-scriptsinstallsh).
+
+`scripts/install.sh --deployment` handles both cases from the same flag: it
+reads `deployment.json`'s `.backend` field in
+`~/.exasol/personal/deployments/<name>/` and picks the transport at runtime —
+`"local"` keeps the SSH path above unchanged; any other value resolves the DB
+host, port, and user from `deployment.json`'s `.connection` object and the DB
+password from the sibling `secrets.json`'s `.dbPassword`, then uploads over
+HTTP exactly as the automated path does.
+
+Because cloud Personal provisions no BucketFS password, `--bfs-password` is
+**required** for a cloud deployment (unlike the local path, which needs none):
+
+```bash
+scripts/install.sh --deployment my-cloud-db --bfs-password <bfs-write-password>
+```
+
+`--host`, `--port`, `--user`, and `--password` still work as explicit
+overrides of the descriptor-derived values, and `--scope` behaves as it does
+without `--deployment` (default `SESSION`) — the cloud path does not force
+`SYSTEM` the way the local path does. Full option reference:
+`scripts/install.sh --help`.
+
 ## Manual install
 
 Use this path when `exapump` can't reach BucketFS or the DB directly. Every step below

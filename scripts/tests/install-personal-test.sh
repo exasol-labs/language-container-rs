@@ -121,6 +121,173 @@ some unexpected banner" >/dev/null 2>&1
   check "output that is not a list of ALIAS=… entries fails loudly" "1" "$?"
 }
 
+reset_connection_globals() {
+  HOST=""
+  PORT=8563
+  USER=sys
+  CLI_PORT=""
+  CLI_USER=""
+  PASSWORD=""
+  BFS_PASSWORD=""
+  SCOPE=SESSION
+}
+
+selects_transport_from_backend() {
+  local dir backend
+
+  dir="$(mktemp -d)"
+
+  printf '{"backend":"local","connection":{"host":"127.0.0.1","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  backend="$(deployment_backend "$dir")"
+  check "a local descriptor reports the local backend" "local" "$backend"
+
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  backend="$(deployment_backend "$dir")"
+  check "a cloud descriptor reports its cloud backend name" "aws" "$backend"
+
+  printf '{"connection":{"host":"h.example"}}\n' >"$dir/deployment.json"
+  deployment_backend "$dir" >/dev/null 2>&1
+  check "a descriptor with no .backend field fails" "1" "$?"
+
+  printf '{"backend":"","connection":{"host":"h.example"}}\n' >"$dir/deployment.json"
+  deployment_backend "$dir" >/dev/null 2>&1
+  check "a descriptor with an empty .backend field fails" "1" "$?"
+
+  rm -rf "$dir"
+}
+
+resolves_cloud_connection_from_descriptor() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  reset_connection_globals
+  BFS_PASSWORD="bfspw"
+  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_cloud_connection succeeds given a complete cloud descriptor" "0" "$rc"
+  check "HOST resolves from connection.host" "h.example" "$HOST"
+  check "PORT resolves from connection.dbPort" "8563" "$PORT"
+  check "USER resolves from connection.username" "sys" "$USER"
+  check "PASSWORD resolves from secrets.json .dbPassword" "secret" "$PASSWORD"
+
+  rm -rf "$dir"
+}
+
+cli_flags_override_cloud_descriptor() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  # Simulates an operator who passed --host/--port/--user/--password: CLI_PORT
+  # and CLI_USER are pre-set exactly as main's arg loop would set them. The
+  # arg-loop capture itself (--port/--user -> CLI_PORT/CLI_USER) is exercised
+  # only by the manual cloud run — the sourced harness never runs main's loop.
+  reset_connection_globals
+  HOST="override.example"
+  CLI_PORT="1234"
+  CLI_USER="admin"
+  PASSWORD="overridepw"
+  BFS_PASSWORD="bfspw"
+  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_cloud_connection succeeds with CLI overrides" "0" "$rc"
+  check "an explicit --host wins over connection.host" "override.example" "$HOST"
+  check "an explicit --port wins over connection.dbPort" "1234" "$PORT"
+  check "an explicit --user wins over connection.username" "admin" "$USER"
+  check "an explicit --password wins over secrets.json .dbPassword" "overridepw" "$PASSWORD"
+
+  rm -rf "$dir"
+}
+
+cloud_requires_operator_bfs_password() {
+  local dir err rc names_bfs_password
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  reset_connection_globals
+  err="$(resolve_cloud_connection "$dir" 2>&1 >/dev/null)"
+  rc=$?
+
+  check "an empty --bfs-password fails cloud resolution" "1" "$rc"
+  if [[ "$err" == *"--bfs-password"* ]]; then names_bfs_password=1; else names_bfs_password=0; fi
+  check "the error names --bfs-password as the missing Personal requirement" "1" "$names_bfs_password"
+
+  rm -rf "$dir"
+}
+
+cloud_requires_db_password() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  # No secrets.json: the deployment never provisioned a DB password, and no
+  # --password override is supplied either.
+
+  reset_connection_globals
+  BFS_PASSWORD="bfspw"
+  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "an absent secrets.json with no --password override fails cloud resolution" "1" "$rc"
+
+  rm -rf "$dir"
+}
+
+resolves_cloud_defaults_when_connection_fields_absent() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  reset_connection_globals
+  BFS_PASSWORD="bfspw"
+  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_cloud_connection succeeds with dbPort/username absent" "0" "$rc"
+  check "PORT falls back to 8563 when connection.dbPort is absent" "8563" "$PORT"
+  check "USER falls back to sys when connection.username is absent" "sys" "$USER"
+
+  rm -rf "$dir"
+}
+
+cloud_leaves_scope_untouched() {
+  local dir
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  reset_connection_globals
+  BFS_PASSWORD="bfspw"
+  resolve_cloud_connection "$dir" >/dev/null 2>&1
+
+  # Unlike the local transport, which forces SCOPE=SYSTEM, cloud resolution
+  # MUST NOT touch SCOPE: cloud honors --scope, default SESSION.
+  check "cloud resolution leaves SCOPE at its default (MUST NOT force SYSTEM)" \
+    "SESSION" "$SCOPE"
+
+  rm -rf "$dir"
+}
+
 run() {
   printf '%s\n' "$1"
   "$1"
@@ -130,6 +297,13 @@ run fragment_points_at_executable_no_leading_slash
 run preserves_existing_script_languages
 run reads_ssh_port_from_deployment_json
 run parses_current_script_languages_from_query_output
+run selects_transport_from_backend
+run resolves_cloud_connection_from_descriptor
+run cli_flags_override_cloud_descriptor
+run cloud_requires_operator_bfs_password
+run cloud_requires_db_password
+run resolves_cloud_defaults_when_connection_fields_absent
+run cloud_leaves_scope_untouched
 
 if [[ "$FAILED" -ne 0 ]]; then
   printf '\nFAILED\n'

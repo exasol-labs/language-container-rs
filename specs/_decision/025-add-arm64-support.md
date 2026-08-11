@@ -100,30 +100,56 @@ Add an arm64 CI leg that builds the workspace and runs unit tests only. The inte
 
 CI catches arm64 build and unit-test regressions automatically; an operator must manually re-verify end-to-end UDF execution on Personal after any change touching the platform-specific paths, until an arm64 DB image ships.
 
-## ADR: Personal deployment is a `--deployment` transport mode of install.sh
+## ADR: Personal deployment routes `--deployment` on the descriptor's `.backend` field
 
 **ID:** personal-install-deployment-flag
-**Plan:** add-arm64-support
+**Plan:** add-personal-cloud-install
 **Status:** Accepted
 
 ### Context
 
-Exasol Personal exposes no BucketFS HTTP endpoint, so the standard `scripts/install.sh` upload path (`exapump bucketfs cp` to port 2581) cannot reach it. Personal instead requires SSH transport, filesystem-level BucketFS reconciliation, and `ALTER SYSTEM` (not `ALTER SESSION`) registration that preserves pre-existing `SCRIPT_LANGUAGES` entries.
+Exasol Personal exposes no BucketFS HTTP endpoint for a local (Apple Silicon VM) deployment, so the standard `scripts/install.sh` upload path (`exapump bucketfs cp` to port 2581) cannot reach it there. Local Personal instead requires SSH transport, filesystem-level BucketFS reconciliation, and `ALTER SYSTEM` (not `ALTER SESSION`) registration that preserves pre-existing `SCRIPT_LANGUAGES` entries. A Personal deployment can also run on a cloud backend (`aws`/`azure`/`exoscale`/`stackit`) that reaches the DB over the network and exposes the ordinary BucketFS HTTP endpoint; for a cloud backend, the SSH/filesystem path is wrong and the ordinary HTTP path is correct. The Personal launcher itself already discriminates these cases via `IsLocalBackend()`, keyed on the deployment descriptor's `.backend` field.
 
 ### Decision
 
-Handle Personal as a `--deployment <name>` mode of `scripts/install.sh` that switches to the SSH/filesystem transport, rather than a standalone `scripts/install-personal.sh`. The `container/personal-install` feature spec describes the behavior transport-agnostically.
+Handle Personal as a `--deployment <name>` mode of `scripts/install.sh` that reads `deployment.json` `.backend` and branches: `local` selects the SSH/filesystem special path; any other value selects the standard BucketFS HTTP path with connection details harvested from the deployment directory (`deployment.json` `.connection.*` for host/port/user, `secrets.json` `.dbPassword` for the DB password; CLI flags override); a missing or empty `.backend` fails with a clear error. Personal provisions no BucketFS password on either backend, so the operator supplies `--bfs-password`. The `container/personal-install` feature spec describes both paths.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| `--deployment` mode on `install.sh` | ✓ Chosen — build (license bundle + `docker build`), tarball reporting, and the `#`-fragment registration-string assembly are identical to the HTTP path; a single script keeps them defined once. The two transports live in one clearly-branched `if [[ -n "$DEPLOYMENT" ]]` step, and the script is sourceable (guarded `main`) so the Personal functions stay unit-testable. |
+| `--deployment` mode on `install.sh`, discriminated on `.backend` | ✓ Chosen — build (license bundle + `docker build`), tarball reporting, and the `#`-fragment registration-string assembly are identical across backends; a single script keeps them defined once. `.backend` is what the launcher itself keys off, so the descriptor is authoritative and the operator adds no flag. The cloud case needs no new transport — it is the same HTTP `else` branch as a non-`--deployment` install, only pre-filled from the descriptor. |
 | Separate `install-personal.sh` script | ✗ Rejected — duplicated the entire build/report scaffold and forced the shared registration-string helper (`scripts/lib/script_languages.sh`) to exist solely to keep two scripts from drifting; the divergence is one transport step, not a whole second tool. |
+| A `--cloud`/`--local` CLI flag, or a hardcoded allowlist of cloud backend names | ✗ Rejected — a flag adds operator burden and can contradict the descriptor; an allowlist is brittle as new cloud backends appear. `.backend != "local"` is the durable test, and erroring on empty/absent `.backend` avoids silently guessing a transport for a malformed descriptor. |
 
 ### Consequences
 
-`install.sh` owns both transports. The default (HTTP + `ALTER SESSION|SYSTEM` overwrite) path is unchanged; `--deployment` forces the local VM SQL host/port, uses `ALTER SYSTEM`, and preserves pre-existing entries. The `#`-fragment/registration-string assembly remains in the sourced helper `scripts/lib/script_languages.sh` (single owner of the executable-path invariant, and the seam the Personal-path unit tests source). Running `install.sh` without `--deployment` against a Personal deployment still dead-ends at the HTTP upload, as before.
+`install.sh` owns all three transport shapes (non-Personal HTTP, local Personal SSH/filesystem, cloud Personal HTTP) behind one `.backend`-keyed branch. The non-`--deployment` HTTP path is unchanged. `--deployment` on `local` forces the VM SQL host/port, uses `ALTER SYSTEM`, and preserves pre-existing entries, exactly as before. `--deployment` on a cloud backend resolves connection details from the deployment directory and falls through to the same HTTP `else` branch as the non-Personal path — no dedicated cloud transport exists to keep in sync. The `#`-fragment/registration-string assembly remains in the sourced helper `scripts/lib/script_languages.sh` (single owner of the executable-path invariant, and the seam the Personal-path unit tests source). A `--deployment` descriptor with no `.backend` field now fails with a clear error instead of silently taking the local path — the one behavior change from the original single-mode design.
+
+## ADR: The cloud Personal path reuses the existing HTTP branch unchanged
+
+**ID:** personal-cloud-reuses-http-transport
+**Plan:** add-personal-cloud-install
+**Status:** Accepted
+
+### Context
+
+A cloud Personal deployment already exposes the ordinary BucketFS HTTP endpoint; the deployment directory (`deployment.json` `.connection.*`, `secrets.json` `.dbPassword`) supplies only the connection details an operator would otherwise type by hand. The transport itself — `exapump bucketfs cp` upload plus `ALTER <scope> SET SCRIPT_LANGUAGES` — is already the default, already-tested path for every non-Personal install.
+
+### Decision
+
+For a cloud backend, `resolve_cloud_connection` fills the normal-path connection variables (`HOST`/`PORT`/`USER`/`PASSWORD`) from `deployment.json` and `secrets.json`, honoring `--host`/`--port`/`--user`/`--password` overrides, then control falls through to the existing HTTP `else` branch with no code change. `--bfs-password` is required, because Personal provisions no BucketFS password on any backend. `--scope` keeps its default `SESSION`; no `SYSTEM` scope is forced and no entry-preservation read-merge-write applies.
+
+### Options Considered
+
+| Option | Verdict |
+|--------|---------|
+| Reuse the existing HTTP `else` branch verbatim after resolving credentials | ✓ Chosen — cloud is the normal path; the deployment directory only supplies credentials, so a second implementation would be duplicate risk with no benefit. One HTTP branch stays the single owner of the upload-and-register logic. |
+| A dedicated cloud transport function paralleling the local one | ✗ Rejected — the wire transport is already correct and already verified operationally; a parallel implementation could drift from the branch it duplicates. |
+
+### Consequences
+
+Cloud Personal installs get every future improvement to the shared HTTP branch for free, with zero cloud-specific transport code to maintain. The cloud path differs from the non-Personal HTTP path only in where connection details originate (descriptor vs. command line) and in the mandatory `--bfs-password` check.
 
 ## ADR: Preserve field-verified arm64/Personal platform knowledge as normative spec clauses
 
