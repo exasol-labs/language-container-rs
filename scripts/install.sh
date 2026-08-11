@@ -1,7 +1,38 @@
 #!/usr/bin/env bash
-# Build the SLC tarball, upload it to BucketFS, and register the RUST
-# script language in an Exasol instance.
+# Build the SLC tarball, get it into BucketFS, and register the RUST script
+# language in an Exasol instance.
+#
+# Two transports, selected by whether --deployment is given:
+#
+#   * Default (a normal cluster / docker-db / SaaS): upload the tarball over the
+#     BucketFS HTTP API and register with ALTER SESSION|SYSTEM.
+#   * --deployment NAME (Exasol Personal): Personal publishes only the SQL port
+#     from its VM and exposes no BucketFS HTTP endpoint, so the tarball travels
+#     over SSH and is extracted straight into the VM's BucketFS directory; the
+#     engine reconciles a real bucket from it. The SSH port is reassigned on
+#     every `exasol start`, so it is read from the deployment descriptor on every
+#     run and never cached. Registration uses ALTER SYSTEM and preserves every
+#     pre-existing SCRIPT_LANGUAGES entry, so re-running after
+#     `exasol stop && exasol start` picks up the reassigned port itself.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/script_languages.sh
+source "$SCRIPT_DIR/lib/script_languages.sh"
+
+# ── Personal-transport constants ──────────────────────────────────────────────
+DEPLOYMENT_ROOT="$HOME/.exasol/personal/deployments"
+DEPLOYMENT_DESCRIPTOR="deployment.json"
+NODE_KEY_RELATIVE_PATH="local/node_access.pem"
+VM_BUCKETFS_ROOT="/var/lib/exa/bucketfs"
+SCRIPT_LANGUAGES_COLUMN="CURRENT_SCRIPT_LANGUAGES"
+RECONCILE_SECONDS=3
+PERSONAL_DB_HOST=127.0.0.1
+PERSONAL_DB_PORT=8563
+SSH_HOST=127.0.0.1
+SSH_OPTIONS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -o IdentitiesOnly=yes -o LogLevel=ERROR)
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 HOST=""
@@ -15,30 +46,52 @@ BFS_SERVICE=bfsdefault
 SLC_NAME=rustslc
 SCOPE=SESSION
 SKIP_BUILD=0
+DEPLOYMENT=""
+SSH_USER=root
+TMP_DIR=""
 
 # ── usage ─────────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Build the language container image, upload it to BucketFS, and register the
+Build the language container image, get it into BucketFS, and register the
 RUST script language in Exasol.
 
-Required:
+Transport is chosen by --deployment:
+  * without it — upload over the BucketFS HTTP API (normal cluster / SaaS);
+  * with it    — copy over SSH into an Exasol Personal deployment's VM.
+
+Required (HTTP transport, the default):
   -H, --host HOST            Exasol host
   -p, --password PASS        Exasol DB password
   -w, --bfs-password PASS    BucketFS write password
 
+Required (Personal transport):
+  -D, --deployment NAME      Personal deployment name (a directory under
+                             $DEPLOYMENT_ROOT); SQL host/port are fixed at
+                             ${PERSONAL_DB_HOST}:${PERSONAL_DB_PORT} and no BucketFS password is needed
+  -p, --password PASS        Exasol DB password
+
 Options:
-  -P, --port PORT            Exasol DB port          (default: 8563)
+  -P, --port PORT            Exasol DB port          (default: 8563; ignored with --deployment)
   -u, --user USER            Exasol user             (default: sys)
-      --bfs-port PORT        BucketFS HTTPS port     (default: 2581)
+      --bfs-port PORT        BucketFS HTTPS port     (default: 2581; HTTP transport only)
       --bucket NAME          BucketFS bucket         (default: default)
       --bfs-service NAME     BucketFS service name   (default: bfsdefault)
       --slc-name NAME        SLC name in BucketFS    (default: rustslc)
-      --scope SESSION|SYSTEM ALTER scope             (default: SESSION)
+      --scope SESSION|SYSTEM ALTER scope             (default: SESSION; --deployment forces SYSTEM)
+      --ssh-user USER        VM SSH user             (default: root; Personal transport only)
       --skip-build           Skip docker build; use SLC_TARBALL if set
   -h, --help                 Show this help
+
+Environment:
+  SLC_TARBALL                Use this prebuilt tarball instead of running
+                             \`docker build\` (implies --skip-build)
+
+The default build path needs Docker plus cargo-about (with network access for
+the GCC-exception fetch), used by dist/generate-licenses.sh; the Personal
+transport additionally needs jq and ssh/scp. exapump is always required.
 
 Examples:
   # Docker-db with default credentials:
@@ -47,10 +100,122 @@ Examples:
   # SaaS / enterprise, persist across sessions:
   $(basename "$0") --host my.exasol.cloud --user admin --password s3cr3t \\
     --bfs-password bfspass --scope SYSTEM
+
+  # Exasol Personal:
+  $(basename "$0") --deployment my-db --password exasol
 EOF
 }
 
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found on PATH"
+}
+
+# ── Personal: deployment descriptor (read fresh on every run) ─────────────────
+deployment_ssh_port() {
+  local descriptor="$1/$DEPLOYMENT_DESCRIPTOR" port
+
+  if [[ ! -r "$descriptor" ]]; then
+    echo "error: no readable deployment descriptor at $descriptor" >&2
+    return 1
+  fi
+
+  port="$(jq -r '.connection.sshPort // empty' "$descriptor")"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    echo "error: $descriptor carries no numeric connection.sshPort" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$port"
+}
+
+deployment_key_path() {
+  printf '%s\n' "$1/$NODE_KEY_RELATIVE_PATH"
+}
+
+# ── Personal: SCRIPT_LANGUAGES value handling ─────────────────────────────────
+csv_unquote() {
+  local field="$1"
+
+  if [[ "$field" == '"'*'"' ]]; then
+    field="${field:1:${#field}-2}"
+    field="${field//\"\"/\"}"
+  fi
+
+  printf '%s\n' "$field"
+}
+
+# Read the current parameter value out of the CSV result of the query below.
+# An unrecognized shape is an error rather than an empty value: silently
+# treating it as empty would drop every language the database already has.
+parse_script_languages() {
+  local output="$1" candidate line="" value token
+  local -a tokens
+
+  while IFS= read -r candidate; do
+    [[ -z "$candidate" ]] && continue
+    [[ "$candidate" == "$SCRIPT_LANGUAGES_COLUMN" ]] && continue
+    line="$candidate"
+  done <<<"$output"
+
+  value="$(csv_unquote "$line")"
+  read -ra tokens <<<"$value"
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    if [[ "$token" != *=* ]]; then
+      echo "error: unrecognized SCRIPT_LANGUAGES query output: $line" >&2
+      return 1
+    fi
+  done
+
+  printf '%s\n' "$value"
+}
+
+# ALTER SYSTEM replaces the whole parameter, so every pre-existing entry is
+# carried over; a stale RUST entry is dropped so re-running stays idempotent.
+script_languages_with_rust_entry() {
+  local existing="$1" entry="$2" word
+  local -a words kept
+
+  kept=()
+  read -ra words <<<"$existing"
+  for word in ${words[@]+"${words[@]}"}; do
+    case "$word" in
+      "${SCRIPT_LANGUAGE_ALIAS}="*) continue ;;
+    esac
+    kept+=("$word")
+  done
+  kept+=("$entry")
+
+  printf '%s\n' "${kept[*]}"
+}
+
+current_script_languages() {
+  local dsn="$1" output
+
+  output="$(exapump sql -f csv \
+    "SELECT SYSTEM_VALUE AS ${SCRIPT_LANGUAGES_COLUMN} FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SCRIPT_LANGUAGES'" \
+    -d "$dsn")"
+  parse_script_languages "$output"
+}
+
+# ── Personal: SSH copy + filesystem BucketFS reconciliation ───────────────────
+extract_slc_into_bucketfs() {
+  local key="$1" ssh_port="$2" tarball="$3"
+  local remote="${SSH_USER}@${SSH_HOST}"
+  local staged="/tmp/${SLC_NAME}.tar.gz"
+  local dest="${VM_BUCKETFS_ROOT}/${BFS_SERVICE}/${BUCKET}/${SLC_NAME}"
+
+  scp "${SSH_OPTIONS[@]}" -i "$key" -P "$ssh_port" "$tarball" "${remote}:${staged}"
+  ssh "${SSH_OPTIONS[@]}" -i "$key" -p "$ssh_port" "$remote" \
+    "set -e; rm -rf '${dest}'; mkdir -p '${dest}'; tar -xzf '${staged}' -C '${dest}'; rm -f '${staged}'; test -x '${dest}/exaudf/exaudfclient'"
+}
+
 # ── argument parsing ───────────────────────────────────────────────────────────
+main() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -H|--host)           HOST="$2";        shift 2 ;;
@@ -63,6 +228,8 @@ while [[ $# -gt 0 ]]; do
        --bfs-service)    BFS_SERVICE="$2"; shift 2 ;;
        --slc-name)       SLC_NAME="$2";    shift 2 ;;
        --scope)          SCOPE="$2";       shift 2 ;;
+    -D|--deployment)     DEPLOYMENT="$2";  shift 2 ;;
+       --ssh-user)       SSH_USER="$2";    shift 2 ;;
        --skip-build)     SKIP_BUILD=1;     shift   ;;
     -h|--help)           usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -70,25 +237,56 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── validation ─────────────────────────────────────────────────────────────────
-[[ -z "$HOST" ]]         && { echo "error: --host is required" >&2; exit 1; }
-[[ -z "$PASSWORD" ]]     && { echo "error: --password is required" >&2; exit 1; }
-[[ -z "$BFS_PASSWORD" ]] && { echo "error: --bfs-password is required" >&2; exit 1; }
+[[ -z "$PASSWORD" ]] && die "--password is required"
+# Interpolated into BucketFS paths (an `rm -rf` on the VM for Personal) — an
+# empty component would widen the destination.
+[[ -z "$BFS_SERVICE" ]] && die "--bfs-service must not be empty"
+[[ -z "$BUCKET" ]]      && die "--bucket must not be empty"
+[[ -z "$SLC_NAME" ]]    && die "--slc-name must not be empty"
+
+PERSONAL=0
+if [[ -n "$DEPLOYMENT" ]]; then
+  PERSONAL=1
+  require_command jq
+  require_command exapump
+  # Personal always talks to the local VM's SQL port; ALTER SYSTEM so the
+  # registration survives a restart.
+  HOST="$PERSONAL_DB_HOST"
+  PORT="$PERSONAL_DB_PORT"
+  SCOPE=SYSTEM
+else
+  require_command exapump
+  [[ -z "$HOST" ]]         && die "--host is required"
+  [[ -z "$BFS_PASSWORD" ]] && die "--bfs-password is required"
+fi
 
 SCOPE_UPPER="${SCOPE^^}"
 if [[ "$SCOPE_UPPER" != "SESSION" && "$SCOPE_UPPER" != "SYSTEM" ]]; then
-  echo "error: --scope must be SESSION or SYSTEM" >&2; exit 1
+  die "--scope must be SESSION or SYSTEM"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=lib/script_languages.sh
-source "$SCRIPT_DIR/lib/script_languages.sh"
+# ── resolve the Personal deployment (fresh SSH port + key on every run) ───────
+DEPLOYMENT_DIR=""
+SSH_PORT=""
+NODE_KEY=""
+if [[ "$PERSONAL" -eq 1 ]]; then
+  DEPLOYMENT_DIR="$DEPLOYMENT_ROOT/$DEPLOYMENT"
+  [[ -d "$DEPLOYMENT_DIR" ]] || die "no Personal deployment at $DEPLOYMENT_DIR"
+  SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
+  NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
+  [[ -r "$NODE_KEY" ]] || die "no readable node key at $NODE_KEY"
+fi
 
-# ── step 1: build ──────────────────────────────────────────────────────────────
+# ── step 1: build (shared) ─────────────────────────────────────────────────────
+# A prebuilt SLC_TARBALL implies --skip-build.
+[[ -n "${SLC_TARBALL:-}" ]] && SKIP_BUILD=1
+
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  require_command docker
+  require_command cargo-about  # used by dist/generate-licenses.sh below
   echo "==> Generating license bundles …"
   bash "$REPO_ROOT/dist/generate-licenses.sh"
-  echo "==> Building SLC tarball (--target artifact) …"
+  echo "==> Building SLC tarball for the host architecture (--target artifact) …"
   TMP_DIR=$(mktemp -d /tmp/slc-XXXXXX)
   trap 'rm -rf "$TMP_DIR"' EXIT
   docker build \
@@ -99,37 +297,66 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   TMP_TAR="$TMP_DIR/lc-rs.tar.gz"
   echo "==> Build complete."
 else
-  echo "==> Skipping build (--skip-build); using SLC_TARBALL=${SLC_TARBALL:-<unset>}."
   if [[ -z "${SLC_TARBALL:-}" ]]; then
-    echo "error: --skip-build requires SLC_TARBALL to be set" >&2; exit 1
+    die "--skip-build requires SLC_TARBALL to be set"
   fi
+  echo "==> Skipping build; using SLC_TARBALL=${SLC_TARBALL}."
   TMP_TAR="$SLC_TARBALL"
 fi
 
 # ── step 2: report tarball ─────────────────────────────────────────────────────
 echo "==> Tarball ready: $TMP_TAR ($(du -sh "$TMP_TAR" | cut -f1))."
 
-# ── step 3: upload to BucketFS ────────────────────────────────────────────────
-BFS_PATH="slc/${SLC_NAME}.tar.gz"
-echo "==> Uploading to BucketFS: ${BFS_SERVICE}/${BUCKET}/${BFS_PATH} …"
-exapump bucketfs cp "$TMP_TAR" "$BFS_PATH" \
-  --bfs-host "$HOST" \
-  --bfs-port "$BFS_PORT" \
-  --bfs-bucket "$BUCKET" \
-  --bfs-write-password "$BFS_PASSWORD" \
-  --bfs-tls true \
-  --bfs-validate-certificate false
-echo "==> Upload complete."
+# ── step 3: transport + register ───────────────────────────────────────────────
+if [[ "$PERSONAL" -eq 1 ]]; then
+  DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
+  SLC_PATH="$SLC_NAME"
 
-# ── step 4: register SCRIPT_LANGUAGES ─────────────────────────────────────────
-SCRIPT_LANGUAGES="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "slc/${SLC_NAME}")"
-DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
+  echo "==> Copying the SLC into ${VM_BUCKETFS_ROOT}/${BFS_SERVICE}/${BUCKET}/${SLC_NAME} (ssh port ${SSH_PORT}) …"
+  extract_slc_into_bucketfs "$NODE_KEY" "$SSH_PORT" "$TMP_TAR"
+  echo "==> Waiting ${RECONCILE_SECONDS}s for the engine to reconcile the bucket …"
+  sleep "$RECONCILE_SECONDS"
 
-echo "==> Registering RUST language (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"
-exapump sql \
-  "ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" \
-  -d "$DSN"
-echo "==> Done. The RUST script language is now available."
-echo
-echo "    SCRIPT_LANGUAGES entry:"
-echo "    ${SCRIPT_LANGUAGES}"
+  ENTRY="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
+  EXISTING="$(current_script_languages "$DSN")"
+  SCRIPT_LANGUAGES="$(script_languages_with_rust_entry "$EXISTING" "$ENTRY")"
+
+  echo "==> Registering RUST (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"
+  exapump sql "ALTER SYSTEM SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" -d "$DSN"
+  echo "==> Done. The RUST script language is now available at /buckets/${BFS_SERVICE}/${BUCKET}/${SLC_NAME}/."
+  echo
+  echo "    SCRIPT_LANGUAGES entry:"
+  echo "    ${ENTRY}"
+else
+  BFS_PATH="slc/${SLC_NAME}.tar.gz"
+  SLC_PATH="slc/${SLC_NAME}"
+
+  echo "==> Uploading to BucketFS: ${BFS_SERVICE}/${BUCKET}/${BFS_PATH} …"
+  exapump bucketfs cp "$TMP_TAR" "$BFS_PATH" \
+    --bfs-host "$HOST" \
+    --bfs-port "$BFS_PORT" \
+    --bfs-bucket "$BUCKET" \
+    --bfs-write-password "$BFS_PASSWORD" \
+    --bfs-tls true \
+    --bfs-validate-certificate false
+  echo "==> Upload complete."
+
+  SCRIPT_LANGUAGES="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
+  DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
+
+  echo "==> Registering RUST language (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"
+  exapump sql \
+    "ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" \
+    -d "$DSN"
+  echo "==> Done. The RUST script language is now available."
+  echo
+  echo "    SCRIPT_LANGUAGES entry:"
+  echo "    ${SCRIPT_LANGUAGES}"
+fi
+}
+
+# Only run when executed directly; sourcing (e.g. from the unit tests) defines
+# the functions and constants above without kicking off an install.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

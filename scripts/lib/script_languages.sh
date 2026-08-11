@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Shared assembly of the Exasol SCRIPT_LANGUAGES entry for the RUST alias.
-# Sourced by scripts/install.sh and scripts/install-personal.sh; it defines
-# functions and constants only, so sourcing it more than once is harmless.
-# It assembles a single entry and nothing else — how that entry reaches the
-# database (overwrite via ALTER SESSION, or append via ALTER SYSTEM) is each
-# install path's own decision.
+# Sourced by scripts/install.sh (both its HTTP-BucketFS and Personal-over-SSH
+# transports); it defines functions and constants only, so sourcing it more
+# than once is harmless. It assembles a single entry and nothing else — how that
+# entry reaches the database (overwrite via ALTER SESSION, or append via ALTER
+# SYSTEM) is each install path's own decision.
 
 SCRIPT_LANGUAGE_ALIAS=RUST
 

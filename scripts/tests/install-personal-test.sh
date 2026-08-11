@@ -14,8 +14,10 @@ command -v jq >/dev/null 2>&1 || {
 
 # shellcheck source=../lib/script_languages.sh
 source "$SCRIPTS_DIR/lib/script_languages.sh"
-# shellcheck source=../install-personal.sh
-source "$SCRIPTS_DIR/install-personal.sh"
+# The Personal transport now lives in install.sh (behind --deployment); sourcing
+# it defines the functions without running an install (guarded by BASH_SOURCE).
+# shellcheck source=../install.sh
+source "$SCRIPTS_DIR/install.sh"
 set +e
 
 INSTALL_SH_ENTRY='RUST=localzmq+protobuf:///bfsdefault/default/slc/rustslc?lang=rust#buckets/bfsdefault/default/slc/rustslc/exaudf/exaudfclient'

@@ -21,14 +21,12 @@ accepted = [
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 
-# The shipped exaudfclient is glibc (built with no --target); the musl triples
-# cover the UDF build target instead. Both libc flavors and both arches are
-# listed because cargo-about UNIONS the license scan across all `targets` —
-# over-attribution is safe, but omitting a triple silently drops that
-# platform's dependencies from the notice file.
+# The shipped exaudfclient is a glibc binary (built with no --target), and the
+# UDF artifacts it loads are glibc-dynamic cdylibs — nothing musl is distributed,
+# so only the glibc (gnu) triples are scanned. Both arches are listed because
+# cargo-about UNIONS the license scan across all `targets`: omitting a triple
+# silently drops that platform's dependencies from the notice file.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
 ]

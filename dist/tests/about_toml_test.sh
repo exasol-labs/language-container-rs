@@ -23,12 +23,16 @@ pass() {
     echo "PASS: $1"
 }
 
-# The shipped exaudfclient binary covers both arches in both libc flavors
-# (glibc build + musl UDF target), so the license scan must union all four
-# to avoid silently dropping a dependency's notice.
+# The shipped exaudfclient binary and the UDF cdylibs it loads are both glibc,
+# and nothing musl is distributed, so the license scan unions only the two glibc
+# (gnu) arches. Every shipped arch must be listed to avoid silently dropping a
+# dependency's notice; musl must NOT be listed (it would over-attribute a
+# platform we do not ship).
 REQUIRED_TRIPLES=(
     "x86_64-unknown-linux-gnu"
     "aarch64-unknown-linux-gnu"
+)
+FORBIDDEN_TRIPLES=(
     "x86_64-unknown-linux-musl"
     "aarch64-unknown-linux-musl"
 )
@@ -43,6 +47,12 @@ about_toml_lists_gnu_triples() {
     for triple in "${REQUIRED_TRIPLES[@]}"; do
         if [[ "$targets_block" != *"$triple"* ]]; then
             fail "about_toml_lists_gnu_triples: targets array missing '$triple'"
+            return
+        fi
+    done
+    for triple in "${FORBIDDEN_TRIPLES[@]}"; do
+        if [[ "$targets_block" == *"$triple"* ]]; then
+            fail "about_toml_lists_gnu_triples: targets array must not list musl triple '$triple' (nothing musl is shipped)"
             return
         fi
     done

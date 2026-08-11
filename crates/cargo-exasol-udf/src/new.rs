@@ -40,8 +40,8 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk = {{ version = "0.21", features = [] }}
-exasol-udf-macros = {{ version = "0.21" }}
+exasol-udf-sdk = {{ version = "0.22", features = [] }}
+exasol-udf-macros = {{ version = "0.22" }}
 
 [profile.release]
 strip = true

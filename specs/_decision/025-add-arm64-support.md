@@ -100,9 +100,9 @@ Add an arm64 CI leg that builds the workspace and runs unit tests only. The inte
 
 CI catches arm64 build and unit-test regressions automatically; an operator must manually re-verify end-to-end UDF execution on Personal after any change touching the platform-specific paths, until an arm64 DB image ships.
 
-## ADR: Personal deployment is a new script and feature, not an install.sh flag
+## ADR: Personal deployment is a `--deployment` transport mode of install.sh
 
-**ID:** personal-install-separate-script
+**ID:** personal-install-deployment-flag
 **Plan:** add-arm64-support
 **Status:** Accepted
 
@@ -112,18 +112,18 @@ Exasol Personal exposes no BucketFS HTTP endpoint, so the standard `scripts/inst
 
 ### Decision
 
-Add `scripts/install-personal.sh` and a `container/personal-install` feature as a separate path, rather than a `--personal` flag on `scripts/install.sh`.
+Handle Personal as a `--deployment <name>` mode of `scripts/install.sh` that switches to the SSH/filesystem transport, rather than a standalone `scripts/install-personal.sh`. The `container/personal-install` feature spec describes the behavior transport-agnostically.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Separate script and feature | ✓ Chosen — the transport (SSH + filesystem) and registration scope (`ALTER SYSTEM`, entry preservation) differ fundamentally from the upload+`ALTER SESSION` path |
-| `--personal` flag on `install.sh` | ✗ Rejected — would branch one script across two incompatible transports, blurring its responsibility |
+| `--deployment` mode on `install.sh` | ✓ Chosen — build (license bundle + `docker build`), tarball reporting, and the `#`-fragment registration-string assembly are identical to the HTTP path; a single script keeps them defined once. The two transports live in one clearly-branched `if [[ -n "$DEPLOYMENT" ]]` step, and the script is sourceable (guarded `main`) so the Personal functions stay unit-testable. |
+| Separate `install-personal.sh` script | ✗ Rejected — duplicated the entire build/report scaffold and forced the shared registration-string helper (`scripts/lib/script_languages.sh`) to exist solely to keep two scripts from drifting; the divergence is one transport step, not a whole second tool. |
 
 ### Consequences
 
-Each script keeps a single, crisp responsibility. The shared `#`-fragment/registration-string assembly logic is extracted into a sourced helper (`scripts/lib/script_languages.sh`) both scripts use, so the executable-path invariant has one owner instead of two independent implementations.
+`install.sh` owns both transports. The default (HTTP + `ALTER SESSION|SYSTEM` overwrite) path is unchanged; `--deployment` forces the local VM SQL host/port, uses `ALTER SYSTEM`, and preserves pre-existing entries. The `#`-fragment/registration-string assembly remains in the sourced helper `scripts/lib/script_languages.sh` (single owner of the executable-path invariant, and the seam the Personal-path unit tests source). Running `install.sh` without `--deployment` against a Personal deployment still dead-ends at the HTTP upload, as before.
 
 ## ADR: Preserve field-verified arm64/Personal platform knowledge as normative spec clauses
 

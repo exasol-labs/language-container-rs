@@ -7,7 +7,7 @@ There are three ways to get the `RUST` script language registered in an Exasol d
 | Path | When to use |
 |------|-------------|
 | [Automated](#automated-install-scriptsinstallsh) | `exapump` has direct network access to both BucketFS and the DB SQL port (e.g. a local Docker-db). One command does everything. |
-| [Exasol Personal](#exasol-personal-install-scriptsinstall-personalsh) | An Exasol Personal deployment. It publishes no BucketFS endpoint at all, so the container travels over SSH into the VM's BucketFS directory instead of being uploaded. |
+| [Exasol Personal](#exasol-personal-install) | An Exasol Personal deployment. It publishes no BucketFS endpoint at all, so the container travels over SSH into the VM's BucketFS directory instead of being uploaded. |
 | [Manual](#manual-install) | No `exapump`/BucketFS network access — e.g. Exasol SaaS, or any hosted platform that only exposes a BucketFS upload UI or REST API. Every step is a `curl`/SQL command or a UI action, no Docker or Rust toolchain required. |
 
 ## Release assets
@@ -27,7 +27,7 @@ Pick a row by where the target database runs, then follow that row's install pat
 |----------|------------------|---------------|-------------------|
 | Docker-db (local, x86_64) | `lc-rust-<version>.tar.gz` | [Automated](#automated-install-scriptsinstallsh) | `cargo exasol-udf build` (glibc cdylib, host default `x86_64-unknown-linux-gnu`) |
 | Exasol SaaS (x86_64 backend) | `lc-rust-<version>.tar.gz` | [Manual](#manual-install) | `cargo exasol-udf build` on an x86_64 host (glibc cdylib), or `--target x86_64-unknown-linux-gnu` |
-| Exasol Personal (Apple Silicon, aarch64) | `lc-rust-<version>-aarch64.tar.gz` | [Exasol Personal](#exasol-personal-install-scriptsinstall-personalsh) | `cargo exasol-udf build` on/in a Linux aarch64 host (glibc cdylib, host default `aarch64-unknown-linux-gnu`); a macOS host cannot emit a Linux `.so` natively |
+| Exasol Personal (Apple Silicon, aarch64) | `lc-rust-<version>-aarch64.tar.gz` | [Exasol Personal](#exasol-personal-install) | `cargo exasol-udf build` on/in a Linux aarch64 host (glibc cdylib, host default `aarch64-unknown-linux-gnu`); a macOS host cannot emit a Linux `.so` natively |
 
 The UDF `.so`'s architecture must match the SLC's. Build on a host of the same architecture as the target database, or cross the gap with `--target` (see [Writing a Rust UDF §13](writing-a-udf.md#13-build-and-deploy)).
 
@@ -52,7 +52,7 @@ docker exec exasol-db bash -c \
 
 Full option reference: `scripts/install.sh --help`
 
-## Exasol Personal install (`scripts/install-personal.sh`)
+## Exasol Personal install
 
 Exasol Personal publishes only the SQL port (`8563`) from its VM — there is no
 BucketFS HTTP endpoint to upload to, so the [automated path](#automated-install-scriptsinstallsh)
@@ -62,10 +62,11 @@ filesystem instead: extracting the container into
 bucket within about a second, visible to UDFs at
 `/buckets/<service>/<bucket>/<slc-name>/`.
 
-`scripts/install-personal.sh` does exactly that, then registers the language:
+`scripts/install.sh` switches to this SSH transport when you pass `--deployment`;
+it copies the container over SSH, extracts it, then registers the language:
 
 ```bash
-scripts/install-personal.sh --deployment my-db --password <db-password>
+scripts/install.sh --deployment my-db --password <db-password>
 ```
 
 It builds the container for the host architecture (on Apple Silicon: an aarch64
@@ -73,11 +74,13 @@ SLC), or reuses a prebuilt tarball when `SLC_TARBALL` is set:
 
 ```bash
 SLC_TARBALL=/path/to/lc-rs.tar.gz \
-  scripts/install-personal.sh --deployment my-db --password <db-password>
+  scripts/install.sh --deployment my-db --password <db-password>
 ```
 
-Requires `jq`, `ssh`/`scp`, `exapump`, and Docker unless `SLC_TARBALL` is set.
-Full option reference: `scripts/install-personal.sh --help`.
+The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
+`SLC_TARBALL` is set; it fixes the SQL host/port at `127.0.0.1:8563`, registers
+with `ALTER SYSTEM`, and needs no BucketFS password. Full option reference:
+`scripts/install.sh --help`.
 
 > **Building UDFs for Personal:** the UDF `.so` itself must be built on — or
 > inside — a Linux environment matching the deployment's architecture (an aarch64
@@ -85,6 +88,23 @@ Full option reference: `scripts/install-personal.sh --help`.
 > a Linux `.so` natively: there is no Linux cross-linker or sysroot, so neither a
 > native `cargo` build nor `cargo exasol-udf build` produces a loadable artifact
 > there. Build in the same Linux aarch64 environment the SLC uses.
+
+> **Deploying a UDF `.so` on Personal:** Personal has no BucketFS HTTP endpoint,
+> so `writing-a-udf.md` §13's "upload via the HTTP API" step does not apply. Copy
+> the built `.so` into the VM's BucketFS directory over the same SSH transport the
+> install script uses — the `udf/` prefix maps to `/buckets/<service>/<bucket>/udf/`:
+>
+> ```bash
+> # sshPort is reassigned on every `exasol start`; read it fresh each time.
+> ssh_port="$(jq -r '.connection.sshPort' \
+>   ~/.exasol/personal/deployments/<name>/deployment.json)"
+> scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+>   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -P "$ssh_port" \
+>   libmy_udf.so root@127.0.0.1:/var/lib/exa/bucketfs/bfsdefault/default/udf/
+> ```
+>
+> The `.so` is then visible to `CREATE SCRIPT` at
+> `/buckets/bfsdefault/default/udf/libmy_udf.so`.
 
 | Step | What it does, and why |
 |------|-----------------------|
@@ -252,7 +272,7 @@ Fix: confirm the `#` fragment in the `RUST=...` entry points at the `exaudfclien
 ...#/buckets/bfsdefault/default/rustslc/exaudf/exaudfclient
 ```
 
-Re-run the `ALTER SESSION`/`ALTER SYSTEM SET SCRIPT_LANGUAGES` statement (Step 4 above, or `scripts/install.sh`/`scripts/install-personal.sh`) with the corrected fragment, then retry the failing UDF call.
+Re-run the `ALTER SESSION`/`ALTER SYSTEM SET SCRIPT_LANGUAGES` statement (Step 4 above, or `scripts/install.sh` with or without `--deployment`) with the corrected fragment, then retry the failing UDF call.
 
 ## Next step — write your first UDF
 
