@@ -81,7 +81,7 @@ Subcommands:
 | Subcommand | What it does |
 |------------|-------------|
 | `cargo exasol-udf new <path>` | Scaffold a new UDF crate with the correct `Cargo.toml` and `lib.rs` stub |
-| `cargo exasol-udf build [<path>]` | Build a glibc cdylib `.so` (host default, release, symbols stripped); pass `--target <triple>` to override the target |
+| `cargo exasol-udf build [<path>]` | Build a glibc cdylib `.so` (host default, release; the scaffold's `[profile.release]` strips symbols); pass `--target <triple>` to override the target |
 | `cargo exasol-udf validate <path>` | Inspect a compiled `.so`: enumerates all `__exa_udf_entry_*` symbols and validates each vtable |
 
 `cargo exasol-udf build` defaults to the host glibc target and passes `--release` — equivalent to `cargo build --release` (or `cargo build --target <triple> --release` with `--target`) but without needing to remember the flags.

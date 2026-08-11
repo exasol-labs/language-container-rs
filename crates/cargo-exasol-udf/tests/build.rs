@@ -71,10 +71,10 @@ fn host_target_triple() -> String {
         .to_string()
 }
 
-/// Override the scaffold's `[lib]` output name so the built artifact filename
-/// diverges from the package name `build` derives `so_path` from — reproducing
-/// the case where cargo succeeds but no `.so` exists at the computed path.
-fn rename_lib_artifact(udf_path: &Path, lib_name: &str) {
+/// Set an explicit `[lib] name` on the scaffold, diverging the cdylib output
+/// filename from the package name. `build` must honor it when computing the
+/// artifact path.
+fn set_lib_name(udf_path: &Path, lib_name: &str) {
     let cargo_toml = udf_path.join("Cargo.toml");
     let contents = std::fs::read_to_string(&cargo_toml).unwrap();
     let patched = contents.replacen(
@@ -82,6 +82,16 @@ fn rename_lib_artifact(udf_path: &Path, lib_name: &str) {
         &format!("[lib]\nname = \"{lib_name}\"\ncrate-type = [\"cdylib\"]"),
         1,
     );
+    std::fs::write(&cargo_toml, patched).unwrap();
+}
+
+/// Drop the `cdylib` crate-type so `cargo build --release` still succeeds but
+/// produces no `.so` — reproducing the case where the artifact is missing at
+/// the path `build` computed.
+fn drop_cdylib_crate_type(udf_path: &Path) {
+    let cargo_toml = udf_path.join("Cargo.toml");
+    let contents = std::fs::read_to_string(&cargo_toml).unwrap();
+    let patched = contents.replacen("crate-type = [\"cdylib\"]", "crate-type = [\"rlib\"]", 1);
     std::fs::write(&cargo_toml, patched).unwrap();
 }
 
@@ -184,11 +194,44 @@ fn build_honors_target_override() {
 }
 
 #[test]
+fn build_honors_explicit_lib_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let udf_path = scaffold_udf_crate(dir.path(), "test-libname-udf");
+    patch_scaffold_to_local_sdk(&udf_path);
+    set_lib_name(&udf_path, "renamed_output");
+
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "build", udf_path.to_str().unwrap()])
+        .output()
+        .expect("failed to run cargo-exasol-udf build");
+
+    assert!(
+        output.status.success(),
+        "build should honor [lib] name and succeed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("target/release/librenamed_output.so"),
+        "stdout should print the [lib] name-derived cdylib path: {stdout}"
+    );
+
+    let so_path = udf_path.join("target/release/librenamed_output.so");
+    assert!(
+        so_path.exists(),
+        "built .so should exist at {}",
+        so_path.display()
+    );
+}
+
+#[test]
 fn build_fails_when_artifact_missing_at_expected_path() {
     let dir = tempfile::tempdir().unwrap();
     let udf_path = scaffold_udf_crate(dir.path(), "test-missing-artifact-udf");
     patch_scaffold_to_local_sdk(&udf_path);
-    rename_lib_artifact(&udf_path, "renamed_output");
+    drop_cdylib_crate_type(&udf_path);
 
     let output = Command::new(cargo_exasol_udf_bin())
         .args(["exasol-udf", "build", udf_path.to_str().unwrap()])

@@ -20,6 +20,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let crate_name = parse_crate_name(&cargo_toml)?;
+    // Cargo derives the cdylib filename from `[lib] name` when it is set,
+    // falling back to the package name otherwise.
+    let lib_name = parse_lib_name(&cargo_toml)?.unwrap_or_else(|| crate_name.clone());
 
     let mut cargo = Command::new("cargo");
     cargo.args(["build", "--release"]);
@@ -35,7 +38,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err(format!("cargo build failed with status: {}", status));
     }
 
-    let so_name = format!("lib{}.so", crate_name.replace('-', "_"));
+    let so_name = format!("lib{}.so", lib_name.replace('-', "_"));
     let mut release_dir = crate_dir.join("target");
     if let Some(triple) = target {
         release_dir = release_dir.join(triple);
@@ -51,7 +54,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let entry_names = enumerate_entry_symbols(&so_path).unwrap_or_default();
+    let entry_names = enumerate_entry_symbols(&so_path)
+        .map_err(|e| format!("could not inspect '{}': {}", so_path.display(), e))?;
     if entry_names.is_empty() {
         return Err(format!(
             "build produced '{}' but it exports no __exa_udf_entry_<NAME> symbols; \
@@ -119,6 +123,38 @@ fn parse_crate_name(cargo_toml: &Path) -> Result<String, String> {
         "could not find `name` in [package] section of '{}'",
         cargo_toml.display()
     ))
+}
+
+/// Parse an explicit `name = "..."` from the `[lib]` section of Cargo.toml, if
+/// present. Cargo derives the cdylib output filename from this when set, so the
+/// build must honor it rather than assuming the artifact is named after the
+/// package. Returns `Ok(None)` when no `[lib] name` is declared.
+fn parse_lib_name(cargo_toml: &Path) -> Result<Option<String>, String> {
+    let contents = std::fs::read_to_string(cargo_toml)
+        .map_err(|e| format!("cannot read '{}': {}", cargo_toml.display(), e))?;
+
+    let mut in_lib = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[lib]" {
+            in_lib = true;
+            continue;
+        }
+        if in_lib && trimmed.starts_with('[') {
+            // Left the [lib] section
+            break;
+        }
+        if in_lib
+            && trimmed.starts_with("name")
+            && let Some(value) = trimmed
+                .split_once('=')
+                .map(|x| x.1.trim().trim_matches('"'))
+        {
+            return Ok(Some(value.to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Attempt to dlopen the `.so` and emit a `<name>.udf-meta.json` sidecar
