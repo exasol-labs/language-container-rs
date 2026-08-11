@@ -2,6 +2,3 @@
 #   cargo build --release -p scalar-double -p set-filter -p json-parse \
 #     -p single-call-fixture -p connect-back-cluster-ip \
 #     -p connect-back-query -p connect-back-insert
-
-[target.x86_64-unknown-linux-musl]
-linker = "musl-gcc"

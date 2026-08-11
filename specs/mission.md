@@ -1,15 +1,15 @@
 # Mission: lc-rs
 
 > Bring Rust into Exasol UDFs — write high-performance, memory-safe user-defined
-> functions as idiomatic Rust, compile them to a single static `.so`, and run them in
+> functions as idiomatic Rust, compile them to a single `.so`, and run them in
 > a pure-Rust Script Language Container.
 
 ## Value
 
 `lc-rs` lets teams who already build in Rust extend Exasol with their own compute logic:
 typed column access, zero-cost abstractions, and the whole crates.io ecosystem, all
-inside the database. UDFs are precompiled to a fully-static musl `.so` and loaded by a
-slim container, so there is no in-container toolchain and no runtime compilation —
+inside the database. UDFs are precompiled to a glibc-dynamic `cdylib` `.so` and loaded by a
+slim container that bundles the matching glibc runtime, so there is no in-container toolchain and no runtime compilation —
 deploy is "upload the `.so`, register the script." Authors can optionally connect back
 to Exasol for reference data, and stream large result sets and emit batches without
 exhausting the UDF sandbox.
@@ -18,7 +18,7 @@ exhausting the UDF sandbox.
 
 | Persona | Goal | Key Workflow |
 |---------|------|--------------|
-| Rust data engineer | Write high-performance UDFs without leaving the Rust ecosystem | Implement the UDF fn, annotate with `#[exasol_udf]`, build a musl `.so`, upload to BucketFS, register in DB |
+| Rust data engineer | Write high-performance UDFs without leaving the Rust ecosystem | Implement the UDF fn, annotate with `#[exasol_udf]`, build a `.so`, upload to BucketFS, register in DB |
 | Exasol DBA / platform engineer | Deploy and register the Rust SLC in a production cluster | Build + upload the container, `ALTER SESSION SET SCRIPT_LANGUAGES`, create scripts |
 | Exasol SDK maintainer | Extend or debug the SLC implementation itself | Run unit tests + integration tests against a local Exasol Docker container |
 
@@ -26,10 +26,10 @@ exhausting the UDF sandbox.
 
 1. **Full wire-protocol implementation** — handles every `localzmq+protobuf` message type (handshake, scalar, set/EMITS, single-call `SC_FN_*` incl. the virtual-schema adapter call, ping-pong, reset, error close).
 2. **Ergonomic Rust UDF SDK** — the `UdfRun` / `UdfContext` traits plus the `#[exasol_udf]` proc macro give typed column access and optional connect-back, with rows surfaced as the SDK's own `Value` type.
-3. **Precompiled execution model** — build a static musl `.so` with `cargo exasol-udf build`, upload to BucketFS, load via a `%udf_object` directive in `CREATE SCRIPT`.
+3. **Precompiled execution model** — build a single `.so` (a glibc-dynamic cdylib) with `cargo exasol-udf build`, upload to BucketFS, load via a `%udf_object` directive in `CREATE SCRIPT`.
 4. **ABI-safe dynamic loading** — `abi_version` + `sdk_fingerprint` checks at load time turn a toolchain mismatch into a clear error instead of UB.
 5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SESSION SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step. The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) alongside the runtime.
-6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the static musl `.so` (`build`), and validates the ABI of a built artifact (`validate`).
+6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the `.so` (`build`), and validates the ABI of a built artifact (`validate`).
 7. **Live diagnostics** — a `%udf_debug_level` script directive tunes runtime tracing verbosity, exposes an SDK `log` surface for UDF-authored lines, and reports memory/emit-buffer telemetry at debug level, all carried over Exasol's `SET SESSION SCRIPT OUTPUT ADDRESS` stderr redirect.
 
 > Detailed behavior lives in the spec library (`specs/sdk`, `specs/protocol`,
@@ -48,7 +48,7 @@ exhausting the UDF sandbox.
 | Option C | JIT execution path — script source compiled in-container on first call. Not supported (the runtime returns a clear error) |
 | ABI fingerprint | `"SDK_VERSION:RUSTC_HASH\0"` string baked into every compiled vtable; guards against toolchain-mismatch UB at load time |
 | `ExaConnection` | SDK trait (defined in `exasol-udf-sdk`) exposing `query`, `query_for_each`, `execute`, and transaction control. Host implements it via `exarrow-rs`; UDF code never links `exarrow-rs` directly and receives SDK `Value` rows (not Arrow). |
-| musl | `x86_64-unknown-linux-musl` target; all Rust deps statically linked; no glibc dependency in the `.so`. `cargo exasol-udf build` targets this automatically. |
+| glibc cdylib | The deployable UDF artifact: a dynamically-linked `cdylib` `.so` built for the host glibc target (`x86_64-unknown-linux-gnu`), with all Rust dependencies statically linked in. The slim container bundles the matching glibc runtime so the `.so` resolves at `dlopen`. `cargo exasol-udf build` produces it by default (`--target <triple>` overrides). |
 | exarrow-rs | crates.io crate providing Arrow-based ADBC connectivity back to Exasol — used by the host runtime only; UDFs access it through the `ExaConnection` trait. |
 | `exaudfclient` | The binary the DB invokes per UDF call: `exaudfclient <ipc_socket_path> lang=rust` |
 | MT_* | `message_type` enum values in the protobuf protocol (e.g., `MT_RUN`, `MT_NEXT`, `MT_EMIT`) |
@@ -92,13 +92,13 @@ cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings
 # Scaffold a new UDF crate
 cargo exasol-udf new my-udf
 
-# Build a fully-static musl UDF .so (musl toolchain installed automatically)
+# Build the UDF .so (glibc-dynamic cdylib for the host target)
 cargo exasol-udf build
-# → target/x86_64-unknown-linux-musl/release/libmy_udf.so
+# → target/release/libmy_udf.so
 
 # Deploy: upload to BucketFS, then register the script
 exapump bfs upload \
-  target/x86_64-unknown-linux-musl/release/libmy_udf.so \
+  target/release/libmy_udf.so \
   /buckets/bfsdefault/default/udf/libmy_udf.so
 # then CREATE OR REPLACE RUST … SCRIPT … AS %udf_object /buckets/…/libmy_udf.so;
 ```
