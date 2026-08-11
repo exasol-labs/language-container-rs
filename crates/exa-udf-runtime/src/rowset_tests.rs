@@ -1056,6 +1056,21 @@ fn emit_push_periodic_checkpoint_at_10_000_rows() {
     tracing::subscriber::with_default(sub, || {
         let _ = filter_handle.modify(|f| *f = tracing_subscriber::EnvFilter::new("debug"));
 
+        // Register the emit_push/emit_flush callsites under this debug
+        // subscriber *before* the measured loop, then discard the warm-up
+        // output. `modify` above only rebuilds callsites already registered;
+        // emit_flush is not hit until row 10,000, leaving a window in which a
+        // concurrent (unlocked) test could register it first under the no-op
+        // default dispatcher as `Interest::never()` — cached process-globally,
+        // it would then silently drop this test's flush event. Registering it
+        // here under the debug subscriber closes that window; the cleared
+        // capture keeps the assertion proving the 10,000-row checkpoint (not
+        // the warm-up) produced the flush.
+        let mut warmup = EmitBuffer::new();
+        warmup.push(vec![Value::Bool(true)]);
+        warmup.record_flush_telemetry();
+        buf.lock().unwrap().clear();
+
         let mut emit = EmitBuffer::new();
         for _ in 0..EmitBuffer::TELEMETRY_ROW_CHECKPOINT {
             emit.push(vec![Value::Bool(true)]);
