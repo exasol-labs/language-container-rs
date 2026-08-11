@@ -275,7 +275,8 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         // host frees it with `libc::free`, so allocation and deallocation cross
         // the FFI boundary entirely through the C allocator — never mixing the
         // `.so`'s and host's separately-linked Rust global allocators (which
-        // would be heap corruption for statically-linked musl `.so`s). Per-UDF
+        // would be heap corruption for a dynamically-loaded cdylib `.so` that
+        // statically links its own Rust runtime). Per-UDF
         // copy so distinct UDFs in the same crate do not share a helper symbol.
         unsafe fn #write_c_string_ident(value: &str, out: *mut *mut ::std::ffi::c_char) {
             unsafe extern "C" {

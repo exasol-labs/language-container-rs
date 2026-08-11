@@ -229,7 +229,7 @@ impl Harness {
         })
     }
 
-    /// Upload a precompiled musl UDF `.so` under `udf/<filename>` and return the
+    /// Upload a precompiled UDF `.so` (glibc cdylib) under `udf/<filename>` and return the
     /// in-database `/buckets/...` path for use in a `%udf_object` directive.
     pub async fn upload_udf(&self, filename: &str, so_bytes: Vec<u8>) -> Result<String> {
         let path = format!("udf/{filename}");
@@ -386,7 +386,7 @@ pub async fn query_single_string(conn: &mut Connection, sql: &str) -> Result<Opt
 
 /// Read the bytes of a precompiled UDF artifact from the workspace target directory.
 ///
-/// Set `UDF_TARGET` (e.g. `x86_64-unknown-linux-musl`) to read from the
+/// Set `UDF_TARGET` (e.g. `x86_64-unknown-linux-gnu`) to read from the
 /// target-specific directory instead of the default `target/release/`.
 pub fn read_udf_artifact(lib_filename: &str) -> Result<Vec<u8>> {
     let root = workspace_root();

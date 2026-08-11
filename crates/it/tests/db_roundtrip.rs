@@ -1,7 +1,7 @@
 //! End-to-end database round-trip tests for the Rust SLC.
 //!
 //! These start a real `exasol/docker-db`, register the slim Rust language
-//! container, upload precompiled musl UDF `.so` files to BucketFS, create
+//! container, upload precompiled UDF `.so` files (glibc cdylibs) to BucketFS, create
 //! scripts and assert query results. They only build/run with the `integration`
 //! feature and a working privileged-Docker daemon.
 //!
@@ -553,7 +553,7 @@ async fn set_filter_emits_positive_only(conn: &mut Connection, udf_object: &str)
 }
 
 /// Scenario 8.6: `json_field('{"name":"exa"}')` returns `exa`, proving a
-/// third-party crate (`serde_json`) is statically linked into the musl `.so`.
+/// third-party crate (`serde_json`) is statically linked into the cdylib `.so`.
 async fn json_parse_extracts_name(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SCALAR SCRIPT json_parse(doc VARCHAR(2000)) RETURNS VARCHAR(2000) AS\n\
