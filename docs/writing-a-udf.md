@@ -17,8 +17,10 @@
 
 `cargo exasol-udf build` runs a **host** `cargo build --release`, so the `.so` is
 linked against the build machine's C library. The deployable artifact must be a
-Linux `x86_64` ELF whose glibc version is **no newer than the SLC's** (the shipped
-container bundles glibc ~2.36, from `rust:1.94-bookworm`). Otherwise:
+Linux ELF of the **same architecture as the SLC** (`x86_64`, or `aarch64` for an
+Apple Silicon Exasol Personal deployment) whose glibc version is **no newer than
+the SLC's** (the shipped container bundles glibc ~2.36, from `rust:1.94-bookworm`).
+Otherwise:
 
 - Building on a host with a **newer glibc** (e.g. Ubuntu 24.04 ships glibc 2.39)
   produces a `.so` that references `GLIBC_2.3x` symbols the container lacks. It
@@ -26,10 +28,13 @@ container bundles glibc ~2.36, from `rust:1.94-bookworm`). Otherwise:
   error — the ABI fingerprint check covers the SDK version and rustc, not glibc.
 - On **macOS/Windows** the host build emits a `.dylib`/`.dll`, not a Linux ELF; the
   tool has no deployable artifact to produce and errors with "no artifact produced".
+  A macOS host also cannot cross-compile a Linux ELF natively (no Linux linker or
+  sysroot) — build inside a Linux container of the target architecture instead.
 
-Build inside `rust:1.94-bookworm` (or an equivalent Linux `x86_64` host whose glibc
-is ≤ the SLC's) to guarantee a loadable artifact. Use `--target <triple>` only for a
-native build on another installed target, not to cross the glibc boundary.
+Build inside `rust:1.94-bookworm` (or an equivalent Linux host of the SLC's
+architecture whose glibc is ≤ the SLC's) to guarantee a loadable artifact. Use
+`--target <triple>` only for a native build on another installed target, not to
+cross the glibc boundary.
 
 ## 1. Scaffold a UDF crate
 
@@ -45,8 +50,8 @@ Or create the crate manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.11" }
-exasol-udf-macros = { version = "0.11" }
+exasol-udf-sdk    = { version = "0.22" }
+exasol-udf-macros = { version = "0.22" }
 ```
 
 ## 2. The `#[exasol_udf]` macro
@@ -119,10 +124,12 @@ RETURNS BIGINT AS
 
 ### Optional type annotations
 
-If you annotate the input types, the runtime validates the SQL input-column schema at load time:
+If you annotate the input types, the runtime validates the SQL input-column schema at load time. The annotation type must name the column's **wire type**, which is not always the obvious Rust integer: a `BIGINT` (or any `DECIMAL`/`NUMBER`) column arrives as `Value::Numeric`, so annotate it `Decimal` — annotating it `i64` fails validation at load time (`annotated input column … is typed 'Int64' but the database supplied 'Numeric'`). A `DOUBLE` column annotates as `f64`.
 
 ```rust
-#[exasol_udf(input(val: i64))]
+// `val` is a BIGINT column → Numeric on the wire, so annotate it `Decimal`.
+// Read it with ctx.get_i64(0), which accepts a scale-0 Numeric (see §3).
+#[exasol_udf(input(val: Decimal))]
 pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
     // ...
 }
@@ -131,13 +138,13 @@ pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> 
 For an EMITS UDF, annotate the output columns too:
 
 ```rust
-#[exasol_udf(input(k: i64), emits(i: i64))]
+#[exasol_udf(input(k: Decimal), emits(i: Decimal))]
 pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // ...
 }
 ```
 
-Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`.
+Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`. `i32`/`i64` validate only against a column whose wire type is genuinely `Int32`/`Int64`; standard Exasol integer types (`BIGINT`, `INT`, `INTEGER`) are all `DECIMAL` and therefore `Decimal`.
 
 ## 3. The `UdfContext` interface
 
@@ -396,7 +403,7 @@ SELECT my_schema.set_filter(x) FROM nums;  -- one row per positive input value
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.11", features = ["emit-arrow"] }
+exasol-udf-sdk = { version = "0.22", features = ["emit-arrow"] }
 arrow = "58"
 ```
 
@@ -454,7 +461,7 @@ Connect-back lets a UDF open a regular Exasol connection from inside `run()` and
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.11", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.22", features = ["connect-back"] }
 ```
 
 ### Create a CONNECTION object
@@ -616,7 +623,9 @@ cargo exasol-udf build
 # Artifact:
 #   target/release/libmy_udf.so
 
-# Upload to BucketFS via the HTTP API or your admin tooling, then register:
+# Upload to BucketFS, then register. Transport depends on the target:
+#   * normal cluster / SaaS — the BucketFS HTTP API or your admin tooling
+#   * Exasol Personal       — no HTTP endpoint; copy over SSH (see note below)
 ```
 
 ```sql
@@ -627,6 +636,10 @@ RETURNS BIGINT AS
 ```
 
 `cargo exasol-udf build` defaults to the host glibc target and the release profile; pass `--target <triple>` to override the target without remembering the underlying `cargo build` flags.
+
+The SQL script name must match the UDF's exported entry point. A plain `fn run` exports `__exa_udf_entry_RUN`, so it registers as `... SCRIPT run ...`; `#[exasol_udf(name = "SCALAR_DOUBLE")]` sets the name explicitly (the example above assumes an entry named `SCALAR_DOUBLE`). A mismatch fails at query time with `no entry point found for script '<NAME>'`.
+
+On **Exasol Personal** there is no BucketFS HTTP endpoint, so the upload step above does not apply. Copy the `.so` into the deployment VM over SSH — the same transport the SLC install uses — as described in [Deploying a UDF `.so` on Personal](installation.md#exasol-personal-install).
 
 ## 14. Unit testing
 

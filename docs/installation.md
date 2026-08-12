@@ -2,12 +2,34 @@
 
 # Installing the language container
 
-There are two ways to get the `RUST` script language registered in an Exasol database:
+There are three ways to get the `RUST` script language registered in an Exasol database:
 
 | Path | When to use |
 |------|-------------|
 | [Automated](#automated-install-scriptsinstallsh) | `exapump` has direct network access to both BucketFS and the DB SQL port (e.g. a local Docker-db). One command does everything. |
+| [Exasol Personal](#exasol-personal-install) | An Exasol Personal deployment. It publishes no BucketFS endpoint at all, so the container travels over SSH into the VM's BucketFS directory instead of being uploaded. |
 | [Manual](#manual-install) | No `exapump`/BucketFS network access — e.g. Exasol SaaS, or any hosted platform that only exposes a BucketFS upload UI or REST API. Every step is a `curl`/SQL command or a UI action, no Docker or Rust toolchain required. |
+
+## Release assets
+
+Each release publishes two SLC tarballs on the [GitHub Releases](https://github.com/exasol-labs/language-container-rs/releases) page:
+
+| Asset | Architecture |
+|-------|--------------|
+| `lc-rust-<version>.tar.gz` | x86_64 (the unsuffixed name is the x86_64 build) |
+| `lc-rust-<version>-aarch64.tar.gz` | aarch64 |
+
+## Platform support matrix
+
+Pick a row by where the target database runs, then follow that row's install path.
+
+| Platform | Release tarball | Install path | UDF build target |
+|----------|------------------|---------------|-------------------|
+| Docker-db (local, x86_64) | `lc-rust-<version>.tar.gz` | [Automated](#automated-install-scriptsinstallsh) | `cargo exasol-udf build` (glibc cdylib, host default `x86_64-unknown-linux-gnu`) |
+| Exasol SaaS (x86_64 backend) | `lc-rust-<version>.tar.gz` | [Manual](#manual-install) | `cargo exasol-udf build` on an x86_64 host (glibc cdylib), or `--target x86_64-unknown-linux-gnu` |
+| Exasol Personal (Apple Silicon, aarch64) | `lc-rust-<version>-aarch64.tar.gz` | [Exasol Personal](#exasol-personal-install) | `cargo exasol-udf build` on/in a Linux aarch64 host (glibc cdylib, host default `aarch64-unknown-linux-gnu`); a macOS host cannot emit a Linux `.so` natively |
+
+The UDF `.so`'s architecture must match the SLC's. Build on a host of the same architecture as the target database, or cross the gap with `--target` (see [Writing a Rust UDF §13](writing-a-udf.md#13-build-and-deploy)).
 
 ## Automated install (`scripts/install.sh`)
 
@@ -29,6 +51,106 @@ docker exec exasol-db bash -c \
 ```
 
 Full option reference: `scripts/install.sh --help`
+
+## Exasol Personal install
+
+Exasol Personal publishes only the SQL port (`8563`) from its VM — there is no
+BucketFS HTTP endpoint to upload to, so the [automated path](#automated-install-scriptsinstallsh)
+dead-ends at its upload step. Personal's engine reconciles BucketFS from the VM
+filesystem instead: extracting the container into
+`/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real
+bucket within about a second, visible to UDFs at
+`/buckets/<service>/<bucket>/<slc-name>/`.
+
+`scripts/install.sh` switches to this SSH transport when you pass `--deployment`;
+it copies the container over SSH, extracts it, then registers the language:
+
+```bash
+scripts/install.sh --deployment my-db
+```
+
+It builds the container for the host architecture (on Apple Silicon: an aarch64
+SLC), or reuses a prebuilt tarball when `SLC_TARBALL` is set:
+
+```bash
+SLC_TARBALL=/path/to/lc-rs.tar.gz \
+  scripts/install.sh --deployment my-db
+```
+
+The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
+`SLC_TARBALL` is set; it fixes the SQL host/port at `127.0.0.1:8563`, registers
+with `ALTER SYSTEM`, and needs no BucketFS password. The DB password is read
+from the deployment's `secrets.json` `.dbPassword`, so `--password` is only an
+override you pass when you want a different one. Full option reference:
+`scripts/install.sh --help`.
+
+> **Building UDFs for Personal:** the UDF `.so` itself must be built on — or
+> inside — a Linux environment matching the deployment's architecture (an aarch64
+> Linux host or container for an Apple Silicon Personal). A macOS host cannot emit
+> a Linux `.so` natively: there is no Linux cross-linker or sysroot, so neither a
+> native `cargo` build nor `cargo exasol-udf build` produces a loadable artifact
+> there. Build in the same Linux aarch64 environment the SLC uses.
+
+> **Deploying a UDF `.so` on Personal:** Personal has no BucketFS HTTP endpoint,
+> so `writing-a-udf.md` §13's "upload via the HTTP API" step does not apply. Copy
+> the built `.so` into the VM's BucketFS directory over the same SSH transport the
+> install script uses — the `udf/` prefix maps to `/buckets/<service>/<bucket>/udf/`:
+>
+> ```bash
+> # sshPort is reassigned on every `exasol start`; read it fresh each time.
+> ssh_port="$(jq -r '.connection.sshPort' \
+>   ~/.exasol/personal/deployments/<name>/deployment.json)"
+> # On a fresh deployment the bucket holds only the SLC dir; create udf/ first,
+> # or scp dead-ends with an opaque `dest open ".../udf/": Failure`.
+> ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+>   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -p "$ssh_port" \
+>   root@127.0.0.1 'mkdir -p /var/lib/exa/bucketfs/bfsdefault/default/udf'
+> scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+>   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -P "$ssh_port" \
+>   libmy_udf.so root@127.0.0.1:/var/lib/exa/bucketfs/bfsdefault/default/udf/
+> ```
+>
+> The `.so` is then visible to `CREATE SCRIPT` at
+> `/buckets/bfsdefault/default/udf/libmy_udf.so`.
+
+| Step | What it does, and why |
+|------|-----------------------|
+| Read the connection details | Takes `connection.sshPort` and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. |
+| Copy and extract | `scp` over that port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` and confirm `exaudf/exaudfclient` landed executable. |
+| Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over `8563`, so the registration survives a restart. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
+
+Re-running after `exasol stop && exasol start` is the supported way to recover:
+it picks up the reassigned SSH port and replaces its own `RUST` entry without
+disturbing the others.
+
+### Exasol Personal on a cloud backend
+
+The steps above cover a **local** Personal deployment (a VM on this machine).
+Personal can also run on a cloud backend (`aws`/`azure`/`exoscale`/`stackit`):
+that VM reaches the DB over the network and exposes the ordinary BucketFS HTTP
+endpoint, so the SSH transport above does not apply to it — it uses the same
+HTTP upload-and-register path as the [automated install](#automated-install-scriptsinstallsh).
+
+`scripts/install.sh --deployment` handles both cases from the same flag: it
+reads `deployment.json`'s `.backend` field in
+`~/.exasol/personal/deployments/<name>/` and picks the transport at runtime —
+`"local"` keeps the SSH path above unchanged; any other value resolves the DB
+host, port, and user from `deployment.json`'s `.connection` object and the DB
+password from the sibling `secrets.json`'s `.dbPassword`, then uploads over
+HTTP exactly as the automated path does.
+
+Because cloud Personal provisions no BucketFS password, `--bfs-password` is
+**required** for a cloud deployment (unlike the local path, which needs none):
+
+```bash
+scripts/install.sh --deployment my-cloud-db --bfs-password <bfs-write-password>
+```
+
+`--host`, `--port`, `--user`, and `--password` still work as explicit
+overrides of the descriptor-derived values, and `--scope` behaves as it does
+without `--deployment` (default `SESSION`) — the cloud path does not force
+`SYSTEM` the way the local path does. Full option reference:
+`scripts/install.sh --help`.
 
 ## Manual install
 
@@ -166,6 +288,27 @@ ALTER SESSION SET SCRIPT_LANGUAGES='<existing value, if any> RUST=localzmq+proto
 -- persists across sessions (requires admin)
 ALTER SYSTEM SET SCRIPT_LANGUAGES='<existing value, if any> RUST=localzmq+protobuf:///<bfs-service>/<bucket>/rustslc?lang=rust#buckets/<bfs-service>/<bucket>/rustslc/exaudf/exaudfclient';
 ```
+
+## Troubleshooting
+
+### `22002 VM crashed`
+
+`22002 VM crashed` almost always means the engine could not execute the UDF client — not a bug in the UDF's Rust code. Check the `SCRIPT_LANGUAGES` registration first.
+
+Fix: confirm the `#` fragment in the `RUST=...` entry points at the `exaudfclient` **executable**, not its containing directory, and has **no leading slash**:
+
+```
+# correct
+...#buckets/bfsdefault/default/rustslc/exaudf/exaudfclient
+
+# wrong: points at the directory, not the executable
+...#buckets/bfsdefault/default/rustslc/exaudf/
+
+# wrong: leading slash
+...#/buckets/bfsdefault/default/rustslc/exaudf/exaudfclient
+```
+
+Re-run the `ALTER SESSION`/`ALTER SYSTEM SET SCRIPT_LANGUAGES` statement (Step 4 above, or `scripts/install.sh` with or without `--deployment`) with the corrected fragment, then retry the failing UDF call.
 
 ## Next step — write your first UDF
 

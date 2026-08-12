@@ -154,6 +154,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Architecture-independent shell assertions, so the x86_64 leg is enough.
+      - name: Run install-script tests
+        run: bash scripts/tests/install-personal-test.sh
+
+      - name: Run about.toml tests
+        run: bash dist/tests/about_toml_test.sh
+
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
         with:
@@ -268,10 +275,56 @@ jobs:
       # dist/generate-licenses.sh and are not committed, so there is no committed
       # file to verify here — the build-slc job generates them before docker build.
 
+  # Native arm64 build + unit tests only (no coverage, no Sonar, no IT). IT
+  # stays x86_64-only: exasol/docker-db publishes amd64-only images, and
+  # QEMU-emulating the privileged multi-GB DB is a non-starter; arm64
+  # end-to-end verification stays manual against Exasol Personal.
+  arm64:
+    name: arm64 (build + unit tests)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.94
+        uses: dtolnay/rust-toolchain@1.94
+
+      # Separate cache key from the x86_64 jobs: target/ holds native-triple
+      # binaries and must not mix across architectures.
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run unit tests
+        # it excluded: its db_roundtrip test needs a live Exasol container,
+        # same exclusion as the x86_64 unit-tests job.
+        run: cargo test --workspace --exclude it
+
+  # Native per-arch build: each leg runs `docker build` on its own runner
+  # architecture, so the produced image matches the runner (no cross-build/
+  # QEMU). Artifacts are named per arch so downstream consumers pick the
+  # right one instead of the last matrix leg to upload.
   build-slc:
-    name: Build SLC image
-    runs-on: ubuntu-latest
+    name: Build SLC image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: [build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - uses: actions/checkout@v4
 
@@ -303,7 +356,7 @@ jobs:
       - name: Upload SLC tarball
         uses: actions/upload-artifact@v4
         with:
-          name: lc-tarball
+          name: lc-tarball-${{ matrix.arch }}
           path: /tmp/lc-out/lc-rs.tar.gz
 
   # ── viability gate: integration matrix over Exasol DB versions ───────────
@@ -366,10 +419,12 @@ jobs:
         with:
           name: it-test
 
+      # IT stays x86_64 (see the arm64 job comment above), so it fetches only
+      # the x86_64 SLC tarball leg.
       - name: Download SLC tarball
         uses: actions/download-artifact@v4
         with:
-          name: lc-tarball
+          name: lc-tarball-x86_64
 
       # Do NOT cache this image as a tarball: measured, `docker load` (1m51s+) is
       # slower than this pull (1m35s) and the tarballs evict the cargo caches.
@@ -519,7 +574,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: [build-slc, integration]
+    needs: [build-slc, integration, arm64]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write   # push tag + create GitHub Release + asset upload
@@ -546,18 +601,30 @@ jobs:
             echo "Version bumped to ${{ steps.version.outputs.version }} — releasing ${{ steps.version.outputs.tag }}."
           fi
 
-      - name: Download SLC tarball
+      - name: Download x86_64 SLC tarball
         if: steps.gate.outputs.release == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: lc-tarball
+          name: lc-tarball-x86_64
+          path: dist-x86_64
 
-      - name: Rename SLC tarball for release
+      - name: Download aarch64 SLC tarball
+        if: steps.gate.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: lc-tarball-aarch64
+          path: dist-aarch64
+
+      # x86_64 keeps the historical unsuffixed name (docs/installation.md and
+      # the manual-install URL embed it); aarch64 gets the -aarch64 suffix.
+      # Both match the `files: lc-rust-*.tar.gz` glob below.
+      - name: Rename SLC tarballs for release
         if: steps.gate.outputs.release == 'true'
         run: |
           VER="${{ steps.version.outputs.version }}"
-          cp lc-rs.tar.gz "lc-rust-${VER}.tar.gz"
-          ls -la "lc-rust-${VER}.tar.gz"
+          cp dist-x86_64/lc-rs.tar.gz "lc-rust-${VER}.tar.gz"
+          cp dist-aarch64/lc-rs.tar.gz "lc-rust-${VER}-aarch64.tar.gz"
+          ls -la "lc-rust-${VER}.tar.gz" "lc-rust-${VER}-aarch64.tar.gz"
 
       - name: Create and push tag
         if: steps.gate.outputs.release == 'true'

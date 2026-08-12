@@ -2,8 +2,8 @@
 //! `error_out` pointer using the C allocator convention: on the user-error
 //! return path (`1`) it writes a `malloc`-allocated, NUL-terminated C string
 //! that the host frees with `free` — never `CString::into_raw`/`from_raw`,
-//! which would mix the `.so`'s and host's separate Rust allocators (UB for
-//! statically-linked musl `.so`s).
+//! which would mix the `.so`'s and host's separate Rust allocators (UB for a
+//! dynamically-loaded cdylib `.so` that statically links its own Rust runtime).
 
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;

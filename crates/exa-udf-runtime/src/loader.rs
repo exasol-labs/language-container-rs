@@ -34,8 +34,18 @@ impl LoadedUdf {
 
         let symbol_name = format!("__exa_udf_entry_{script_name}\0");
         let entry: Symbol<EntryFn> = unsafe { lib.get(symbol_name.as_bytes()) }.map_err(|_| {
+            // Lead with the most common cause — a name mismatch — because the
+            // symbol is derived from the SQL script name, not the file: a plain
+            // `fn run` exports `__exa_udf_entry_RUN`, so a script named e.g.
+            // SCALAR_DOUBLE finds nothing. The SDK-version hint is the fallback
+            // case (an .so predating entry-point naming), not the first guess.
             RuntimeError::Loader(format!(
-                "no entry point found for script '{script_name}'; hint: rebuild with sdk >= 0.14.0"
+                "no entry point found for script '{script_name}': the UDF .so exports no \
+                 '__exa_udf_entry_{script_name}' symbol. The script name must match the UDF's \
+                 exported entry — a plain `fn run` exports `__exa_udf_entry_RUN`, and \
+                 `#[exasol_udf(name = \"...\")]` overrides it — so rename the script or the \
+                 function so they agree. If the .so exports no `__exa_udf_entry_*` symbol at \
+                 all, it predates entry-point naming: rebuild with sdk >= 0.14.0."
             ))
         })?;
 

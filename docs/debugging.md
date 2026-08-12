@@ -66,8 +66,8 @@ Use the `udf_log!` macro to write level-filtered lines to stderr from inside you
 
 ```toml
 [dependencies]
-exasol-udf-sdk    = { version = "0.19" }
-exasol-udf-macros = { version = "0.19" }
+exasol-udf-sdk    = { version = "0.22" }
+exasol-udf-macros = { version = "0.22" }
 ```
 
 ```rust

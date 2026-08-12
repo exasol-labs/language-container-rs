@@ -29,6 +29,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     fs::create_dir_all(&src_dir)
         .map_err(|e| format!("cannot create directory '{}': {}", src_dir.display(), e))?;
 
+    // Pin the SDK/macros to this tool's own version so a fresh scaffold always
+    // targets the SLC it was released alongside — the ABI fingerprint bakes in
+    // the SDK version, so a stale hardcoded pin would silently be a release
+    // behind. cargo-exasol-udf shares the workspace version with the SDK.
+    let sdk_version = env!("CARGO_PKG_VERSION");
+
     // Write Cargo.toml
     let cargo_toml = format!(
         r#"[package]
@@ -40,8 +46,8 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk = {{ version = "0.21", features = [] }}
-exasol-udf-macros = {{ version = "0.21" }}
+exasol-udf-sdk = {{ version = "{sdk_version}", features = [] }}
+exasol-udf-macros = {{ version = "{sdk_version}" }}
 
 [profile.release]
 strip = true
@@ -56,6 +62,9 @@ strip = true
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 
+// The SQL script name maps to this function's name: `run` exports the entry
+// symbol `__exa_udf_entry_RUN`, so register it with `CREATE ... SCRIPT run ...`.
+// Rename this fn — or add `#[exasol_udf(name = "MY_NAME")]` — to change it.
 #[exasol_udf]
 fn run(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
     // TODO: implement your UDF

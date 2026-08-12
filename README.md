@@ -30,7 +30,12 @@ The workspace ships three crates for UDF authors, container operators, and build
 
 ## Install the language container
 
-`scripts/install.sh` builds the Docker image, uploads it to BucketFS, and registers the `RUST` script language in one command. If `exapump` can't reach BucketFS or the DB directly (e.g. Exasol SaaS), see [Installation](docs/installation.md) for a fully manual path — download the prebuilt release tarball, upload it via a UI/REST API/curl, and hand-run the registration SQL.
+`scripts/install.sh` builds the Docker image, uploads it to BucketFS, and registers the `RUST` script language in one command.
+
+Two instances need a different path, both covered in [Installation](docs/installation.md):
+
+- **Exasol Personal** — it publishes no BucketFS endpoint, so run `scripts/install.sh --deployment <name>`: it copies the container into the deployment VM's BucketFS directory over SSH (the engine reconciles a bucket from it) and registers the language with `ALTER SYSTEM`, preserving the entries already there.
+- **No `exapump` reach to BucketFS or the DB** (e.g. Exasol SaaS) — a fully manual path: download the prebuilt release tarball, upload it via a UI/REST API/curl, and hand-run the registration SQL.
 
 ## Quick start
 

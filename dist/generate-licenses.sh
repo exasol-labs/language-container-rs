@@ -24,7 +24,7 @@ OS_OUT="$HERE/THIRD-PARTY-OS-LICENSES.md"
 GCC_EXCEPTION_URL="https://raw.githubusercontent.com/spdx/license-list-data/main/text/GCC-exception-3.1.txt"
 
 command -v cargo-about >/dev/null 2>&1 || {
-    echo "error: cargo-about not found. Install: cargo install --locked cargo-about@0.9.0" >&2
+    echo "error: cargo-about not found. Install: cargo install --locked cargo-about@0.9.0 --features cli" >&2
     exit 1
 }
 
