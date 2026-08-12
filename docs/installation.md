@@ -54,8 +54,10 @@ Full option reference: `scripts/install.sh --help`
 
 ## Exasol Personal install
 
-Exasol Personal publishes only the SQL port (`8563`) from its VM — there is no
-BucketFS HTTP endpoint to upload to, so the [automated path](#automated-install-scriptsinstallsh)
+Exasol Personal publishes only a SQL port from its VM, on `127.0.0.1` at a
+port assigned per deployment (`connection.dbPort` in `deployment.json`,
+defaulting to `8563` when absent) — there is no BucketFS HTTP endpoint to
+upload to, so the [automated path](#automated-install-scriptsinstallsh)
 dead-ends at its upload step. Personal's engine reconciles BucketFS from the VM
 filesystem instead: extracting the container into
 `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real
@@ -78,11 +80,15 @@ SLC_TARBALL=/path/to/lc-rs.tar.gz \
 ```
 
 The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
-`SLC_TARBALL` is set; it fixes the SQL host/port at `127.0.0.1:8563`, registers
-with `ALTER SYSTEM`, and needs no BucketFS password. The DB password is read
-from the deployment's `secrets.json` `.dbPassword`, so `--password` is only an
-override you pass when you want a different one. Full option reference:
-`scripts/install.sh --help`.
+`SLC_TARBALL` is set; it fixes the SQL host at `127.0.0.1` and resolves the
+SQL port from the deployment's `connection.dbPort` (defaulting to `8563` when
+absent), registers with `ALTER SYSTEM`, and needs no BucketFS password.
+`--port` overrides the resolved port when you need it to. The DB password is
+read from the deployment's `secrets.json` `.dbPassword`, so `--password` is
+only an override you pass when you want a different one. A host running
+several local deployments serves each on its own port, so it is the
+deployment's descriptor — not a fixed value — that decides which database
+receives the registration. Full option reference: `scripts/install.sh --help`.
 
 > **Building UDFs for Personal:** the UDF `.so` itself must be built on — or
 > inside — a Linux environment matching the deployment's architecture (an aarch64
@@ -115,9 +121,9 @@ override you pass when you want a different one. Full option reference:
 
 | Step | What it does, and why |
 |------|-----------------------|
-| Read the connection details | Takes `connection.sshPort` and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. |
-| Copy and extract | `scp` over that port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` and confirm `exaudf/exaudfclient` landed executable. |
-| Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over `8563`, so the registration survives a restart. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
+| Read the connection details | Takes `connection.sshPort`, `connection.dbPort`, and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. |
+| Copy and extract | `scp` over the SSH port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` and confirm `exaudf/exaudfclient` landed executable. |
+| Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over the resolved SQL port (`connection.dbPort`, default `8563`), so the registration survives a restart. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
 
 Re-running after `exasol stop && exasol start` is the supported way to recover:
 it picks up the reassigned SSH port and replaces its own `RUST` entry without

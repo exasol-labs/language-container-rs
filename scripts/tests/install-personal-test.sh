@@ -102,6 +102,75 @@ reads_ssh_port_from_deployment_json() {
   rm -rf "$dir"
 }
 
+resolves_local_connection_from_descriptor() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"host":"descriptor.example","sshPort":52341,"dbPort":52164}}\n' \
+    >"$dir/deployment.json"
+
+  reset_connection_globals
+  HOST="override.example"
+  PORT="unresolved"
+  resolve_local_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_local_connection succeeds given a complete local descriptor" "0" "$rc"
+  check "HOST is fixed at the local forwarder, overriding both --host and the descriptor" "127.0.0.1" "$HOST"
+  check "PORT resolves from connection.dbPort" "52164" "$PORT"
+
+  HOST="override.example"
+  PORT="unresolved"
+  printf '{"backend":"local","connection":{"host":"descriptor.example","sshPort":52341,"dbPort":59446}}\n' \
+    >"$dir/deployment.json"
+  resolve_local_connection "$dir" >/dev/null 2>&1
+  check "a reassigned dbPort is picked up on the next read, never cached" "59446" "$PORT"
+  check "HOST is fixed at the local forwarder, overriding both --host and the descriptor" "127.0.0.1" "$HOST"
+
+  rm -f "$dir/deployment.json"
+  resolve_local_connection "$dir" >/dev/null 2>&1
+  check "a missing descriptor fails" "1" "$?"
+
+  rm -rf "$dir"
+}
+
+cli_port_overrides_local_descriptor() {
+  local dir
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"host":"127.0.0.1","sshPort":52341,"dbPort":52164}}\n' \
+    >"$dir/deployment.json"
+
+  # Simulates an operator who passed --port: CLI_PORT is pre-set exactly as
+  # main's arg loop would set it.
+  reset_connection_globals
+  PORT="unresolved"
+  CLI_PORT="1234"
+  resolve_local_connection "$dir" >/dev/null 2>&1
+
+  check "an explicit --port wins over connection.dbPort" "1234" "$PORT"
+
+  rm -rf "$dir"
+}
+
+resolves_local_defaults_when_db_port_absent() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"host":"127.0.0.1","sshPort":52341}}\n' \
+    >"$dir/deployment.json"
+
+  reset_connection_globals
+  PORT="unresolved"
+  resolve_local_connection "$dir" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_local_connection succeeds with dbPort absent" "0" "$rc"
+  check "PORT falls back to 8563 when connection.dbPort is absent" "8563" "$PORT"
+
+  rm -rf "$dir"
+}
+
 parses_current_script_languages_from_query_output() {
   check "a header-only result reads as an unset parameter" \
     "" "$(parse_script_languages "CURRENT_SCRIPT_LANGUAGES")"
@@ -296,6 +365,9 @@ run() {
 run fragment_points_at_executable_no_leading_slash
 run preserves_existing_script_languages
 run reads_ssh_port_from_deployment_json
+run resolves_local_connection_from_descriptor
+run cli_port_overrides_local_descriptor
+run resolves_local_defaults_when_db_port_absent
 run parses_current_script_languages_from_query_output
 run selects_transport_from_backend
 run resolves_cloud_connection_from_descriptor

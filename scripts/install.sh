@@ -13,10 +13,12 @@
 #         no BucketFS HTTP endpoint, so the tarball travels over SSH and is
 #         extracted straight into the VM's BucketFS directory; the engine
 #         reconciles a real bucket from it. The SSH port is reassigned on every
-#         `exasol start`, so it is read from the deployment descriptor on every
-#         run and never cached. Registration uses ALTER SYSTEM and preserves
-#         every pre-existing SCRIPT_LANGUAGES entry, so re-running after
-#         `exasol stop && exasol start` picks up the reassigned port itself.
+#         `exasol start`, so re-running after `exasol stop && exasol start`
+#         picks it up. The SQL port is assigned per deployment via
+#         `exasol config set --ports db:<port>`, so it is read fresh from
+#         connection.dbPort rather than hardcoded — a hardcoded value would
+#         register against another deployment's database. Registration uses
+#         ALTER SYSTEM and preserves every pre-existing SCRIPT_LANGUAGES entry.
 #       - any other backend (cloud, e.g. aws/azure/exoscale/stackit): reaches
 #         the DB over the network and exposes the ordinary BucketFS HTTP
 #         endpoint, so it falls through to the normal HTTP transport above,
@@ -38,7 +40,7 @@ VM_BUCKETFS_ROOT="/var/lib/exa/bucketfs"
 SCRIPT_LANGUAGES_COLUMN="CURRENT_SCRIPT_LANGUAGES"
 RECONCILE_SECONDS=3
 PERSONAL_DB_HOST=127.0.0.1
-PERSONAL_DB_PORT=8563
+PERSONAL_DB_PORT_DEFAULT=8563
 SSH_HOST=127.0.0.1
 SSH_OPTIONS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   -o IdentitiesOnly=yes -o LogLevel=ERROR)
@@ -87,11 +89,14 @@ Required (HTTP transport, the default):
 
 Required (Personal transport, local backend):
   -D, --deployment NAME      Personal deployment name (a directory under
-                             $DEPLOYMENT_ROOT); SQL host/port are fixed at
-                             ${PERSONAL_DB_HOST}:${PERSONAL_DB_PORT}, the DB password is read from that
-                             deployment's secrets.json, and no BucketFS
-                             password is needed. Pass --password only to
-                             override the resolved one.
+                             $DEPLOYMENT_ROOT); SQL host is fixed at
+                             ${PERSONAL_DB_HOST} (so --host is ignored), and
+                             the SQL port comes from the descriptor's
+                             .connection.dbPort, defaulting to
+                             ${PERSONAL_DB_PORT_DEFAULT}. The DB password is
+                             read from that deployment's secrets.json, and no
+                             BucketFS password is needed. Pass --password or
+                             --port only to override the resolved values.
 
 Required (Personal transport, cloud backend):
   -D, --deployment NAME      Personal deployment name (a directory under
@@ -101,7 +106,7 @@ Required (Personal transport, cloud backend):
                              Personal provisions none; NOT needed for local)
 
 Options:
-  -P, --port PORT            Exasol DB port          (default: 8563; ignored for local --deployment, honored for cloud --deployment)
+  -P, --port PORT            Exasol DB port          (default: 8563; overrides the resolved port for --deployment on both backends)
   -u, --user USER            Exasol user             (default: sys; honored for --deployment on both backends)
       --bfs-port PORT        BucketFS HTTPS port     (default: 2581; HTTP transport only)
       --bucket NAME          BucketFS bucket         (default: default)
@@ -237,7 +242,7 @@ resolve_cloud_connection() {
   # Capture each accessor on its own line: a bare `local x="$(accessor)"` would
   # mask the command substitution's exit status behind the `local` builtin's.
   descriptor_host="$(deployment_field "$dir" '.connection.host' '')" || true
-  descriptor_port="$(deployment_field "$dir" '.connection.dbPort' '8563')" || true
+  descriptor_port="$(deployment_field "$dir" '.connection.dbPort' "$PERSONAL_DB_PORT_DEFAULT")" || true
   descriptor_user="$(deployment_field "$dir" '.connection.username' 'sys')" || true
 
   [[ -z "$HOST" ]] && HOST="$descriptor_host"
@@ -260,6 +265,26 @@ resolve_cloud_connection() {
     echo "error: Exasol Personal provisions no BucketFS password; --bfs-password is required for a cloud deployment" >&2
     return 1
   fi
+
+  return 0
+}
+
+# Finalize the connection globals HOST/PORT for a local Exasol Personal
+# deployment from its deployment.json, with an explicit --port (CLI_PORT)
+# winning over .connection.dbPort and PERSONAL_DB_PORT_DEFAULT used when that
+# field is absent.
+#
+# The local SQL endpoint is a launcher-managed forwarder on 127.0.0.1 whose
+# port is assigned per deployment and recorded as connection.dbPort; a
+# hardcoded 8563 registers against another deployment's database. This is the
+# single owner of that decision, and it returns (never exits) so the sourced
+# unit harness drives it in-process.
+resolve_local_connection() {
+  local dir="$1" descriptor_port
+  descriptor_port="$(deployment_field "$dir" '.connection.dbPort' "$PERSONAL_DB_PORT_DEFAULT")" || return 1
+
+  HOST="$PERSONAL_DB_HOST"
+  if [[ -n "$CLI_PORT" ]]; then PORT="$CLI_PORT"; else PORT="$descriptor_port"; fi
 
   return 0
 }
@@ -372,10 +397,11 @@ done
 
 # ── transport selection ────────────────────────────────────────────────────────
 # --deployment routes on the descriptor's .backend: "local" keeps the Exasol
-# Personal SSH + filesystem transport (forced 127.0.0.1:8563, ALTER SYSTEM); any
-# cloud backend resolves the normal HTTP connection details from the deployment
-# directory and falls through to the default upload-and-register path. Without
-# --deployment the default path handles a normal cluster / SaaS.
+# Personal SSH + filesystem transport (host fixed at 127.0.0.1, port resolved
+# from connection.dbPort, ALTER SYSTEM); any cloud backend resolves the normal
+# HTTP connection details from the deployment directory and falls through to
+# the default upload-and-register path. Without --deployment the default path
+# handles a normal cluster / SaaS.
 LOCAL_TRANSPORT=0
 DEPLOYMENT_DIR=""
 SSH_PORT=""
@@ -397,8 +423,8 @@ if [[ -n "$DEPLOYMENT" ]]; then
     # registration survives a restart. Fresh SSH port + node key on every run
     # (the port is reassigned on every `exasol start`).
     LOCAL_TRANSPORT=1
-    HOST="$PERSONAL_DB_HOST"
-    PORT="$PERSONAL_DB_PORT"
+    resolve_local_connection "$DEPLOYMENT_DIR" \
+      || die "cannot resolve the local deployment connection from $DEPLOYMENT_DIR"
     SCOPE=SYSTEM
     # The DB password lives in the same secrets.json the deployment dir already
     # carries; resolve it so `--deployment NAME` is a genuine one-liner, with an
