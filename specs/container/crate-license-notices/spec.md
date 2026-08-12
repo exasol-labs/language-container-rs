@@ -24,7 +24,7 @@ This is an attribution and source-offer compliance concern only; it does not cha
 * *GIVEN* `exaudfclient` is compiled by the `rust:1.94-bookworm` builder with no `--target`, so the shipped binary is glibc (`<arch>-unknown-linux-gnu`), not musl
 * *WHEN* the `targets` array is chosen
 * *THEN* it MUST include the glibc (`-unknown-linux-gnu`) triple for every shipped architecture so `gnu`-gated dependencies are attributed, correcting the prior musl-only pin that under-reported the shipped binary
-* *AND* it MAY additionally list the corresponding `-unknown-linux-musl` triples, since the union makes the extra entries harmless
+* *AND* it MUST NOT list the corresponding `-unknown-linux-musl` triples, since nothing musl is shipped and the union would over-attribute musl-only dependencies (enforced by `dist/tests/about_toml_test.sh`)
 * *AND* a comment in `about.toml` MUST record why the shipped binary is glibc and why both libc/arch triples are listed
 
 ### Scenario: Generated manifest ships in the tarball for each architecture

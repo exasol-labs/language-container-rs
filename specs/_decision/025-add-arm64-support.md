@@ -8,22 +8,23 @@
 
 ### Context
 
-`about.toml`'s `targets` array selects which triples cargo-about evaluates when generating `THIRD-PARTY-LICENSES.md`. The prior list pinned only `aarch64-unknown-linux-musl`-shaped entries, but the shipped `exaudfclient` is built glibc (`rust:1.94-bookworm`, no `--target`), so the musl-only pin already under-reported `gnu`-gated dependencies before arm64 support existed. cargo-about evaluates `targets` as a union: a dependency reached only through a `cfg(...)` gate is attributed if it matches any listed target, so omitting a shipped architecture silently drops that architecture's gated dependencies — an attribution defect — while listing extra targets only over-attributes.
+`about.toml`'s `targets` array selects which triples cargo-about evaluates when generating `THIRD-PARTY-LICENSES.md`. The prior list pinned only `x86_64-unknown-linux-musl`, but the shipped `exaudfclient` is built glibc (`rust:1.94-bookworm`, no `--target`) and the UDF `.so`s it loads are glibc-dynamic cdylibs — nothing musl is distributed. The musl-only pin therefore both under-reported the shipped `gnu`-gated dependencies and over-reported musl-only ones. cargo-about evaluates `targets` as a union: a dependency reached only through a `cfg(...)` gate is attributed if it matches any listed target, so omitting a shipped architecture silently drops that architecture's gated dependencies (an attribution defect), while listing an unshipped triple over-attributes dependencies that never ship.
 
 ### Decision
 
-Set `targets` to `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`.
+Set `targets` to the two glibc triples for the shipped architectures — `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` — and nothing else. `dist/tests/about_toml_test.sh` enforces this: the build fails if either `-unknown-linux-musl` triple appears.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| All four triples (both libc, both arches) | ✓ Chosen — fixes the latent gnu gap and adds aarch64 in one move; union makes over-attribution safe |
-| Add only `aarch64-unknown-linux-musl` (the issue's literal ask) | ✗ Rejected — leaves the pre-existing gnu-gated under-attribution unfixed |
+| Both glibc (gnu) triples only, no musl | ✓ Chosen — attributes exactly the shipped architectures; a committed test forbids musl so the manifest can't over-attribute unshipped deps |
+| All four triples (both libc, both arches) | ✗ Rejected — over-attributes musl-only dependencies that never ship, since nothing musl is built |
+| Keep only `x86_64-unknown-linux-musl` (main's prior pin) | ✗ Rejected — musl isn't shipped, and it omits aarch64, under-reporting the shipped glibc deps |
 
 ### Consequences
 
-`THIRD-PARTY-LICENSES.md` attributes every dependency gated on any of the four triples for both shipped architectures. Over-attribution is compliance-safe; the fix is packaging-only and changes no runtime behavior.
+`THIRD-PARTY-LICENSES.md` attributes every dependency gated on either shipped glibc triple, for both architectures, and no musl-only entries. The fix is packaging-only and changes no runtime behavior.
 
 ## ADR: Remove the vestigial targets/*.json build-std files
 
