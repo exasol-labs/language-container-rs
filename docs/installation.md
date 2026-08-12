@@ -100,6 +100,11 @@ override you pass when you want a different one. Full option reference:
 > # sshPort is reassigned on every `exasol start`; read it fresh each time.
 > ssh_port="$(jq -r '.connection.sshPort' \
 >   ~/.exasol/personal/deployments/<name>/deployment.json)"
+> # On a fresh deployment the bucket holds only the SLC dir; create udf/ first,
+> # or scp dead-ends with an opaque `dest open ".../udf/": Failure`.
+> ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+>   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -p "$ssh_port" \
+>   root@127.0.0.1 'mkdir -p /var/lib/exa/bucketfs/bfsdefault/default/udf'
 > scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 >   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -P "$ssh_port" \
 >   libmy_udf.so root@127.0.0.1:/var/lib/exa/bucketfs/bfsdefault/default/udf/
