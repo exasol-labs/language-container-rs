@@ -66,7 +66,7 @@ bucket within about a second, visible to UDFs at
 it copies the container over SSH, extracts it, then registers the language:
 
 ```bash
-scripts/install.sh --deployment my-db --password <db-password>
+scripts/install.sh --deployment my-db
 ```
 
 It builds the container for the host architecture (on Apple Silicon: an aarch64
@@ -74,12 +74,14 @@ SLC), or reuses a prebuilt tarball when `SLC_TARBALL` is set:
 
 ```bash
 SLC_TARBALL=/path/to/lc-rs.tar.gz \
-  scripts/install.sh --deployment my-db --password <db-password>
+  scripts/install.sh --deployment my-db
 ```
 
 The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
 `SLC_TARBALL` is set; it fixes the SQL host/port at `127.0.0.1:8563`, registers
-with `ALTER SYSTEM`, and needs no BucketFS password. Full option reference:
+with `ALTER SYSTEM`, and needs no BucketFS password. The DB password is read
+from the deployment's `secrets.json` `.dbPassword`, so `--password` is only an
+override you pass when you want a different one. Full option reference:
 `scripts/install.sh --help`.
 
 > **Building UDFs for Personal:** the UDF `.so` itself must be built on — or

@@ -6,7 +6,7 @@ Installs and registers the Rust SLC on an Exasol Personal single-node deployment
 
 An Exasol Personal deployment runs its single-node database either locally (an Apple Silicon VM) or on a cloud backend (`aws`, `azure`, `exoscale`, `stackit`). `scripts/install.sh --deployment <name>` reads the deployment descriptor `~/.exasol/personal/deployments/<name>/deployment.json` and branches on its `.backend` field, mirroring the Personal launcher's own `IsLocalBackend()`: a `.backend` of `local` selects the SSH/filesystem transport; any other value selects the standard BucketFS HTTP transport. A missing or empty `.backend` is a malformed descriptor and fails the run.
 
-A local Personal deployment publishes only the SQL port (`8563`) from its VM; it exposes no BucketFS HTTP upload endpoint, so the standard `exapump bucketfs cp` path (to port `2581`) dead-ends. Personal's Nano engine instead reconciles BucketFS from the VM filesystem: extracting the SLC into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real bucket within about one second, visible to UDFs at `/buckets/<service>/<bucket>/<slc-name>/`. The VM is reachable over SSH with the private key at `local/node_access.pem` and an SSH port read from `deployment.json` (`connection.sshPort`). The SSH port changes on every `exasol start`, so it must be read fresh on every run and never cached. Registration is a plain `ALTER SYSTEM SET SCRIPT_LANGUAGES` issued over `8563` that preserves every pre-existing entry.
+A local Personal deployment publishes only the SQL port (`8563`) from its VM; it exposes no BucketFS HTTP upload endpoint, so the standard `exapump bucketfs cp` path (to port `2581`) dead-ends. Personal's Nano engine instead reconciles BucketFS from the VM filesystem: extracting the SLC into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real bucket within about one second, visible to UDFs at `/buckets/<service>/<bucket>/<slc-name>/`. The VM is reachable over SSH with the private key at `local/node_access.pem` and an SSH port read from `deployment.json` (`connection.sshPort`). The SSH port changes on every `exasol start`, so it must be read fresh on every run and never cached. The DB password is read from the sibling `secrets.json` `.dbPassword`, with a command-line `--password` overriding it when given; no BucketFS password is needed, because the local transport never uses the HTTP endpoint. Registration is a plain `ALTER SYSTEM SET SCRIPT_LANGUAGES` issued over `8563` that preserves every pre-existing entry.
 
 A cloud Personal deployment reaches the database over the network and exposes the BucketFS HTTP endpoint (port `2581`, with the `bfsdefault/default` bucket auto-created), so it is the standard HTTP transport with connection details harvested from the deployment directory rather than typed on the command line. `deployment.json` carries `connection.host`, `connection.dbPort` (an integer; `8563` when absent), and `connection.username` (`sys` when absent); the DB password lives in the sibling `secrets.json` `.dbPassword`. Personal provisions no BucketFS read/write password anywhere, so the operator MUST supply `--bfs-password`. Any of `--host`, `--port`, `--user`, `--password` given on the command line overrides the descriptor-derived value. After resolving connection details, the cloud path runs the same upload-and-register steps as a non-Personal install with no behavioral change.
 
@@ -49,6 +49,14 @@ Personal is not exercisable in CI (no arm64 Exasol DB image exists, and this wor
 * *WHEN* a scalar Rust UDF is created and invoked over `8563`
 * *THEN* it MUST return the expected result
 * *AND* the registration MUST still resolve after an `exasol stop`/`start` cycle
+
+### Scenario: Local install resolves the DB password from the deployment directory
+
+* *GIVEN* a local Personal deployment whose `secrets.json` carries `.dbPassword`
+* *WHEN* the local install runs without `--password`
+* *THEN* the DB password MUST come from `secrets.json` `.dbPassword`
+* *AND* a `--password` given on the command line MUST override it
+* *AND* when neither resolves a password, the local install MUST fail with a clear error
 
 ### Scenario: Deployment backend selects the transport
 
