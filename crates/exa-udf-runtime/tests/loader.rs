@@ -105,11 +105,14 @@ fn loader_errors_on_missing_named_entry() {
         Err(RuntimeError::Loader(msg)) => {
             assert!(
                 msg.contains("no entry point found for script 'MISSING'"),
-                "expected rebuild-hint message, got: {msg}"
+                "expected missing-entry message, got: {msg}"
             );
+            // A .so that exports a DIFFERENT named entry is the name-mismatch
+            // case: the message must lead with the naming rule, not misdirect to
+            // the SDK-version rebuild hint.
             assert!(
-                msg.contains("hint: rebuild with sdk >= 0.14.0"),
-                "expected rebuild-hint in message, got: {msg}"
+                msg.contains("must match the UDF's exported entry"),
+                "expected name-mismatch guidance in message, got: {msg}"
             );
         }
         Err(other) => panic!("expected Loader error, got {other:?}"),
@@ -139,8 +142,10 @@ fn loader_rejects_legacy_bare_entry() {
                 msg.contains("no entry point found for script 'SOME_SCRIPT'"),
                 "expected rebuild-hint message for legacy .so, got: {msg}"
             );
+            // A .so exporting only the bare, unnamed __exa_udf_entry predates
+            // entry-point naming — here the SDK-version rebuild hint is correct.
             assert!(
-                msg.contains("hint: rebuild with sdk >= 0.14.0"),
+                msg.contains("rebuild with sdk >= 0.14.0"),
                 "expected rebuild-hint in message, got: {msg}"
             );
         }

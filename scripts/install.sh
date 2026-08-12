@@ -88,8 +88,10 @@ Required (HTTP transport, the default):
 Required (Personal transport, local backend):
   -D, --deployment NAME      Personal deployment name (a directory under
                              $DEPLOYMENT_ROOT); SQL host/port are fixed at
-                             ${PERSONAL_DB_HOST}:${PERSONAL_DB_PORT} and no BucketFS password is needed
-  -p, --password PASS        Exasol DB password
+                             ${PERSONAL_DB_HOST}:${PERSONAL_DB_PORT}, the DB password is read from that
+                             deployment's secrets.json, and no BucketFS
+                             password is needed. Pass --password only to
+                             override the resolved one.
 
 Required (Personal transport, cloud backend):
   -D, --deployment NAME      Personal deployment name (a directory under
@@ -127,8 +129,8 @@ Examples:
   $(basename "$0") --host my.exasol.cloud --user admin --password s3cr3t \\
     --bfs-password bfspass --scope SYSTEM
 
-  # Exasol Personal, local backend:
-  $(basename "$0") --deployment my-db --password exasol
+  # Exasol Personal, local backend (DB password resolved from secrets.json):
+  $(basename "$0") --deployment my-db
 
   # Exasol Personal, cloud backend:
   $(basename "$0") --deployment my-cloud-db --bfs-password bfspass
@@ -398,7 +400,11 @@ if [[ -n "$DEPLOYMENT" ]]; then
     HOST="$PERSONAL_DB_HOST"
     PORT="$PERSONAL_DB_PORT"
     SCOPE=SYSTEM
-    [[ -z "$PASSWORD" ]] && die "--password is required"
+    # The DB password lives in the same secrets.json the deployment dir already
+    # carries; resolve it so `--deployment NAME` is a genuine one-liner, with an
+    # explicit --password still winning (mirrors the cloud branch below).
+    [[ -n "$PASSWORD" ]] || PASSWORD="$(deployment_db_password "$DEPLOYMENT_DIR" || true)"
+    [[ -z "$PASSWORD" ]] && die "--password is required (no .dbPassword in $DEPLOYMENT_DIR/$SECRETS_DESCRIPTOR)"
     SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
     NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
     [[ -r "$NODE_KEY" ]] || die "no readable node key at $NODE_KEY"
@@ -416,7 +422,9 @@ else
   [[ -z "$BFS_PASSWORD" ]] && die "--bfs-password is required"
 fi
 
-SCOPE_UPPER="${SCOPE^^}"
+# tr, not ${SCOPE^^}: the local Personal path is macOS-only and macOS ships
+# bash 3.2, which lacks the bash-4 case-modification expansion.
+SCOPE_UPPER="$(printf '%s' "$SCOPE" | tr '[:lower:]' '[:upper:]')"
 if [[ "$SCOPE_UPPER" != "SESSION" && "$SCOPE_UPPER" != "SYSTEM" ]]; then
   die "--scope must be SESSION or SYSTEM"
 fi
