@@ -13,10 +13,12 @@
 #         no BucketFS HTTP endpoint, so the tarball travels over SSH and is
 #         extracted straight into the VM's BucketFS directory; the engine
 #         reconciles a real bucket from it. The SSH port is reassigned on every
-#         `exasol start`, so it is read from the deployment descriptor on every
-#         run and never cached. Registration uses ALTER SYSTEM and preserves
-#         every pre-existing SCRIPT_LANGUAGES entry, so re-running after
-#         `exasol stop && exasol start` picks up the reassigned port itself.
+#         `exasol start`, so re-running after `exasol stop && exasol start`
+#         picks it up. The SQL port is assigned per deployment via
+#         `exasol config set --ports db:<port>`, so it is read fresh from
+#         connection.dbPort rather than hardcoded — a hardcoded value would
+#         register against another deployment's database. Registration uses
+#         ALTER SYSTEM and preserves every pre-existing SCRIPT_LANGUAGES entry.
 #       - any other backend (cloud, e.g. aws/azure/exoscale/stackit): reaches
 #         the DB over the network and exposes the ordinary BucketFS HTTP
 #         endpoint, so it falls through to the normal HTTP transport above,
@@ -37,8 +39,8 @@ NODE_KEY_RELATIVE_PATH="local/node_access.pem"
 VM_BUCKETFS_ROOT="/var/lib/exa/bucketfs"
 SCRIPT_LANGUAGES_COLUMN="CURRENT_SCRIPT_LANGUAGES"
 RECONCILE_SECONDS=3
-PERSONAL_DB_HOST=127.0.0.1
-PERSONAL_DB_PORT=8563
+PERSONAL_DB_HOST_DEFAULT=127.0.0.1
+PERSONAL_DB_PORT_DEFAULT=8563
 SSH_HOST=127.0.0.1
 SSH_OPTIONS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
   -o IdentitiesOnly=yes -o LogLevel=ERROR)
@@ -87,11 +89,13 @@ Required (HTTP transport, the default):
 
 Required (Personal transport, local backend):
   -D, --deployment NAME      Personal deployment name (a directory under
-                             $DEPLOYMENT_ROOT); SQL host/port are fixed at
-                             ${PERSONAL_DB_HOST}:${PERSONAL_DB_PORT}, the DB password is read from that
-                             deployment's secrets.json, and no BucketFS
-                             password is needed. Pass --password only to
-                             override the resolved one.
+                             $DEPLOYMENT_ROOT); host, port, user, and DB
+                             password are read from that deployment's
+                             deployment.json/secrets.json — host defaults to
+                             ${PERSONAL_DB_HOST_DEFAULT}, port defaults to
+                             ${PERSONAL_DB_PORT_DEFAULT}, and no BucketFS
+                             password is needed. --host, --port, --user, and
+                             --password override the resolved values.
 
 Required (Personal transport, cloud backend):
   -D, --deployment NAME      Personal deployment name (a directory under
@@ -101,7 +105,7 @@ Required (Personal transport, cloud backend):
                              Personal provisions none; NOT needed for local)
 
 Options:
-  -P, --port PORT            Exasol DB port          (default: 8563; ignored for local --deployment, honored for cloud --deployment)
+  -P, --port PORT            Exasol DB port          (default: 8563; overrides the resolved port for --deployment on both backends)
   -u, --user USER            Exasol user             (default: sys; honored for --deployment on both backends)
       --bfs-port PORT        BucketFS HTTPS port     (default: 2581; HTTP transport only)
       --bucket NAME          BucketFS bucket         (default: default)
@@ -218,26 +222,50 @@ deployment_db_password() {
   printf '%s\n' "$password"
 }
 
-# Finalize the normal-path connection globals HOST/PORT/USER/PASSWORD for a
-# cloud Exasol Personal deployment from its deployment.json + secrets.json, with
-# any explicit CLI flag winning over the descriptor. This is the single owner of
-# the cloud-resolution decision: it also owns the resolved-DB-password presence
-# check (an empty password after any --password override is the failure) and the
-# --bfs-password requirement (Personal provisions no BucketFS password).
+# Finalize the connection globals HOST/PORT/USER/PASSWORD for an Exasol Personal
+# deployment from its deployment.json + secrets.json, with any explicit CLI flag
+# winning over the descriptor:
 #
-# Returns 1 (never exits) on a missing value so the sourced unit harness drives
-# it in-process. main invokes it as `resolve_cloud_connection "$dir" || die …`,
-# whose condition context suspends errexit inside so a failed accessor falls
-# through to these presence checks instead of aborting.
-resolve_cloud_connection() {
-  local dir="$1"
+#   host      --host     → .connection.host     → <default_host>  (empty fails)
+#   port      --port     → .connection.dbPort   → PERSONAL_DB_PORT_DEFAULT
+#   user      --user     → .connection.username → sys
+#   password  --password → secrets.json .dbPassword               (empty fails)
+#
+# One precedence rule serves both backends, because a second copy of it is where
+# a backend-specific assumption hides: the local path once pinned the SQL port to
+# 8563 and so registered against whichever deployment's database answered it. The
+# host default is the only genuinely per-backend part of a connection, so it
+# arrives as an argument — 127.0.0.1 for local, empty for cloud, which has no
+# default and must read a host. Everything that is not a connection field (the
+# local ALTER scope, the missing-dbPort warning, the cloud BucketFS password)
+# stays at the call site, so this function never asks which backend called it.
+#
+# Returns 1 (never exits) on an unreadable deployment.json or a missing host or
+# password, so the sourced unit harness drives it in-process. main invokes it as
+# `resolve_deployment_connection "$dir" "$default_host" || die …`, whose
+# condition context suspends errexit inside so a failed accessor falls through to
+# these presence checks instead of aborting.
+#
+# The descriptor guard clause is what makes the three defaults above meaningful:
+# deployment_field fails *before* it substitutes the caller's default, so a failed
+# read yields no default at all and must fail the whole function rather than fall
+# through. Left to fall through, an unreadable descriptor would return 0 with an
+# empty PORT and USER whenever --host and --password are both supplied, since the
+# presence checks below then have nothing left to catch.
+resolve_deployment_connection() {
+  local dir="$1" default_host="$2"
   local descriptor_host descriptor_port descriptor_user
   local descriptor_password=""
 
+  if [[ ! -r "$dir/$DEPLOYMENT_DESCRIPTOR" ]]; then
+    echo "error: no readable deployment descriptor at $dir/$DEPLOYMENT_DESCRIPTOR" >&2
+    return 1
+  fi
+
   # Capture each accessor on its own line: a bare `local x="$(accessor)"` would
   # mask the command substitution's exit status behind the `local` builtin's.
-  descriptor_host="$(deployment_field "$dir" '.connection.host' '')" || true
-  descriptor_port="$(deployment_field "$dir" '.connection.dbPort' '8563')" || true
+  descriptor_host="$(deployment_field "$dir" '.connection.host' "$default_host")" || true
+  descriptor_port="$(deployment_field "$dir" '.connection.dbPort' "$PERSONAL_DB_PORT_DEFAULT")" || true
   descriptor_user="$(deployment_field "$dir" '.connection.username' 'sys')" || true
 
   [[ -z "$HOST" ]] && HOST="$descriptor_host"
@@ -249,13 +277,28 @@ resolve_cloud_connection() {
   fi
 
   if [[ -z "$HOST" ]]; then
-    echo "error: no DB host for the cloud deployment; set .connection.host in $dir/$DEPLOYMENT_DESCRIPTOR or pass --host" >&2
+    echo "error: no DB host for the deployment; set .connection.host in $dir/$DEPLOYMENT_DESCRIPTOR or pass --host" >&2
     return 1
   fi
   if [[ -z "$PASSWORD" ]]; then
-    echo "error: no DB password for the cloud deployment; set .dbPassword in $dir/$SECRETS_DESCRIPTOR or pass --password" >&2
+    echo "error: no DB password for the deployment; set .dbPassword in $dir/$SECRETS_DESCRIPTOR or pass --password" >&2
     return 1
   fi
+
+  return 0
+}
+
+# Require the operator-supplied BucketFS write password a cloud Personal install
+# uploads with. It sits outside resolve_deployment_connection because a BucketFS
+# credential is not a connection field: it authenticates a different service, no
+# descriptor carries it (Personal provisions none on any backend), and the local
+# transport needs none at all since it copies over SSH. Gating it on the
+# resolver's host default would smuggle the backend name back into a function
+# that deliberately knows none.
+#
+# Returns 1 (never exits), like the resolver, so the sourced unit harness drives
+# it in-process; main invokes it as `require_cloud_bfs_password || die …`.
+require_cloud_bfs_password() {
   if [[ -z "$BFS_PASSWORD" ]]; then
     echo "error: Exasol Personal provisions no BucketFS password; --bfs-password is required for a cloud deployment" >&2
     return 1
@@ -372,9 +415,10 @@ done
 
 # ── transport selection ────────────────────────────────────────────────────────
 # --deployment routes on the descriptor's .backend: "local" keeps the Exasol
-# Personal SSH + filesystem transport (forced 127.0.0.1:8563, ALTER SYSTEM); any
-# cloud backend resolves the normal HTTP connection details from the deployment
-# directory and falls through to the default upload-and-register path. Without
+# Personal SSH + filesystem transport (SQL endpoint resolved from the
+# descriptor with a 127.0.0.1 host default, ALTER SYSTEM); any cloud backend
+# resolves the normal HTTP connection details from the deployment directory
+# and falls through to the default upload-and-register path. Without
 # --deployment the default path handles a normal cluster / SaaS.
 LOCAL_TRANSPORT=0
 DEPLOYMENT_DIR=""
@@ -397,23 +441,26 @@ if [[ -n "$DEPLOYMENT" ]]; then
     # registration survives a restart. Fresh SSH port + node key on every run
     # (the port is reassigned on every `exasol start`).
     LOCAL_TRANSPORT=1
-    HOST="$PERSONAL_DB_HOST"
-    PORT="$PERSONAL_DB_PORT"
+    resolve_deployment_connection "$DEPLOYMENT_DIR" "$PERSONAL_DB_HOST_DEFAULT" \
+      || die "cannot resolve the local deployment connection from $DEPLOYMENT_DIR"
+    if [[ -z "$CLI_PORT" ]]; then
+      local descriptor_db_port
+      descriptor_db_port="$(deployment_field "$DEPLOYMENT_DIR" '.connection.dbPort' '')" || true
+      if [[ -z "$descriptor_db_port" ]]; then
+        echo "warning: no .connection.dbPort in $DEPLOYMENT_DIR/$DEPLOYMENT_DESCRIPTOR; registering over the fallback port $PERSONAL_DB_PORT_DEFAULT risks hitting another local deployment's database" >&2
+      fi
+    fi
     SCOPE=SYSTEM
-    # The DB password lives in the same secrets.json the deployment dir already
-    # carries; resolve it so `--deployment NAME` is a genuine one-liner, with an
-    # explicit --password still winning (mirrors the cloud branch below).
-    [[ -n "$PASSWORD" ]] || PASSWORD="$(deployment_db_password "$DEPLOYMENT_DIR" || true)"
-    [[ -z "$PASSWORD" ]] && die "--password is required (no .dbPassword in $DEPLOYMENT_DIR/$SECRETS_DESCRIPTOR)"
     SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
     NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
     [[ -r "$NODE_KEY" ]] || die "no readable node key at $NODE_KEY"
   else
     # Cloud reaches the DB over the network and exposes the ordinary BucketFS
-    # HTTP endpoint; --password is an optional override here, so the resolved-
-    # password check lives inside resolve_cloud_connection, not before the branch.
-    resolve_cloud_connection "$DEPLOYMENT_DIR" \
+    # HTTP endpoint; the BucketFS write-password check lives in
+    # require_cloud_bfs_password, not before the branch.
+    resolve_deployment_connection "$DEPLOYMENT_DIR" '' \
       || die "cannot resolve the cloud deployment connection from $DEPLOYMENT_DIR"
+    require_cloud_bfs_password || die "cannot install a cloud deployment without a BucketFS password"
   fi
 else
   require_command exapump
@@ -473,7 +520,7 @@ if [[ "$LOCAL_TRANSPORT" -eq 1 ]]; then
   EXISTING="$(current_script_languages "$DSN")"
   SCRIPT_LANGUAGES="$(script_languages_with_rust_entry "$EXISTING" "$ENTRY")"
 
-  echo "==> Registering RUST (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"
+  echo "==> Registering RUST at ${HOST}:${PORT} (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"
   exapump sql "ALTER SYSTEM SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" -d "$DSN"
   echo "==> Done. The RUST script language is now available at /buckets/${BFS_SERVICE}/${BUCKET}/${SLC_NAME}/."
   echo
@@ -496,7 +543,7 @@ else
   SCRIPT_LANGUAGES="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
   DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
 
-  echo "==> Registering RUST language (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"
+  echo "==> Registering RUST language at ${HOST}:${PORT} (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"
   exapump sql \
     "ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" \
     -d "$DSN"
