@@ -54,9 +54,10 @@ Full option reference: `scripts/install.sh --help`
 
 ## Exasol Personal install
 
-Exasol Personal publishes only a SQL port from its VM, on `127.0.0.1` at a
-port assigned per deployment (`connection.dbPort` in `deployment.json`,
-defaulting to `8563` when absent) — there is no BucketFS HTTP endpoint to
+Exasol Personal publishes only a SQL port from its VM, on a host that
+defaults to `127.0.0.1` (`connection.host` in `deployment.json`) at a
+port assigned per deployment (`connection.dbPort`, defaulting to `8563`
+when absent) — there is no BucketFS HTTP endpoint to
 upload to, so the [automated path](#automated-install-scriptsinstallsh)
 dead-ends at its upload step. Personal's engine reconciles BucketFS from the VM
 filesystem instead: extracting the container into
@@ -80,15 +81,18 @@ SLC_TARBALL=/path/to/lc-rs.tar.gz \
 ```
 
 The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
-`SLC_TARBALL` is set; it fixes the SQL host at `127.0.0.1` and resolves the
-SQL port from the deployment's `connection.dbPort` (defaulting to `8563` when
-absent), registers with `ALTER SYSTEM`, and needs no BucketFS password.
-`--port` overrides the resolved port when you need it to. The DB password is
-read from the deployment's `secrets.json` `.dbPassword`, so `--password` is
-only an override you pass when you want a different one. A host running
-several local deployments serves each on its own port, so it is the
-deployment's descriptor — not a fixed value — that decides which database
-receives the registration. Full option reference: `scripts/install.sh --help`.
+`SLC_TARBALL` is set; it resolves the SQL host, port, user, and DB password
+from the deployment descriptor, registers with `ALTER SYSTEM`, and needs no
+BucketFS password. The host defaults to `127.0.0.1`, overridden by the
+deployment's `connection.host` and then by `--host`. The port resolves from
+`connection.dbPort` (defaulting to `8563` when absent), overridden by
+`--port`. The user resolves from `connection.username` (defaulting to
+`sys`), overridden by `--user`. The DB password is read from the
+deployment's `secrets.json` `.dbPassword`, overridden by `--password` when
+you want a different one. A host running several local deployments serves
+each on its own port, so it is the deployment's descriptor — not a fixed
+value — that decides which database receives the registration. Full option
+reference: `scripts/install.sh --help`.
 
 > **Building UDFs for Personal:** the UDF `.so` itself must be built on — or
 > inside — a Linux environment matching the deployment's architecture (an aarch64
@@ -121,9 +125,9 @@ receives the registration. Full option reference: `scripts/install.sh --help`.
 
 | Step | What it does, and why |
 |------|-----------------------|
-| Read the connection details | Takes `connection.sshPort`, `connection.dbPort`, and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. |
+| Read the connection details | Takes `connection.host`, `connection.username`, `connection.sshPort`, `connection.dbPort`, and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. A descriptor with no `connection.dbPort` is malformed and produces a warning naming the fallback port (`8563`) it registers over instead. |
 | Copy and extract | `scp` over the SSH port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` and confirm `exaudf/exaudfclient` landed executable. |
-| Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over the resolved SQL port (`connection.dbPort`, default `8563`), so the registration survives a restart. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
+| Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over the resolved SQL port (`connection.dbPort`, default `8563`), so the registration survives a restart. The resolved `host:port` is printed before the `ALTER` runs. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
 
 Re-running after `exasol stop && exasol start` is the supported way to recover:
 it picks up the reassigned SSH port and replaces its own `RUST` entry without

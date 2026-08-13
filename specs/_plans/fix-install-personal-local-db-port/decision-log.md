@@ -14,6 +14,8 @@
 **Q:** `specs/container/personal-install/spec.md`'s background asserts local Personal "publishes only the SQL port (`8563`)" and no local scenario requires reading `connection.dbPort` — how should the spec delta handle this?
 **A:** Correct the background and add a local `dbPort` scenario — fix the incorrect assertion, and add a scenario for the local branch mirroring the cloud scenario "Cloud connection details resolve from the deployment directory": the DB port (and, per the `--port` decision, the override) MUST come from `connection.dbPort`, defaulting to `8563` when absent.
 
+**Revision input (no second interview):** the requirements for tasks 5-11 come from the PR #85 review comment (`github.com/exasol-labs/language-container-rs/pull/85#issuecomment-5276531377`). It states the goal, the resolver signature, the precedence table, the call-site changes, two open findings, the test additions, and the doc and spec sections to rewrite. Decisions [9]-[16] and the `[pr-review]` finding record how each was applied.
+
 ## Design Decisions
 
 ### [1] Extract `resolve_local_connection` rather than fixing the two lines in place
@@ -72,7 +74,70 @@
 - **Rationale:** Recorded so a reviewer reads their absence as a decision. Both are candidates for their own issues; printing the resolved `host:port` before `ALTER SYSTEM` would have made issue #83 self-diagnosing.
 - **Promotes to ADR:** no
 
+### [9] Unify local and cloud resolution into one `resolve_deployment_connection`
+
+- **Decision:** Delete `resolve_cloud_connection` and `resolve_local_connection`. One `resolve_deployment_connection <dir> <default_host>` sets `HOST`, `PORT`, `USER`, and `PASSWORD` for both backends. Everything genuinely per-backend stays at the call site: `SCOPE=SYSTEM`, the SSH port read, the node-key check, the missing-`dbPort` warning, and the `--bfs-password` check. Supersedes decision **[2] Extract host/port only; password, scope, SSH port, and node key stay in `main`**.
+- **Alternatives:** Keep both resolvers and add `.connection.host` to the local one. Rejected: two copies of one precedence rule is where the next backend-specific assumption hides. Defer unification to a follow-up issue. Rejected: the plan is unrecorded and the PR is draft, so folding it in costs one review pass instead of two, and [2]'s deliberate local/cloud asymmetry never reaches the permanent library.
+- **Rationale:** The host default is the only connection difference between the backends, so it is the only parameter the two call sites need. A resolver that must ask which backend called it is not backend-agnostic.
+- **Promotes to ADR:** no
+
+### [10] Reverse [5]: read `.connection.host` for local and honor `--host`
+
+- **Decision:** The local host resolves as `--host` → `.connection.host` → `127.0.0.1`. `usage()`, `docs/installation.md`, and the spec delta drop the claims that the host is fixed and that `--host` is ignored. Supersedes decision **[5] Keep the local DB host fixed at `127.0.0.1` and say so**.
+- **Alternatives:** Keep [5]. Rejected: it records a launcher implementation detail as permanent installer behavior. Should Personal ever assign per-deployment addresses, the local branch registers against whatever answers `127.0.0.1` and discards the operator's only workaround.
+- **Rationale:** This is #83's defect class, not a separate concern. The hardcoded port and the hardcoded host are the same assumption about what Personal will always do. Reading the field costs one `deployment_field` call on a seam that already exists and is already tested.
+- **Promotes to ADR:** no
+
+### [11] Local `USER` resolves from `.connection.username`
+
+- **Decision:** `USER` resolves as `--user` → `.connection.username` → `sys` on both backends.
+- **Alternatives:** Keep `sys` for local, since real descriptors say `sys`. Rejected: a per-backend exception costs more to document than the accessor the shared function already makes.
+- **Rationale:** No practical change today. It removes a rule a future reader would have to check the code to discover.
+- **Promotes to ADR:** no
+
+### [12] `--bfs-password` stays a cloud-path check, in its own function
+
+- **Decision:** Move the `--bfs-password` check out of the resolver into `require_cloud_bfs_password`, called from `main`'s cloud branch. Its error text is unchanged, so the existing `cloud_requires_operator_bfs_password` assertion holds against the new target.
+- **Alternatives:** Keep the check inside the resolver, skipped when `<default_host>` is non-empty. Rejected: gating on the host default smuggles the backend back into a function whose point is not knowing it. Inline the check in `main`'s cloud branch, as the PR review's wording suggests. Rejected: `main` is unreachable from the sourced harness, so inlining would drop the only assertion covering a recorded spec scenario.
+- **Rationale:** A BucketFS credential is not a connection field. Its own function honors the review's placement while keeping the seam the harness needs.
+- **Promotes to ADR:** no
+
+### [13] Warn from the local call site, re-reading `.connection.dbPort`
+
+- **Decision:** After a local resolve with no `--port`, `main` re-reads `.connection.dbPort` with an empty default and warns when it is absent, naming the fallback port and the risk of hitting another deployment's database.
+- **Alternatives:** Have the resolver export a "port came from the descriptor" flag. Rejected: a global describing how resolution happened leaks the resolver's internals to every caller. Skip the warning. Rejected: a malformed descriptor then reproduces #83 silently, which is the failure this plan exists to remove.
+- **Rationale:** A real local descriptor always records the assigned port, so its absence is a malformed descriptor rather than a default worth taking quietly. A second `jq` read is cheaper than a leaked global, and the rule is local-only, so it belongs at the local call site.
+- **Promotes to ADR:** no
+
+### [14] Print the resolved endpoint in both registration banners
+
+- **Decision:** Both banners read `==> Registering RUST at ${HOST}:${PORT} …`. Resolves the deferred half of decision **[8] Defer the banner host:port print and the `deployment_ssh_port` deduplication**; the `deployment_ssh_port` deduplication stays deferred.
+- **Alternatives:** Keep both deferrals. Rejected: [8] already recorded that this print would have made #83 self-diagnosing, and the plan is now touching the same resolution path. Print on the local banner only, as the review's finding names. Rejected: the cloud path resolves its endpoint from a descriptor the operator never sees, so the same blindness applies there.
+- **Rationale:** A wrong target is otherwise invisible until an operator queries the database that was not updated.
+- **Promotes to ADR:** no
+
+### [15] Guard the cloud defaults test with sentinels
+
+- **Decision:** `resolves_cloud_defaults_when_connection_fields_absent` gains `PORT="unresolved"` and `USER="unresolved"` after `reset_connection_globals`, matching the local tests.
+- **Alternatives:** Leave it and open a `feature` issue, as round 2's advisory allowed. Rejected: task 5 already edits the line above it, so the sentinel costs one line now against an issue plus a future review.
+- **Rationale:** Its `8563` and `sys` assertions pass even when the function assigns neither global. Leaving the file with two guarded local defaults beside two unguarded cloud ones invites the next author to copy the unguarded pair.
+- **Promotes to ADR:** no
+
+### [16] `--host` retargets the SQL endpoint only
+
+- **Decision:** `SSH_HOST` stays `127.0.0.1`. `--host` and `.connection.host` change where SQL goes, not where `scp` and `ssh` go.
+- **Alternatives:** Route the SSH transport through the same resolved host. Rejected: the descriptor names no SSH host, so the installer would have to invent one, and the launcher's forwarder is on the invoking host by construction.
+- **Rationale:** Recorded so the split reads as a decision. A Personal release that moves the VM's SQL address would also need an SSH-host field, which is that change's problem, not this one's.
+- **Promotes to ADR:** no
+
 ## Review Findings
+
+### [pr-review] The unrecorded plan was about to record a hardcoded local host (PR #85)
+
+- **Finding:** The PR review verified the port fix, then rejected the spec delta it was about to record. The delta and `usage()` stated that the local SQL host is fixed at `127.0.0.1` and that `--host` is ignored. That claim bakes the launcher's current forwarder design into the installer, which is #83's defect class. The review also found the two resolvers still divergent, the resolved endpoint still unprinted, and a silent `8563` fallback still reachable from a malformed local descriptor.
+- **Direction change:** The two resolvers collapse into `resolve_deployment_connection` (decision [9]), which reverses [2] and [5]. `--host` and `.connection.host` now resolve for local (decision [10]), and `USER` resolves from the descriptor (decision [11]). The `--bfs-password` check moves to `require_cloud_bfs_password` (decision [12]), the missing-`dbPort` warning to the local call site (decision [13]), and both banners print the resolved endpoint (decision [14]). Tasks 5-11 carry the work; tasks 1-4 stay complete and are not reopened.
+- **Deviation from the review, recorded:** its §4 asks that all five cloud tests point at the unified function, while its §2 asks that the `--bfs-password` check stay on the cloud path. Both cannot hold for `cloud_requires_operator_bfs_password`. Decision [12] resolves it in favor of §2 and retargets that one test at `require_cloud_bfs_password`, preserving the assertion.
+- **Promotes to ADR:** no
 
 ### [plan-review] Task 1(c)'s `8563` assertion was vacuous (round 1 BLOCKER)
 

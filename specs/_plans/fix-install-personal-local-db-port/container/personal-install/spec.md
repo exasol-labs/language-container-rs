@@ -6,11 +6,17 @@ Installs and registers the Rust SLC on an Exasol Personal single-node deployment
 
 An Exasol Personal deployment runs its single-node database either locally (an Apple Silicon VM) or on a cloud backend (`aws`, `azure`, `exoscale`, `stackit`). `scripts/install.sh --deployment <name>` reads the deployment descriptor `~/.exasol/personal/deployments/<name>/deployment.json` and branches on its `.backend` field, mirroring the Personal launcher's own `IsLocalBackend()`: a `.backend` of `local` selects the SSH/filesystem transport; any other value selects the standard BucketFS HTTP transport. A missing or empty `.backend` is a malformed descriptor and fails the run.
 
+<!-- DELTA:NEW -->
+Both transports resolve the same four connection fields from the same deployment directory, under one precedence rule. A command-line `--host`, `--port`, `--user`, or `--password` wins. Otherwise the value comes from `deployment.json`'s `.connection.host`, `.connection.dbPort`, or `.connection.username`, or from `secrets.json`'s `.dbPassword`. The port then defaults to `8563` and the user to `sys`. The host default is the only field that differs between the backends. An unresolved host or DB password fails the run on either backend, and both print the resolved endpoint before registering.
+<!-- /DELTA:NEW -->
+
 <!-- DELTA:CHANGED -->
-A local Personal deployment publishes only a SQL endpoint from its VM; it exposes no BucketFS HTTP upload endpoint, so the standard `exapump bucketfs cp` path (to port `2581`) dead-ends. Personal's Nano engine instead reconciles BucketFS from the VM filesystem: extracting the SLC into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real bucket within about one second, visible to UDFs at `/buckets/<service>/<bucket>/<slc-name>/`. The VM is reachable over SSH with the private key at `local/node_access.pem` and an SSH port read from `deployment.json` (`connection.sshPort`). The SSH port changes on every `exasol start`, so it must be read fresh on every run and never cached. The SQL endpoint is a launcher-managed forwarder on `127.0.0.1` whose port is assigned per deployment (`exasol config set --ports db:<port>`) and recorded in the same descriptor as `connection.dbPort`; `8563` is one deployment's assignment rather than a property of local Personal, so a host running several local deployments serves each on its own port. The SQL port is therefore read from `deployment.json` on every run as well, with a command-line `--port` overriding it. The DB password is read from the sibling `secrets.json` `.dbPassword`, with a command-line `--password` overriding it when given; no BucketFS password is needed, because the local transport never uses the HTTP endpoint. Registration is a plain `ALTER SYSTEM SET SCRIPT_LANGUAGES` issued over the resolved SQL port that preserves every pre-existing entry.
+A local Personal deployment publishes only a SQL endpoint from its VM; it exposes no BucketFS HTTP upload endpoint, so the standard `exapump bucketfs cp` path (to port `2581`) dead-ends. Personal's Nano engine instead reconciles BucketFS from the VM filesystem: extracting the SLC into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real bucket within about one second, visible to UDFs at `/buckets/<service>/<bucket>/<slc-name>/`. The VM is reachable over SSH with the private key at `local/node_access.pem` and an SSH port read from `deployment.json` (`connection.sshPort`). The SSH port changes on every `exasol start`, so it must be read fresh on every run and never cached. The SQL endpoint is a launcher-managed forwarder whose port is assigned per deployment (`exasol config set --ports db:<port>`) and recorded in the same descriptor as `connection.dbPort`. `8563` is one deployment's assignment rather than a property of local Personal, so a host running several local deployments serves each on its own port. Local resolution therefore differs from cloud in one field only: its host default is `127.0.0.1`, the address the launcher forwards to. A local descriptor carrying no `connection.dbPort` is malformed, because the launcher always records the assigned port. No BucketFS password is needed, because the local transport never uses the HTTP endpoint. Registration is a plain `ALTER SYSTEM SET SCRIPT_LANGUAGES` issued over the resolved SQL endpoint that preserves every pre-existing entry.
 <!-- /DELTA:CHANGED -->
 
-A cloud Personal deployment reaches the database over the network and exposes the BucketFS HTTP endpoint (port `2581`, with the `bfsdefault/default` bucket auto-created), so it is the standard HTTP transport with connection details harvested from the deployment directory rather than typed on the command line. `deployment.json` carries `connection.host`, `connection.dbPort` (an integer; `8563` when absent), and `connection.username` (`sys` when absent); the DB password lives in the sibling `secrets.json` `.dbPassword`. Personal provisions no BucketFS read/write password anywhere, so the operator MUST supply `--bfs-password`. Any of `--host`, `--port`, `--user`, `--password` given on the command line overrides the descriptor-derived value. After resolving connection details, the cloud path runs the same upload-and-register steps as a non-Personal install with no behavioral change.
+<!-- DELTA:CHANGED -->
+A cloud Personal deployment reaches the database over the network and exposes the BucketFS HTTP endpoint (port `2581`, with the `bfsdefault/default` bucket auto-created), so it is the standard HTTP transport with connection details harvested from the deployment directory rather than typed on the command line. Cloud has no host default: `deployment.json` MUST carry `connection.host` or the operator MUST pass `--host`. Personal provisions no BucketFS read/write password anywhere, so the operator MUST supply `--bfs-password`; that credential is not a connection field, and only the cloud path requires it. After resolving connection details, the cloud path runs the same upload-and-register steps as a non-Personal install with no behavioral change.
+<!-- /DELTA:CHANGED -->
 
 Personal is not exercisable in CI (no arm64 Exasol DB image exists, and this workflow does not reach a live cloud deployment), so the end-to-end scenarios below are verified manually on a live Personal deployment; the descriptor-parsing, connection-resolution, and string-assembly logic is unit-tested and is architecture-independent.
 
@@ -39,13 +45,16 @@ Personal is not exercisable in CI (no arm64 Exasol DB image exists, and this wor
 * *THEN* its `#` fragment MUST point at the `exaudfclient` executable path, not its containing directory
 * *AND* the fragment MUST have no leading slash, because either mistake yields a bare `22002 VM crashed`
 
+<!-- DELTA:CHANGED -->
 ### Scenario: Registration is system-scoped and preserves existing entries
 
 * *GIVEN* a Personal database that may already have `SCRIPT_LANGUAGES` entries from `exasol slc install`
 * *WHEN* the Personal install registers the `RUST` language
 * *THEN* it MUST use `ALTER SYSTEM SET SCRIPT_LANGUAGES` so the registration survives a restart
+* *AND* it MUST print the resolved `host:port` it is registering against before issuing the statement, so a wrong target is visible without querying the database
 * *AND* it MUST preserve every pre-existing `SCRIPT_LANGUAGES` entry, adding the `RUST` alias alongside them
 * *AND* re-running the install MUST be idempotent across an `exasol stop`/`start` cycle
+<!-- /DELTA:CHANGED -->
 
 <!-- DELTA:CHANGED -->
 ### Scenario: A registered Rust UDF executes on Personal
@@ -69,10 +78,27 @@ Personal is not exercisable in CI (no arm64 Exasol DB image exists, and this wor
 
 * *GIVEN* a local Personal deployment whose `deployment.json` carries `connection.dbPort`
 * *WHEN* the local install resolves connection details with no overriding command-line flags
-* *THEN* the DB host MUST be `127.0.0.1`, because the launcher forwards the deployment's SQL endpoint to the invoking host
-* *AND* the DB port MUST come from `connection.dbPort`, defaulting to `8563` only when the field is absent, so on a host running several local deployments the install targets the database named by `--deployment` rather than whichever database answers `8563`
-* *AND* a `--port` given on the command line MUST override the descriptor-derived port
-* *AND* an unreadable `deployment.json` MUST fail with a clear error rather than fall back to a built-in port
+* *THEN* the DB host MUST come from `connection.host`, defaulting to `127.0.0.1` when that field is absent, because the launcher forwards the deployment's SQL endpoint to the invoking host
+* *AND* the DB port MUST come from `connection.dbPort`, defaulting to `8563` when that field is absent, so on a host running several local deployments the install targets the database named by `--deployment` rather than whichever database answers `8563`
+* *AND* the DB user MUST come from `connection.username`, defaulting to `sys` when that field is absent
+<!-- /DELTA:NEW -->
+
+<!-- DELTA:NEW -->
+### Scenario: Command-line flags override descriptor-derived local values
+
+* *GIVEN* a local Personal deployment
+* *WHEN* any of `--host`, `--port`, `--user`, or `--password` is given on the command line
+* *THEN* each provided flag MUST override the corresponding descriptor-derived value, under the same precedence the cloud path applies
+* *AND* any of those values not given on the command line MUST fall back to the descriptor value
+<!-- /DELTA:NEW -->
+
+<!-- DELTA:NEW -->
+### Scenario: A local descriptor that omits the SQL port is reported
+
+* *GIVEN* a local Personal deployment whose `deployment.json` carries no `connection.dbPort`, which the launcher always records
+* *WHEN* the local install resolves connection details without `--port`
+* *THEN* it MUST warn that the descriptor names no SQL port and that registering over the fallback `8563` risks hitting another local deployment
+* *AND* an unreadable `deployment.json` MUST fail with a clear error rather than fall back to a built-in host or port
 <!-- /DELTA:NEW -->
 
 ### Scenario: Deployment backend selects the transport

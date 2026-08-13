@@ -108,28 +108,51 @@ resolves_local_connection_from_descriptor() {
   dir="$(mktemp -d)"
   printf '{"backend":"local","connection":{"host":"descriptor.example","sshPort":52341,"dbPort":52164}}\n' \
     >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
-  HOST="override.example"
   PORT="unresolved"
-  resolve_local_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
   rc=$?
 
-  check "resolve_local_connection succeeds given a complete local descriptor" "0" "$rc"
-  check "HOST is fixed at the local forwarder, overriding both --host and the descriptor" "127.0.0.1" "$HOST"
+  check "resolve_deployment_connection succeeds given a complete local descriptor" "0" "$rc"
+  check "HOST resolves from connection.host" "descriptor.example" "$HOST"
   check "PORT resolves from connection.dbPort" "52164" "$PORT"
+  check "PASSWORD resolves from secrets.json .dbPassword" "secret" "$PASSWORD"
 
-  HOST="override.example"
   PORT="unresolved"
   printf '{"backend":"local","connection":{"host":"descriptor.example","sshPort":52341,"dbPort":59446}}\n' \
     >"$dir/deployment.json"
-  resolve_local_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
   check "a reassigned dbPort is picked up on the next read, never cached" "59446" "$PORT"
-  check "HOST is fixed at the local forwarder, overriding both --host and the descriptor" "127.0.0.1" "$HOST"
 
+  # With no descriptor there is no .connection.host to read and no --host
+  # supplied, so the empty-host check is what fails the resolution: a HOST left
+  # over from the assertions above would make this resolve return 0.
+  HOST=""
   rm -f "$dir/deployment.json"
-  resolve_local_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
   check "a missing descriptor fails" "1" "$?"
+
+  rm -rf "$dir"
+}
+
+unreadable_descriptor_fails_even_with_cli_overrides() {
+  local dir rc
+
+  # An empty deployment directory: every descriptor read fails. --host and
+  # --password disarm both presence checks, so nothing downstream is left to
+  # notice the failed reads — the resolver itself has to.
+  dir="$(mktemp -d)"
+
+  reset_connection_globals
+  HOST="cloud.example"
+  PASSWORD="pw"
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
+  rc=$?
+
+  check "an unreadable descriptor fails even when --host and --password are supplied" "1" "$rc"
+  check "PORT is not left empty by a failed descriptor read" "8563" "$PORT"
 
   rm -rf "$dir"
 }
@@ -140,13 +163,14 @@ cli_port_overrides_local_descriptor() {
   dir="$(mktemp -d)"
   printf '{"backend":"local","connection":{"host":"127.0.0.1","sshPort":52341,"dbPort":52164}}\n' \
     >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   # Simulates an operator who passed --port: CLI_PORT is pre-set exactly as
   # main's arg loop would set it.
   reset_connection_globals
   PORT="unresolved"
   CLI_PORT="1234"
-  resolve_local_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
 
   check "an explicit --port wins over connection.dbPort" "1234" "$PORT"
 
@@ -159,14 +183,74 @@ resolves_local_defaults_when_db_port_absent() {
   dir="$(mktemp -d)"
   printf '{"backend":"local","connection":{"host":"127.0.0.1","sshPort":52341}}\n' \
     >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
   PORT="unresolved"
-  resolve_local_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
   rc=$?
 
-  check "resolve_local_connection succeeds with dbPort absent" "0" "$rc"
+  check "resolve_deployment_connection succeeds with dbPort absent" "0" "$rc"
   check "PORT falls back to 8563 when connection.dbPort is absent" "8563" "$PORT"
+
+  rm -rf "$dir"
+}
+
+cli_host_overrides_local_descriptor() {
+  local dir
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"host":"descriptor.example","sshPort":52341,"dbPort":52164}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  # Simulates an operator who passed --host: HOST is pre-set exactly as main's
+  # arg loop would set it. Overriding the descriptor value (not the default)
+  # pins the top of the precedence chain: the descriptor already beats the
+  # default, so this is the only case that proves --host beats both.
+  reset_connection_globals
+  HOST="override.example"
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
+
+  check "an explicit --host wins over connection.host" "override.example" "$HOST"
+
+  rm -rf "$dir"
+}
+
+resolves_local_host_default_when_absent() {
+  local dir rc
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"sshPort":52341,"dbPort":52164}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  # No .connection.host and no --host: reset_connection_globals already leaves
+  # HOST="", which is how "no --host" is expressed, so no sentinel is needed.
+  reset_connection_globals
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
+  rc=$?
+
+  check "resolve_deployment_connection succeeds with connection.host absent" "0" "$rc"
+  check "HOST falls back to 127.0.0.1 when connection.host is absent" "127.0.0.1" "$HOST"
+
+  rm -rf "$dir"
+}
+
+resolves_local_user_from_descriptor() {
+  local dir
+
+  dir="$(mktemp -d)"
+  printf '{"backend":"local","connection":{"host":"127.0.0.1","sshPort":52341,"dbPort":52164,"username":"dbadmin"}}\n' \
+    >"$dir/deployment.json"
+  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
+
+  # username must not be "sys": reset_connection_globals already writes
+  # USER=sys, so a "sys" fixture would assert nothing.
+  reset_connection_globals
+  resolve_deployment_connection "$dir" "$PERSONAL_DB_HOST_DEFAULT" >/dev/null 2>&1
+
+  check "USER resolves from connection.username" "dbadmin" "$USER"
 
   rm -rf "$dir"
 }
@@ -236,11 +320,12 @@ resolves_cloud_connection_from_descriptor() {
   printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
-  BFS_PASSWORD="bfspw"
-  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  PORT="unresolved"
+  USER="unresolved"
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
   rc=$?
 
-  check "resolve_cloud_connection succeeds given a complete cloud descriptor" "0" "$rc"
+  check "resolve_deployment_connection succeeds given a complete cloud descriptor" "0" "$rc"
   check "HOST resolves from connection.host" "h.example" "$HOST"
   check "PORT resolves from connection.dbPort" "8563" "$PORT"
   check "USER resolves from connection.username" "sys" "$USER"
@@ -266,11 +351,10 @@ cli_flags_override_cloud_descriptor() {
   CLI_PORT="1234"
   CLI_USER="admin"
   PASSWORD="overridepw"
-  BFS_PASSWORD="bfspw"
-  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
   rc=$?
 
-  check "resolve_cloud_connection succeeds with CLI overrides" "0" "$rc"
+  check "resolve_deployment_connection succeeds with CLI overrides" "0" "$rc"
   check "an explicit --host wins over connection.host" "override.example" "$HOST"
   check "an explicit --port wins over connection.dbPort" "1234" "$PORT"
   check "an explicit --user wins over connection.username" "admin" "$USER"
@@ -280,20 +364,41 @@ cli_flags_override_cloud_descriptor() {
 }
 
 cloud_requires_operator_bfs_password() {
-  local dir err rc names_bfs_password
+  local err rc names_bfs_password
+
+  # A BucketFS credential is not a connection field: require_cloud_bfs_password
+  # reads only BFS_PASSWORD, so no deployment fixture takes part.
+  reset_connection_globals
+  err="$(require_cloud_bfs_password 2>&1 >/dev/null)"
+  rc=$?
+
+  check "an empty --bfs-password fails the cloud BucketFS-password requirement" "1" "$rc"
+  if [[ "$err" == *"--bfs-password"* ]]; then names_bfs_password=1; else names_bfs_password=0; fi
+  check "the error names --bfs-password as the missing BucketFS credential" "1" "$names_bfs_password"
+
+  BFS_PASSWORD="bfspw"
+  require_cloud_bfs_password >/dev/null 2>&1
+  check "a supplied --bfs-password lets the cloud install proceed" "0" "$?"
+}
+
+cloud_requires_host_when_descriptor_omits_it() {
+  local dir rc
 
   dir="$(mktemp -d)"
-  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
+  # No .connection.host: cloud is the one backend with no host default, so the
+  # empty default_host the cloud call site passes must leave HOST unresolved and
+  # fail the resolution. Every other cloud test supplies a descriptor host, which
+  # wins before the default is ever consulted.
+  printf '{"backend":"aws","connection":{"dbPort":8563,"username":"sys"}}\n' \
     >"$dir/deployment.json"
   printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
-  err="$(resolve_cloud_connection "$dir" 2>&1 >/dev/null)"
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
   rc=$?
 
-  check "an empty --bfs-password fails cloud resolution" "1" "$rc"
-  if [[ "$err" == *"--bfs-password"* ]]; then names_bfs_password=1; else names_bfs_password=0; fi
-  check "the error names --bfs-password as the missing Personal requirement" "1" "$names_bfs_password"
+  check "cloud resolution fails when connection.host is absent and no --host is given" "1" "$rc"
+  check "HOST stays empty because the cloud call site passes no host default" "" "$HOST"
 
   rm -rf "$dir"
 }
@@ -308,8 +413,7 @@ cloud_requires_db_password() {
   # --password override is supplied either.
 
   reset_connection_globals
-  BFS_PASSWORD="bfspw"
-  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
   rc=$?
 
   check "an absent secrets.json with no --password override fails cloud resolution" "1" "$rc"
@@ -326,11 +430,12 @@ resolves_cloud_defaults_when_connection_fields_absent() {
   printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
-  BFS_PASSWORD="bfspw"
-  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  PORT="unresolved"
+  USER="unresolved"
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
   rc=$?
 
-  check "resolve_cloud_connection succeeds with dbPort/username absent" "0" "$rc"
+  check "resolve_deployment_connection succeeds with dbPort/username absent" "0" "$rc"
   check "PORT falls back to 8563 when connection.dbPort is absent" "8563" "$PORT"
   check "USER falls back to sys when connection.username is absent" "sys" "$USER"
 
@@ -346,8 +451,7 @@ cloud_leaves_scope_untouched() {
   printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
 
   reset_connection_globals
-  BFS_PASSWORD="bfspw"
-  resolve_cloud_connection "$dir" >/dev/null 2>&1
+  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
 
   # Unlike the local transport, which forces SCOPE=SYSTEM, cloud resolution
   # MUST NOT touch SCOPE: cloud honors --scope, default SESSION.
@@ -366,13 +470,18 @@ run fragment_points_at_executable_no_leading_slash
 run preserves_existing_script_languages
 run reads_ssh_port_from_deployment_json
 run resolves_local_connection_from_descriptor
+run unreadable_descriptor_fails_even_with_cli_overrides
 run cli_port_overrides_local_descriptor
 run resolves_local_defaults_when_db_port_absent
+run cli_host_overrides_local_descriptor
+run resolves_local_host_default_when_absent
+run resolves_local_user_from_descriptor
 run parses_current_script_languages_from_query_output
 run selects_transport_from_backend
 run resolves_cloud_connection_from_descriptor
 run cli_flags_override_cloud_descriptor
 run cloud_requires_operator_bfs_password
+run cloud_requires_host_when_descriptor_omits_it
 run cloud_requires_db_password
 run resolves_cloud_defaults_when_connection_fields_absent
 run cloud_leaves_scope_untouched
