@@ -40,8 +40,6 @@ pub fn db_series() -> String {
         "2025-2".to_string()
     } else if cfg!(feature = "db-2025-1") {
         "2025-1".to_string()
-    } else if cfg!(feature = "db-8-29") {
-        "8-29".to_string()
     } else {
         panic!("no db-* feature enabled and EXASOL_DB_SERIES not set")
     }
