@@ -6,11 +6,7 @@ license.workspace = true
 edition = "2024"
 
 [features]
-default = ["db-2026-1"]
 integration = ["dep:testcontainers", "dep:rustls"]
-db-2025-1 = []
-db-2025-2 = []
-db-2026-1 = []
 
 [dependencies]
 tokio = { workspace = true }

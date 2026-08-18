@@ -92,7 +92,7 @@ jobs:
 
       - name: Build IT test binary (compile once)
         run: |
-          BIN=$(cargo test --no-run -p it --features integration,db-2026-1 \
+          BIN=$(cargo test --no-run -p it --features integration \
               --message-format=json 2>/dev/null \
             | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
             | grep -v '^null$' | head -1)
@@ -377,11 +377,9 @@ jobs:
         include:
           - exasol_version: "8.29.13"
             db_series: "8-29"
-          - exasol_version: "2025.1.11"
+          - exasol_version: "2025.1.14"
             db_series: "2025-1"
-          - exasol_version: "2025.2.1"
-            db_series: "2025-2"
-          - exasol_version: "2026.1.0"
+          - exasol_version: "2026.1.1"
             db_series: "2026-1"
     steps:
       # Record the runner's host kernel/platform. The Exasol UDF sandbox crashes

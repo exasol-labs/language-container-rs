@@ -285,7 +285,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
         eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
     } else {
-        eprintln!("[it] scenario timestamp_precision_matrix_roundtrips SKIPPED (8.x lacks TIMESTAMP(p))");
+        eprintln!(
+            "[it] scenario timestamp_precision_matrix_roundtrips SKIPPED (8.x lacks TIMESTAMP(p))"
+        );
     }
 
     // Group F: run-dispatch iteration-type conformance suite (plan tasks 9.2-9.10).
