@@ -10,7 +10,7 @@ name = "emit-bench"
 path = "src/main.rs"
 
 [dependencies]
-it = { path = "../../crates/it", features = ["integration", "db-2026-1"] }
+it = { path = "../../crates/it", features = ["integration"] }
 exarrow-rs = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

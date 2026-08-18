@@ -280,8 +280,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario udf_local_time_matches_session_tz ok");
-    timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
-    eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
+    // TIMESTAMP(p) parameterized precision is not supported on Exasol 8.x.
+    if it::db_series() != "8-29" {
+        timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
+        eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
+    } else {
+        eprintln!(
+            "[it] scenario timestamp_precision_matrix_roundtrips SKIPPED (8.x lacks TIMESTAMP(p))"
+        );
+    }
 
     // Group F: run-dispatch iteration-type conformance suite (plan tasks 9.2-9.10).
     // 9.1 baseline is already covered above by `scalar_double_returns_42` (SCALAR

@@ -21,7 +21,7 @@ Project mission in: @specs/mission.md
 - Use Exasol Docker images to run Integration Tests and E2E tests
 - Use `exapump` for all Exasol interaction.
 - DSNs must include `validateservercertificate=0` (self-signed Docker cert).
-- Integration tests: `cargo test -p it --features integration`; they **fail** (not skip) if the Docker DB is unavailable. CI runs the version matrix `2025.1.11 / 2025.2.1 / 2026.1.0`.
+- Integration tests: `cargo test -p it --features integration`; they **fail** (not skip) if the Docker DB is unavailable. CI runs the version matrix `8.29.x / 2025.1.x / 2026.1.x`.
 
 ## CI (Ubuntu 24.04 runners)
 
