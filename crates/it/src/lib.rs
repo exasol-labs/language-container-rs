@@ -28,9 +28,9 @@ pub const DB_IMAGE: &str = "exasol/docker-db";
 pub fn db_series() -> String {
     if let Ok(val) = std::env::var("EXASOL_DB_SERIES") {
         match val.as_str() {
-            "2025-1" | "2025-2" | "2026-1" => return val,
+            "8-29" | "2025-1" | "2025-2" | "2026-1" => return val,
             _ => panic!(
-                "unrecognised EXASOL_DB_SERIES: {val:?}; expected one of 2025-1, 2025-2, 2026-1"
+                "unrecognised EXASOL_DB_SERIES: {val:?}; expected one of 8-29, 2025-1, 2025-2, 2026-1"
             ),
         }
     }
@@ -40,6 +40,8 @@ pub fn db_series() -> String {
         "2025-2".to_string()
     } else if cfg!(feature = "db-2025-1") {
         "2025-1".to_string()
+    } else if cfg!(feature = "db-8-29") {
+        "8-29".to_string()
     } else {
         panic!("no db-* feature enabled and EXASOL_DB_SERIES not set")
     }
@@ -51,6 +53,7 @@ pub fn db_tag() -> String {
         return v;
     }
     match db_series().as_str() {
+        "8-29" => "8.29.13".to_string(),
         "2025-1" => "2025.1.11".to_string(),
         "2025-2" => "2025.2.1".to_string(),
         "2026-1" => "2026.1.0".to_string(),

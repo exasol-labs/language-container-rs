@@ -27,7 +27,7 @@ fn db_series_fallback_matches_enabled_feature() {
     unsafe { std::env::remove_var("EXASOL_DB_SERIES") };
     let series = db_series();
     assert!(
-        ["2025-1", "2025-2", "2026-1"].contains(&series.as_str()),
+        ["8-29", "2025-1", "2025-2", "2026-1"].contains(&series.as_str()),
         "db_series() fallback returned unexpected value: {series:?}"
     );
 }
@@ -47,6 +47,7 @@ fn db_tag_maps_series_to_known_image_tags() {
     let _guard = ENV_LOCK.lock().unwrap();
     unsafe { std::env::remove_var("EXASOL_VERSION") };
     let series_to_tag = [
+        ("8-29", "8.29.13"),
         ("2025-1", "2025.1.11"),
         ("2025-2", "2025.2.1"),
         ("2026-1", "2026.1.0"),
