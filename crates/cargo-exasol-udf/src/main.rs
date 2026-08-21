@@ -62,7 +62,7 @@ fn main() {
     //   ["cargo-exasol-udf", "exasol-udf", <cmd>, ...]
     // Skip argv[0] (binary name) and argv[1] ("exasol-udf" cargo-subcommand token).
     let args: Vec<String> = env::args().collect();
-    let subcommand = args.get(2).map(|s| s.as_str());
+    let subcommand = args.get(2).map(String::as_str);
     let rest = args.get(3..).unwrap_or_default();
 
     match subcommand {

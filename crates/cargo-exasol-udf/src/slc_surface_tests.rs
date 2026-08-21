@@ -1,3 +1,5 @@
+// Wildcard import is the project's mandated `_tests.rs` sibling-module convention (CLAUDE.md).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 
 #[test]

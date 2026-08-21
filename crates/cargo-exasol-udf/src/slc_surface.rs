@@ -13,7 +13,7 @@ const LIBRARY_SURFACE_TEXT: &str = include_str!("../slc-library-surface.txt");
 /// and the tarball contract test read the very same lines, so a library can no
 /// longer be staged without `validate` accepting it, or accepted here without
 /// the container shipping it.
-static ALLOWED_SONAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+static ALLOWED_SONAMES: LazyLock<Vec<&str>> = LazyLock::new(|| {
     LIBRARY_SURFACE_TEXT
         .lines()
         .map(str::trim)
