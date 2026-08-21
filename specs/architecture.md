@@ -79,8 +79,7 @@ lc-rs/
 ├── Cargo.toml                  # workspace root; exarrow-rs + arrow pinned in [workspace.dependencies]
 ├── rust-toolchain.toml         # pinned Rust channel — MUST match the container builder
 ├── Cargo.lock
-├── Dockerfile.alpine           # slim SLC image (alpine:3 runtime) — built by CI + scripts/install.sh
-├── Dockerfile.debian           # slim SLC image (debian:12-slim runtime) variant
+├── Dockerfile                  # slim SLC image (debian:trixie-slim staged runtime) — built by CI + scripts/install.sh
 ├── crates/
 │   ├── exa-proto/              # prost-generated protobuf bindings
 │   ├── exa-zmq-protocol/       # ZMQ DEALER transport + typed state machine

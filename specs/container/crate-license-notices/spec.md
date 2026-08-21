@@ -4,7 +4,7 @@ Generates and ships the Rust dependency-graph attribution manifest (`THIRD-PARTY
 
 ## Background
 
-The distributed SLC bundles the `exaudfclient` binary, whose Rust dependency graph carries per-crate license obligations distinct from the OS-layer packages covered by `os-license-notices`. `dist/generate-licenses.sh` runs `cargo about generate` over `crates/exaudfclient/Cargo.toml` with `about.toml` and `about.hbs`, producing `dist/THIRD-PARTY-LICENSES.md`, which `Dockerfile.alpine` COPYs into `/exaudf` and carries into `lc-rs.tar.gz`.
+The distributed SLC bundles the `exaudfclient` binary, whose Rust dependency graph carries per-crate license obligations distinct from the staged OS libraries covered by `os-license-notices`. `dist/generate-licenses.sh` runs `cargo about generate` over `crates/exaudfclient/Cargo.toml` with `about.toml` and `about.hbs`, producing `dist/THIRD-PARTY-LICENSES.md`, which the root `Dockerfile` stages into `/exaudf` and carries into `lc-rs.tar.gz`.
 
 `about.toml`'s `targets` array selects which target triples `cargo about` evaluates. cargo-about applies these **as a union**: a dependency reached only through a `cfg(...)` gate is attributed if it matches **any** listed target, and nothing is dropped from the other targets' sets. Omitting an architecture the SLC actually ships silently drops that architecture's `cfg`-gated dependencies from the manifest — an attribution/compliance defect — whereas listing extra targets only over-attributes, which is safe.
 
@@ -21,15 +21,15 @@ This is an attribution and source-offer compliance concern only; it does not cha
 
 ### Scenario: Target set reflects the shipped glibc binary
 
-* *GIVEN* `exaudfclient` is compiled by the `rust:1.94-bookworm` builder with no `--target`, so the shipped binary is glibc (`<arch>-unknown-linux-gnu`), not musl
+* *GIVEN* `exaudfclient` is compiled by the `rust:1.94-trixie` builder with no `--target`, so the shipped binary is glibc (`<arch>-unknown-linux-gnu`), not musl
 * *WHEN* the `targets` array is chosen
-* *THEN* it MUST include the glibc (`-unknown-linux-gnu`) triple for every shipped architecture so `gnu`-gated dependencies are attributed, correcting the prior musl-only pin that under-reported the shipped binary
+* *THEN* it MUST include the glibc (`-unknown-linux-gnu`) triple for every shipped architecture so `gnu`-gated dependencies are attributed
 * *AND* it MUST NOT list the corresponding `-unknown-linux-musl` triples, since nothing musl is shipped and the union would over-attribute musl-only dependencies (enforced by `dist/tests/about_toml_test.sh`)
-* *AND* a comment in `about.toml` MUST record why the shipped binary is glibc and why both libc/arch triples are listed
+* *AND* a comment in `about.toml` MUST record why the shipped binary is glibc and why both architecture triples are listed
 
 ### Scenario: Generated manifest ships in the tarball for each architecture
 
-* *GIVEN* an SLC tarball built from `Dockerfile.alpine --target artifact` for a given architecture, after the generator has run
+* *GIVEN* an SLC tarball built from the root `Dockerfile --target artifact` for a given architecture, after the generator has run
 * *WHEN* the `exaudf/` entries of the extracted tarball are inspected
 * *THEN* `exaudf/THIRD-PARTY-LICENSES.md` MUST be present as a regular file carrying the union attribution for the shipped architectures
 * *AND* the existing `exaudf/LICENSE` and `exaudf/THIRD-PARTY-OS-LICENSES.md` files MUST still be present

@@ -10,4 +10,4 @@ name = "lc-rs-os-attribution"
 version = "0.0.0"
 edition = "2021"
 publish = false
-license = "GPL-2.0-only AND LGPL-2.1 AND MPL-2.0 AND Apache-2.0 AND MIT AND BSD-2-Clause AND Zlib AND (GPL-3.0-only WITH GCC-exception-3.1)"
+license = "LGPL-2.1 AND MPL-2.0 AND Apache-2.0 AND MIT AND BSD-3-Clause AND Zlib AND bzip2-1.0.6 AND (GPL-3.0-only WITH GCC-exception-3.1)"

@@ -1,5 +1,7 @@
 mod build;
+mod elf;
 mod new;
+mod slc_surface;
 mod validate;
 
 use std::env;
@@ -26,7 +28,27 @@ fn write_usage(mut w: impl Write) -> io::Result<()> {
         w,
         "                            build target (native builds only)"
     )?;
-    writeln!(w, "  validate <path>           Validate a compiled UDF .so")?;
+    writeln!(w, "  validate <path> [--deny-unknown-deps]")?;
+    writeln!(
+        w,
+        "                            Validate a compiled UDF .so: entry points, ABI"
+    )?;
+    writeln!(
+        w,
+        "                            version and SDK fingerprint, the artifact's glibc"
+    )?;
+    writeln!(
+        w,
+        "                            symbol floor, and its dynamic dependencies against"
+    )?;
+    writeln!(
+        w,
+        "                            the SLC library surface; --deny-unknown-deps fails"
+    )?;
+    writeln!(
+        w,
+        "                            on any dependency outside that surface"
+    )?;
     Ok(())
 }
 
@@ -40,7 +62,7 @@ fn main() {
     //   ["cargo-exasol-udf", "exasol-udf", <cmd>, ...]
     // Skip argv[0] (binary name) and argv[1] ("exasol-udf" cargo-subcommand token).
     let args: Vec<String> = env::args().collect();
-    let subcommand = args.get(2).map(|s| s.as_str());
+    let subcommand = args.get(2).map(String::as_str);
     let rest = args.get(3..).unwrap_or_default();
 
     match subcommand {

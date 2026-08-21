@@ -1,6 +1,8 @@
 use std::ffi::CStr;
 use std::path::Path;
-use std::process::Command;
+
+use crate::elf;
+use crate::slc_surface::{self, FloorCompliance};
 
 /// ABI version this binary was compiled against.
 const RUNTIME_ABI_VERSION: u32 = exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION;
@@ -46,20 +48,14 @@ pub(crate) struct VTableProbe {
     pub(crate) annotated_output_schema: *const std::ffi::c_char,
 }
 
-/// Validate a compiled UDF `.so`: checks that it exports named entry points with matching ABI version and SDK fingerprint.
+/// Validate a compiled UDF `.so`: checks that it exports named entry points with matching ABI version and SDK fingerprint, that it references no glibc symbol version above the SLC's floor, and reports its dynamic dependencies against the SLC library surface.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let path = args
-        .first()
-        .ok_or_else(|| "Usage: cargo exasol-udf validate <path-to-so>".to_string())?;
+    let (path, deny_unknown_deps) = parse_validate_args(args)?;
     let so_path = Path::new(path);
 
-    if !so_path.exists() {
-        return Err(format!("file not found: '{}'", path));
-    }
+    let artifact = elf::read(so_path).map_err(|error| error.to_string())?;
 
-    let udf_names = enumerate_entry_symbols(so_path)?;
-
-    if udf_names.is_empty() {
+    if artifact.udf_names.is_empty() {
         return Err(format!(
             "no __exa_udf_entry_<NAME> entry point found in '{}'; \
              hint: rebuild against sdk >= 0.14.0",
@@ -67,11 +63,77 @@ pub fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
+    report_glibc_floor(&artifact, so_path)?;
+    report_dynamic_dependencies(&artifact, so_path, deny_unknown_deps)?;
+    verify_vtables(&artifact, so_path)?;
+
+    println!(
+        "✓ {} UDF(s) validated in '{}'",
+        artifact.udf_names.len(),
+        so_path.display()
+    );
+    Ok(())
+}
+
+/// Report the artifact's highest referenced `GLIBC_x.y` symbol version against
+/// the SLC's committed floor, failing if it exceeds what the container ships.
+fn report_glibc_floor(artifact: &elf::SharedObject, so_path: &Path) -> Result<(), String> {
+    let floor = slc_surface::glibc_floor();
+    match &artifact.max_glibc_version {
+        Some(version) => {
+            if slc_surface::check_against_floor(version) == FloorCompliance::ExceedsFloor {
+                return Err(format!(
+                    "'{}' references GLIBC_{version} which exceeds the SLC's glibc floor {floor}; \
+                     it cannot load in the container",
+                    so_path.display()
+                ));
+            }
+            println!("glibc: highest reference GLIBC_{version} (SLC floor {floor})");
+        }
+        None => println!("glibc: no GLIBC_x.y reference (SLC floor {floor})"),
+    }
+    Ok(())
+}
+
+/// Report the artifact's `DT_NEEDED` dependencies against the SLC library
+/// surface, escalating an unstaged dependency to a hard failure when
+/// `deny_unknown_deps` is set.
+fn report_dynamic_dependencies(
+    artifact: &elf::SharedObject,
+    so_path: &Path,
+    deny_unknown_deps: bool,
+) -> Result<(), String> {
+    let unknown_deps =
+        slc_surface::unknown_sonames(artifact.needed_sonames.iter().map(String::as_str));
+    if unknown_deps.is_empty() {
+        println!(
+            "dependencies: {} (all within the SLC library surface)",
+            artifact.needed_sonames.join(", ")
+        );
+    } else if deny_unknown_deps {
+        return Err(format!(
+            "'{}' links dependencies outside the SLC library surface: {}",
+            so_path.display(),
+            unknown_deps.join(", ")
+        ));
+    } else {
+        println!(
+            "warning: '{}' links dependencies outside the SLC library surface: {}",
+            so_path.display(),
+            unknown_deps.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// dlopen the artifact and probe every named entry point's vtable, failing if
+/// any entry's ABI version or SDK fingerprint does not match this runtime.
+fn verify_vtables(artifact: &elf::SharedObject, so_path: &Path) -> Result<(), String> {
     let mut errors: Vec<String> = Vec::new();
     let mut ok_names: Vec<String> = Vec::new();
     let rt_fingerprint = runtime_fingerprint();
 
-    for udf_name in &udf_names {
+    for udf_name in &artifact.udf_names {
         let symbol = format!("__exa_udf_entry_{}\0", udf_name);
         match load_vtable_fields(so_path, symbol.as_bytes()) {
             Err(e) => errors.push(format!("  {}: {}", udf_name, e)),
@@ -109,44 +171,47 @@ pub fn run(args: &[String]) -> Result<(), String> {
             runtime_fingerprint()
         );
     }
-    println!(
-        "✓ {} UDF(s) validated in '{}'",
-        ok_names.len(),
-        so_path.display()
-    );
     Ok(())
 }
 
-/// Enumerate all exported `__exa_udf_entry_<NAME>` symbols in the `.so`.
-///
-/// Uses `nm --dynamic --defined-only` to read the dynamic symbol table without
-/// dlopening the library — no new crate dependency required.
-/// Returns the `<NAME>` suffixes (e.g. `["DOUBLE_IT", "TRIPLE_IT"]`).
-pub(crate) fn enumerate_entry_symbols(so_path: &Path) -> Result<Vec<String>, String> {
-    let output = Command::new("nm")
-        .arg("--dynamic")
-        .arg("--defined-only")
-        .arg(so_path)
-        .output()
-        .map_err(|e| format!("failed to run `nm` (install binutils and retry): {e}"))?;
-
-    if !output.status.success() {
-        // nm can fail for non-ELF files — treat as zero entry points, not an error.
-        return Ok(Vec::new());
+/// Parse the validate subcommand args into `(so_path, deny_unknown_deps)`.
+/// `--deny-unknown-deps` escalates an unstaged `DT_NEEDED` entry from a warning
+/// to a hard failure; the first bare argument is the artifact path.
+fn parse_validate_args(args: &[String]) -> Result<(&str, bool), String> {
+    let mut path: Option<&str> = None;
+    let mut deny_unknown_deps = false;
+    for arg in args {
+        match arg.as_str() {
+            "--deny-unknown-deps" => deny_unknown_deps = true,
+            other if other.starts_with("--") => {
+                return Err(format!(
+                    "unrecognized argument '{other}'. Usage: cargo exasol-udf validate <path-to-so> [--deny-unknown-deps]"
+                ));
+            }
+            other if path.is_none() => path = Some(other),
+            other => {
+                return Err(format!(
+                    "unrecognized argument '{other}'. Usage: cargo exasol-udf validate <path-to-so> [--deny-unknown-deps]"
+                ));
+            }
+        }
     }
+    let path = path.ok_or_else(|| {
+        "Usage: cargo exasol-udf validate <path-to-so> [--deny-unknown-deps]".to_string()
+    })?;
+    Ok((path, deny_unknown_deps))
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let prefix = "__exa_udf_entry_";
-    let names: Vec<String> = stdout
-        .lines()
-        .filter_map(|line| {
-            // nm output: "<addr> <type> <name>" — name is the last whitespace-delimited field.
-            let sym = line.split_whitespace().last()?;
-            sym.strip_prefix(prefix).map(|s| s.to_string())
-        })
-        .collect();
-
-    Ok(names)
+/// Enumerate all exported `__exa_udf_entry_<NAME>` symbols in the `.so`,
+/// returning the `<NAME>` suffixes (e.g. `["DOUBLE_IT", "TRIPLE_IT"]`).
+///
+/// Reads the artifact in-process via [`elf`], so an input that is not a
+/// parseable ELF shared object fails here rather than passing on as an
+/// artifact that merely exports no entry points.
+pub(crate) fn enumerate_entry_symbols(so_path: &Path) -> Result<Vec<String>, String> {
+    elf::read(so_path)
+        .map(|artifact| artifact.udf_names)
+        .map_err(|error| error.to_string())
 }
 
 /// dlopen the `.so`, resolve the named entry symbol, and return `(abi_version, fingerprint)`.

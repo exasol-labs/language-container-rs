@@ -206,7 +206,7 @@ impl Harness {
         let path = std::env::var("SLC_TARBALL").map_err(|_| {
             anyhow!(
                 "SLC_TARBALL is not set; build the tarball first:\n  \
-                 docker build -f Dockerfile.alpine --target artifact \
+                 docker build --target artifact \
                  --output type=local,dest=<dir> .\n  \
                  then: export SLC_TARBALL=<dir>/lc-rs.tar.gz\n  \
                  or run: scripts/ci-it-local.sh"

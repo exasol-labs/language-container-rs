@@ -22,7 +22,6 @@
 #   SHM             docker --shm-size         (default: 2g)
 #   DB_MEM          EXA_DB_MEM_SIZE           (default: unset → docker-db auto-sizes)
 #   EXASOL_VERSION  docker-db image tag       (default: 2026.1.0)
-#   DB_SERIES       it crate feature          (default: db-2026-1)
 #   SKIP_SLC_BUILD  reuse existing SLC tarball (requires SLC_TARBALL)
 #   DB_PORT         host port -> DB 8563      (default: 8563)
 #   BFS_PORT        host port -> BucketFS 2581 (default: 2581)
@@ -41,7 +40,6 @@ MEMSWAP="${MEMSWAP:-$MEM}"
 SHM="${SHM:-2g}"
 DB_MEM="${DB_MEM:-}"
 EXASOL_VERSION="${EXASOL_VERSION:-2026.1.0}"
-DB_SERIES="${DB_SERIES:-db-2026-1}"
 CONTAINER="exasol-db"
 IMAGE="exasol/docker-db:${EXASOL_VERSION}"
 # Host port mappings. Override (e.g. DB_PORT=18563 BFS_PORT=12581) to run
@@ -62,10 +60,12 @@ SLC_DIR="${SLC_DIR:-/tmp/lc-rs-$$}"
 if [ -z "${SKIP_SLC_BUILD:-}" ]; then
   log "Generate license bundles (dist/generate-licenses.sh)"
   bash "$REPO_ROOT/dist/generate-licenses.sh"
-  log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
+  log "Build SLC tarball (Dockerfile --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
   mkdir -p "$SLC_DIR"
-  docker build -f Dockerfile.alpine --target artifact \
+  docker build --target artifact \
     --output "type=local,dest=$SLC_DIR" .
+  log "Run SLC tarball contract test"
+  bash "$REPO_ROOT/dist/tests/slc_tarball_test.sh" "$SLC_DIR/lc-rs.tar.gz"
 else
   log "Reusing existing SLC tarball (SKIP_SLC_BUILD set): ${SLC_TARBALL:-<SLC_TARBALL unset>}"
   if [ -z "${SLC_TARBALL:-}" ]; then
@@ -101,7 +101,7 @@ cargo build --release \
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
-BIN=$(cargo test --no-run -p it --features "integration,${DB_SERIES}" \
+BIN=$(cargo test --no-run -p it --features integration \
     --message-format=json 2>/dev/null \
   | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
   | grep -v '^null$' | head -1)

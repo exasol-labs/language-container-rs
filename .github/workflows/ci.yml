@@ -340,18 +340,24 @@ jobs:
           tool: cargo-about@0.9.0
 
       # Both THIRD-PARTY-*.md bundles are git-ignored (they embed license texts),
-      # so generate them into dist/ before the build — Dockerfile.alpine COPYs
+      # so generate them into dist/ before the build — Dockerfile COPYs
       # them into /exaudf so they ship inside lc-rs.tar.gz.
       - name: Generate license bundles
         run: bash dist/generate-licenses.sh
 
-      # Build the SLC artifact tarball (packager stage bakes the /conf resolver
+      - name: Run OS license bundle tests
+        run: bash dist/tests/os_licenses_test.sh
+
+      # Build the SLC artifact tarball (staging stage bakes the /conf resolver
       # symlinks; artifact stage exposes lc-rs.tar.gz for --output extraction).
       - name: Build SLC tarball (--target artifact)
         run: |
           mkdir -p /tmp/lc-out
-          docker build -f Dockerfile.alpine --target artifact \
+          docker build --target artifact \
             --output type=local,dest=/tmp/lc-out .
+
+      - name: Run SLC tarball contract test
+        run: bash dist/tests/slc_tarball_test.sh /tmp/lc-out/lc-rs.tar.gz
 
       - name: Upload SLC tarball
         uses: actions/upload-artifact@v4

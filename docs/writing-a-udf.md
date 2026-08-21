@@ -19,22 +19,45 @@
 linked against the build machine's C library. The deployable artifact must be a
 Linux ELF of the **same architecture as the SLC** (`x86_64`, or `aarch64` for an
 Apple Silicon Exasol Personal deployment) whose glibc version is **no newer than
-the SLC's** (the shipped container bundles glibc ~2.36, from `rust:1.94-bookworm`).
-Otherwise:
+the SLC's floor** — `2.41`, committed in
+`crates/cargo-exasol-udf/slc-glibc-floor.txt`, the machine-readable source both
+the container build and `cargo exasol-udf validate` read. Otherwise:
 
-- Building on a host with a **newer glibc** (e.g. Ubuntu 24.04 ships glibc 2.39)
-  produces a `.so` that references `GLIBC_2.3x` symbols the container lacks. It
-  uploads fine, then fails at `dlopen` in the container at runtime as a raw loader
-  error — the ABI fingerprint check covers the SDK version and rustc, not glibc.
+- Building on a host with a **newer glibc** produces a `.so` that references a
+  `GLIBC_x.y` symbol above `2.41`. It uploads fine, then fails at `dlopen` in the
+  container at runtime as a raw loader error — the ABI fingerprint check covers
+  the SDK version and rustc, not glibc. Run `cargo exasol-udf validate` on the
+  built `.so` first: it reports the highest `GLIBC_x.y` reference against the
+  floor and rejects an artifact that exceeds it, catching the mismatch on your
+  own machine instead of at `dlopen` in the container.
 - On **macOS/Windows** the host build emits a `.dylib`/`.dll`, not a Linux ELF; the
   tool has no deployable artifact to produce and errors with "no artifact produced".
   A macOS host also cannot cross-compile a Linux ELF natively (no Linux linker or
   sysroot) — build inside a Linux container of the target architecture instead.
 
-Build inside `rust:1.94-bookworm` (or an equivalent Linux host of the SLC's
-architecture whose glibc is ≤ the SLC's) to guarantee a loadable artifact. Use
+Build inside `rust:1.94-trixie` (or an equivalent Linux host of the SLC's
+architecture whose glibc is ≤ the floor) to guarantee a loadable artifact. Use
 `--target <triple>` only for a native build on another installed target, not to
 cross the glibc boundary.
+
+### The SLC library surface
+
+The staged container ships a curated set of dynamic libraries beyond
+`exaudfclient`'s own link closure: the glibc runtime and compatibility stubs,
+`libgcc_s`/`libstdc++`, the NSS/resolver modules (`libnss_files`, `libnss_dns`,
+`libresolv`), OpenSSL 3 (`libssl`, `libcrypto`, `ossl-modules`, `engines-3`), and
+the compression libraries `libz`, `libbz2`, `libzstd`. This staging holds
+regardless of whether the client itself uses these libraries — it currently uses
+none of the OpenSSL or compression set. A UDF may link dynamically against this
+surface: a `native-tls`-based crate or a compression `-sys` crate resolves at
+`dlopen` without extra work.
+
+Anything outside that surface must be vendored into the `.so` — build the
+dependency statically, typically via `features = ["vendored"]` on a `-sys` crate.
+A UDF linking a library outside the surface fails at `dlopen` in the container
+with a raw loader error. `cargo exasol-udf validate` catches this first: it
+reports the artifact's dynamic dependencies and warns on any outside the
+surface, and `--deny-unknown-deps` turns that warning into a failure for CI.
 
 ## 1. Scaffold a UDF crate
 
