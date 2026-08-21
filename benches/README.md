@@ -38,7 +38,7 @@ own decode path).
 ## Run (Docker, Exasol 2026.1, EXA_DB_MEM_SIZE=4 GiB)
 
 ```bash
-docker build -f Dockerfile.alpine --target artifact --output type=local,dest=/tmp/slc .
+docker build --target artifact --output type=local,dest=/tmp/slc .
 export SLC_TARBALL=/tmp/slc/lc-rs.tar.gz
 cargo build --release -p emit-bench-udf      # the bench UDF .so
 cargo run  --release -p emit-bench           # boots the DB and prints the table

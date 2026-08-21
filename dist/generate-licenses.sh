@@ -2,16 +2,17 @@
 #
 # generate-licenses.sh — produce the third-party license bundles shipped in
 # lc-rs.tar.gz. Both outputs embed full license texts and are git-ignored
-# (see dist/.gitignore); Dockerfile.alpine COPYs them into /exaudf. Run locally
-# to verify; CI runs it before `docker build`.
+# (see dist/.gitignore); the root Dockerfile stages them into /exaudf. Run
+# locally to verify; CI runs it before `docker build`.
 #
 #   dist/THIRD-PARTY-LICENSES.md     — Rust crate graph statically linked into
 #                                      exaudfclient (cargo about + about.hbs).
-#   dist/THIRD-PARTY-OS-LICENSES.md  — Alpine apk packages + copied glibc/GCC
-#                                      runtime libs (cargo about over a synthetic
-#                                      crate, + the appended GCC Runtime Library
-#                                      Exception, which cargo about does not emit
-#                                      for a `WITH` clause).
+#   dist/THIRD-PARTY-OS-LICENSES.md  — the curated Debian 13 (trixie) runtime
+#                                      libraries staged into /slc (cargo about
+#                                      over a synthetic crate, + the appended
+#                                      GCC Runtime Library Exception, which
+#                                      cargo about does not emit for a `WITH`
+#                                      clause).
 #
 # License texts come from cargo-about's embedded SPDX store (and, for the GCC
 # exception, the SPDX license-list-data), so no verbatim license text is committed.

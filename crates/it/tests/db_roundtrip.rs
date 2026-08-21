@@ -1288,8 +1288,9 @@ async fn timestamp_arithmetic_roundtrips(conn: &mut Connection, udf_object: &str
 /// `/usr/share/zoneinfo`. With `tzdata` present the emitted naive value carries
 /// the Berlin wall-clock; WITHOUT `tzdata` `chrono::Local` silently falls back
 /// to UTC and the offset assertion below reports ~0 instead of the Berlin
-/// offset — so this scenario FAILS on an Alpine image built without `tzdata`
-/// and PASSES with it.
+/// offset — so this scenario FAILS when the image stages no IANA zoneinfo
+/// database to resolve the named timezone from, and PASSES once `tzdata` is
+/// staged.
 ///
 /// Two SQL-side properties are asserted (no fragile client-side timestamp
 /// parsing — `AT TIME ZONE` is not supported by this engine, so the UTC instant

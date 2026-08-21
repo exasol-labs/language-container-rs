@@ -72,7 +72,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.22.1"
+version = "0.23.0"
 license = "MIT"
 repository = "https://github.com/exasol-labs/language-container-rs"
 homepage = "https://github.com/exasol-labs/language-container-rs"
@@ -80,7 +80,7 @@ homepage = "https://github.com/exasol-labs/language-container-rs"
 [workspace.dependencies]
 # Internal SDK, published to crates.io. The `version` here MUST track
 # [workspace.package].version so dependents publish against the matching release.
-exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.22.1" }
+exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.23.0" }
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"
@@ -102,6 +102,7 @@ syn = { version = "2", features = ["full"] }
 exarrow-rs = { version = "^0.13.0", features = ["websocket"] }
 chrono = "0.4"
 itoa = "1"
+goblin = { version = "0.9", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 
 [profile.release]
 strip = "symbols"

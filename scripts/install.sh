@@ -489,7 +489,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   TMP_DIR=$(mktemp -d /tmp/slc-XXXXXX)
   trap 'rm -rf "$TMP_DIR"' EXIT
   docker build \
-    -f "$REPO_ROOT/Dockerfile.alpine" \
+    -f "$REPO_ROOT/Dockerfile" \
     --target artifact \
     --output "type=local,dest=$TMP_DIR" \
     "$REPO_ROOT"

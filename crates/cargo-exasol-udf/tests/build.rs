@@ -95,19 +95,20 @@ fn drop_cdylib_crate_type(udf_path: &Path) {
     std::fs::write(&cargo_toml, patched).unwrap();
 }
 
-/// Enumerate exported `__exa_udf_entry_<NAME>` symbols in the built `.so` via
-/// `nm`, returning the `<NAME>` suffixes.
+/// Enumerate exported `__exa_udf_entry_<NAME>` symbols in the built `.so` by
+/// invoking `cargo-exasol-udf exasol-udf validate` and parsing the `<NAME>`s
+/// it reports as OK from its stdout.
 fn entry_symbols(so_path: &Path) -> Vec<String> {
-    let output = Command::new("nm")
-        .args(["--dynamic", "--defined-only"])
-        .arg(so_path)
+    let output = Command::new(cargo_exasol_udf_bin())
+        .args(["exasol-udf", "validate", so_path.to_str().unwrap()])
         .output()
-        .expect("failed to run nm");
+        .expect("failed to run cargo-exasol-udf validate");
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
-        .filter_map(|line| line.split_whitespace().last())
-        .filter_map(|sym| sym.strip_prefix("__exa_udf_entry_").map(str::to_string))
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|line| line.split_once(": ABI version"))
+        .map(|(name, _)| name.to_string())
         .collect()
 }
 

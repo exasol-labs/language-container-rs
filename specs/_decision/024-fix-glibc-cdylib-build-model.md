@@ -6,6 +6,7 @@
 **Plan:** fix-glibc-cdylib-build-model
 **Status:** Accepted
 **Supersedes:** cargo-exaudf-hides-musl-target-triple
+**See also:** `change-slc-runtime-debian` moved the bundled glibc runtime to Debian 13; the glibc-dynamic-cdylib artifact model decided here did not change.
 
 ### Context
 

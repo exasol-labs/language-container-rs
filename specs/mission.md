@@ -69,7 +69,7 @@ exhausting the UDF sandbox.
 | Errors | `thiserror`, `anyhow` (binary only) | Typed and ad-hoc error handling |
 | Logging | `tracing`, `tracing-subscriber` | Stderr only; Exasol captures stderr as UDF log |
 | Testing | `cargo test`, `trybuild`, `testcontainers` | Unit, integration (live Docker DB), compile-fail tests |
-| Container base | Alpine (`Dockerfile.alpine`) / Debian (`Dockerfile.debian`) | Runtime image |
+| Container base | Debian (single root `Dockerfile`, `debian:trixie-slim` staging) | Runtime image |
 
 ## Commands
 

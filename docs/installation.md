@@ -171,8 +171,9 @@ network access to the platform's API — no Docker, no Rust toolchain.
 ### Step 1 — Download the prebuilt release tarball
 
 Every version-bumped merge to `main` publishes a [GitHub Release](https://github.com/exasol-labs/language-container-rs/releases)
-with a single `lc-rust-<version>.tar.gz` asset — CI builds it from `Dockerfile.alpine`'s
-`artifact` stage and renames it for release (e.g. `lc-rust-0.21.0.tar.gz` for `v0.21.0`).
+with a single `lc-rust-<version>.tar.gz` asset — CI builds it from the root
+`Dockerfile`'s `artifact` stage and renames it for release (e.g.
+`lc-rust-0.21.0.tar.gz` for `v0.21.0`).
 
 ```bash
 curl -fsSL -o rustslc.tar.gz \

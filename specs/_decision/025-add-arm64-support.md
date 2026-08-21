@@ -160,7 +160,7 @@ Cloud Personal installs get every future improvement to the shared HTTP branch f
 
 ### Context
 
-Several field-debugging sessions established platform facts whose violation produces an opaque `22002 VM crashed` failure with no direct link back to the root cause: the staged glibc loader must land at the binary's exact `PT_INTERP` path (Alpine's `/lib` is a real directory, not a symlink to `/usr/lib`); the shipped `exaudfclient` is glibc, not musl; the `SCRIPT_LANGUAGES` `#` fragment must name the `exaudfclient` executable with no leading slash; Personal's SSH port changes on every `exasol start` and must be read fresh; and integration tests stay x86_64 because `exasol/docker-db` is amd64-only.
+Several field-debugging sessions established platform facts whose violation produces an opaque `22002 VM crashed` failure with no direct link back to the root cause: the staged glibc loader must land at the binary's exact `PT_INTERP` path (the staged tree reproduces the donor's usr-merge layout, so `/lib` is itself a symlink into `/usr/lib`, and the loader must resolve through it); the shipped `exaudfclient` is glibc, not musl; the `SCRIPT_LANGUAGES` `#` fragment must name the `exaudfclient` executable with no leading slash; Personal's SSH port changes on every `exasol start` and must be read fresh; and integration tests stay x86_64 because `exasol/docker-db` is amd64-only.
 
 ### Decision
 

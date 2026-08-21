@@ -486,9 +486,10 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "exasol-udf-sdk",
+ "goblin",
  "libloading",
  "tempfile",
 ]
@@ -990,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -999,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "annotated-fixture",
  "arrow",
@@ -1030,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1075,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1086,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1096,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -1337,6 +1338,17 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
+name = "goblin"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daa0a64d21a7eb230583b4c5f4e23b7e4e57974f96620f42a7e75e08ae66d745"
+dependencies = [
+ "log",
+ "plain",
+ "scroll",
+]
 
 [[package]]
 name = "h2"
@@ -1818,7 +1830,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "it"
-version = "0.22.1"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2365,6 +2377,12 @@ name = "pkg-config"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
+
+[[package]]
+name = "plain"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "portable-atomic"
@@ -2996,6 +3014,26 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scroll"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ab8598aa408498679922eff7fa985c25d58a90771bd6be794434c5277eab1a6"
+dependencies = [
+ "scroll_derive",
+]
+
+[[package]]
+name = "scroll_derive"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1783eabc414609e28a5ba76aee5ddd52199f7107a0b24c2e9746a1ecc34a683d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "security-framework"

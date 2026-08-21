@@ -77,4 +77,5 @@ Project mission in: @specs/mission.md
 
 - Keep the three "connection" concepts distinct: Exasol CONNECTION object (credential store) vs exarrow-rs session (the connect-back act) vs cluster node IP (`ctx.cluster_ip()`).
 - The ZMQ control channel is DB-chosen (`ipc://` single-node, `tcp://` multi-node), not settable via `SCRIPT_LANGUAGES`, and has no effect on connect-back (always TCP to :8563).
-- Alpine vs Debian SLC image makes no difference to connect-back (spike 2026-06-09).
+- The SLC builds from one root `Dockerfile` (`rust:1.94-trixie` builder → `debian:trixie-slim` staging → `FROM scratch` artifact). The staged tree has no shell, package manager, or coreutils — a UDF that shells out to `/bin/sh` or a coreutils binary fails.
+- The staged library surface is glibc + compatibility stubs, `libgcc_s`/`libstdc++`, the NSS/resolver modules, OpenSSL 3 (`libssl`, `libcrypto`, `ossl-modules`, `engines-3`), and `libz`/`libbz2`/`libzstd`, independent of whether `exaudfclient` itself links any of them (it links none of the OpenSSL/compression set). A UDF may link dynamically against this surface only; link anything else statically (e.g. `features = ["vendored"]` on a `-sys` crate). The glibc floor is `2.41`, committed in `crates/cargo-exasol-udf/slc-glibc-floor.txt` and checked by `cargo exasol-udf validate`.

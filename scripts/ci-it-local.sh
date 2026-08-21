@@ -62,10 +62,12 @@ SLC_DIR="${SLC_DIR:-/tmp/lc-rs-$$}"
 if [ -z "${SKIP_SLC_BUILD:-}" ]; then
   log "Generate license bundles (dist/generate-licenses.sh)"
   bash "$REPO_ROOT/dist/generate-licenses.sh"
-  log "Build SLC tarball (Dockerfile.alpine --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
+  log "Build SLC tarball (Dockerfile --target artifact -> $SLC_DIR/lc-rs.tar.gz)"
   mkdir -p "$SLC_DIR"
-  docker build -f Dockerfile.alpine --target artifact \
+  docker build --target artifact \
     --output "type=local,dest=$SLC_DIR" .
+  log "Run SLC tarball contract test"
+  bash "$REPO_ROOT/dist/tests/slc_tarball_test.sh" "$SLC_DIR/lc-rs.tar.gz"
 else
   log "Reusing existing SLC tarball (SKIP_SLC_BUILD set): ${SLC_TARBALL:-<SLC_TARBALL unset>}"
   if [ -z "${SLC_TARBALL:-}" ]; then

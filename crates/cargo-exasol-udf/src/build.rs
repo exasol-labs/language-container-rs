@@ -64,7 +64,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    if let Err(e) = maybe_emit_sidecar(&so_path, &crate_name) {
+    if let Err(e) = maybe_emit_sidecar(&so_path, &crate_name, &entry_names) {
         eprintln!("warning: could not emit schema sidecar: {}", e);
     }
 
@@ -160,12 +160,16 @@ fn parse_lib_name(cargo_toml: &Path) -> Result<Option<String>, String> {
 /// Attempt to dlopen the `.so` and emit a `<name>.udf-meta.json` sidecar
 /// if the vtable has non-null annotated schema pointers.
 ///
-/// Uses the first discovered `__exa_udf_entry_<NAME>` symbol.
-fn maybe_emit_sidecar(so_path: &Path, crate_name: &str) -> Result<(), String> {
+/// Uses the first of the `entry_names` the caller already read from the
+/// artifact, so the ELF is read exactly once per build and a read failure
+/// surfaces there instead of masquerading as an artifact without entry points.
+fn maybe_emit_sidecar(
+    so_path: &Path,
+    crate_name: &str,
+    entry_names: &[String],
+) -> Result<(), String> {
     use libloading::Library;
 
-    // Find the first named entry symbol.
-    let entry_names = enumerate_entry_symbols(so_path).unwrap_or_default();
     let mut names_iter = entry_names.iter();
     let first_udf = names_iter
         .next()
