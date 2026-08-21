@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # No libzmq3-dev: zmq-sys falls back to zeromq-src (static zmq), eliminating
 # the libzmq runtime dependency from the exported binary.
+# Force bzip2-sys to build from vendored source instead of linking the system
+# libbz2: rust:1.94-trixie ships libbz2-dev on aarch64 but not x86_64, so
+# without this pin the aarch64 binary picks up a DT_NEEDED for libbz2.so.1.0.
+ENV BZIP2_NO_PKG_CONFIG=1
 
 WORKDIR /build
 
