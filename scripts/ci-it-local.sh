@@ -22,7 +22,6 @@
 #   SHM             docker --shm-size         (default: 2g)
 #   DB_MEM          EXA_DB_MEM_SIZE           (default: unset → docker-db auto-sizes)
 #   EXASOL_VERSION  docker-db image tag       (default: 2026.1.0)
-#   DB_SERIES       it crate feature          (default: db-2026-1)
 #   SKIP_SLC_BUILD  reuse existing SLC tarball (requires SLC_TARBALL)
 #   DB_PORT         host port -> DB 8563      (default: 8563)
 #   BFS_PORT        host port -> BucketFS 2581 (default: 2581)
@@ -41,7 +40,6 @@ MEMSWAP="${MEMSWAP:-$MEM}"
 SHM="${SHM:-2g}"
 DB_MEM="${DB_MEM:-}"
 EXASOL_VERSION="${EXASOL_VERSION:-2026.1.0}"
-DB_SERIES="${DB_SERIES:-db-2026-1}"
 CONTAINER="exasol-db"
 IMAGE="exasol/docker-db:${EXASOL_VERSION}"
 # Host port mappings. Override (e.g. DB_PORT=18563 BFS_PORT=12581) to run
@@ -103,7 +101,7 @@ cargo build --release \
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
-BIN=$(cargo test --no-run -p it --features "integration,${DB_SERIES}" \
+BIN=$(cargo test --no-run -p it --features integration \
     --message-format=json 2>/dev/null \
   | jq -r 'select(.reason == "compiler-artifact" and (.target.kind | contains(["test"]))) | .executable' \
   | grep -v '^null$' | head -1)

@@ -98,7 +98,7 @@ RUN TRIPLET="$(cat /slc-meta/triplet)" && \
         exit 1; \
     fi && \
     for lib in $(cat /slc-meta/library-surface); do \
-        cp -L "/usr/lib/$TRIPLET/$lib" "$LIBDIR/$lib"; \
+        cp -L "/usr/lib/$TRIPLET/$lib" "$LIBDIR/$lib" || exit 1; \
     done && \
     cp -L "/usr/lib/$TRIPLET/ossl-modules/"*.so "$LIBDIR/ossl-modules/" && \
     cp -L "/usr/lib/$TRIPLET/engines-3/"*.so "$LIBDIR/engines-3/" && \
