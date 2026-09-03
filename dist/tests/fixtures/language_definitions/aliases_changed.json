@@ -2,13 +2,11 @@
   "schema_version": 2,
   "language_definitions": [
     {
-      "aliases": ["RUST"],
+      "aliases": ["rust"],
       "protocol": "localzmq+protobuf",
       "language_identifier": "rust",
       "parameters": [{"key": "lang", "value": "rust"}],
-      "udf_client_path": {
-        "executable": "/exaudf/exaudfclient"
-      },
+      "udf_client_path": {"executable": "/exaudf/exaudfclient"},
       "deprecation": null
     }
   ]
