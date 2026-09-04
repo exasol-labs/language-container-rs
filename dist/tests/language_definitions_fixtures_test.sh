@@ -59,7 +59,7 @@ assert_rejected() {
         die "$name: contract script could not run on $fixture (exit $status): $output"
     fi
     while IFS= read -r line; do
-        if [[ "$line" == "FAIL: "*"$expected_message"* ]]; then
+        if [[ "$line" == "FAIL: "* ]] && grep -qF -- "$expected_message" <<<"$line"; then
             pass "$name"
             return
         fi
