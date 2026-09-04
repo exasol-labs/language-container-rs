@@ -161,6 +161,11 @@ jobs:
       - name: Run about.toml tests
         run: bash dist/tests/about_toml_test.sh
 
+      - name: Run language definitions contract tests
+        run: |
+          bash dist/tests/language_definitions_test.sh build_info/language_definitions.json
+          bash dist/tests/language_definitions_fixtures_test.sh
+
       - name: Install Rust 1.94
         uses: dtolnay/rust-toolchain@1.94
         with:
