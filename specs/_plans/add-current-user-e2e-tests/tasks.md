@@ -4,7 +4,7 @@
 - [x] resolved
 - [x] implemented
 - [x] version-bumped
-- [ ] tested-green
+- [!] tested-green — red: integration (`cargo test -p it --features integration`) (logs: target/speq-it-run.log)
 - [ ] recorded
 - [ ] pr-ready
 
