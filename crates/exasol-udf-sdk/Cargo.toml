@@ -15,3 +15,7 @@ arrow = { workspace = true, optional = true }
 
 [features]
 emit-arrow = ["dep:arrow"]
+# Ships the `test_support` UdfContext doubles. Enables nothing else on purpose:
+# dev-dependency features unify into the crate under test, so any implied
+# feature here would silently change a dependent's featureless test build.
+test-support = []

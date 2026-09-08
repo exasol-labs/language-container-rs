@@ -22,59 +22,22 @@ pub fn handshake_meta(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
     use exasol_udf_sdk::value::Value;
 
-    struct MetaCtx {
-        session_id: u64,
-        node_id: u32,
-        node_count: u32,
-        script_name: String,
-    }
-
-    impl UdfContext for MetaCtx {
-        fn num_columns(&self) -> usize {
-            0
-        }
-
-        fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-            Err(UdfError::Type("no input columns".into()))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Err(UdfError::Unimplemented(
-                "emit is banned in RETURNS output".into(),
-            ))
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
-
-        fn session_id(&self) -> u64 {
-            self.session_id
-        }
-
-        fn node_id(&self) -> u32 {
-            self.node_id
-        }
-
-        fn node_count(&self) -> u32 {
-            self.node_count
-        }
-
-        fn script_name(&self) -> String {
-            self.script_name.clone()
-        }
+    fn returns_ctx(row: Vec<Value>) -> TestContext {
+        TestContext::scalar(row).with_emit_policy(EmitPolicy::Reject(UdfError::Unimplemented(
+            "emit is banned in RETURNS output".into(),
+        )))
     }
 
     #[test]
     fn returns_pipe_delimited_handshake_summary() {
-        let mut ctx = MetaCtx {
-            session_id: 1_700_000_000_000_123,
-            node_id: 0,
-            node_count: 1,
-            script_name: "handshake_meta".into(),
-        };
+        let mut ctx = returns_ctx(vec![])
+            .with_session_id(1_700_000_000_000_123)
+            .with_node_id(0)
+            .with_node_count(1)
+            .with_script_name("handshake_meta");
         let result = handshake_meta(&mut ctx).unwrap();
         assert_eq!(result, Some("1700000000000123|0|1|handshake_meta".into()));
     }

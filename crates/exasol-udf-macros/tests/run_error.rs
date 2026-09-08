@@ -8,7 +8,7 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::test_support::DefaultsCtx;
 use std::ffi::{CStr, c_char};
 
 unsafe extern "C" {
@@ -20,29 +20,12 @@ fn failing_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Err(UdfError::Type("boom".into()))
 }
 
-struct NoopCtx;
-
-impl UdfContext for NoopCtx {
-    fn num_columns(&self) -> usize {
-        0
-    }
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Type("none".into()))
-    }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-        Ok(())
-    }
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Ok(false)
-    }
-}
-
 #[test]
 fn run_shim_writes_malloc_backed_error_string_on_user_error() {
     // fn failing_run → SQL name FAILING_RUN → entry __exa_udf_entry_FAILING_RUN
     let vt = unsafe { &*__exa_udf_entry_FAILING_RUN() };
 
-    let mut ctx = NoopCtx;
+    let mut ctx = DefaultsCtx;
     let mut dyn_ref: &mut dyn UdfContext = &mut ctx;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
 

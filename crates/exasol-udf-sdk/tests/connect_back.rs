@@ -117,6 +117,13 @@ fn exa_connection_trait_query_and_execute() {
     assert_send(&conn);
 }
 
+// Bespoke double, not `test_support::DefaultsCtx`, on purpose: this file is
+// an integration test under `tests/`, so it sees only the feature set the
+// resolver picked for the whole package, which differs between a workspace
+// `cargo test` and `cargo test -p exasol-udf-sdk`. It also asserts what a
+// *provided* `UdfContext` method does by default, so it needs the same
+// no-override guarantee `DefaultsCtx` gives, without depending on the
+// `test-support` feature being active for this exact build.
 struct MockCtx;
 
 impl UdfContext for MockCtx {

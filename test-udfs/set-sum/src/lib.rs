@@ -21,46 +21,17 @@ pub fn set_sum(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
 
-    struct TestCtx {
-        rows: Vec<Vec<Value>>,
-        cursor: usize,
-    }
-
-    impl TestCtx {
-        fn new(rows: Vec<Vec<Value>>) -> Self {
-            Self { rows, cursor: 0 }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.rows.first().map_or(0, |r| r.len())
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.rows[self.cursor - 1]
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Err(UdfError::User("set-sum must not emit".into()))
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            if self.cursor < self.rows.len() {
-                self.cursor += 1;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
+    fn returns_ctx(rows: Vec<Vec<Value>>) -> TestContext {
+        TestContext::set(rows).with_emit_policy(EmitPolicy::Reject(UdfError::User(
+            "set-sum must not emit".into(),
+        )))
     }
 
     #[test]
     fn sums_group_of_int64() {
-        let mut ctx = TestCtx::new(vec![
+        let mut ctx = returns_ctx(vec![
             vec![Value::Int64(1)],
             vec![Value::Int64(2)],
             vec![Value::Int64(3)],
@@ -70,13 +41,13 @@ mod tests {
 
     #[test]
     fn sums_empty_group_to_zero() {
-        let mut ctx = TestCtx::new(vec![]);
+        let mut ctx = returns_ctx(vec![]);
         assert_eq!(set_sum(&mut ctx).unwrap(), Some(0));
     }
 
     #[test]
     fn skips_null_rows() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Null], vec![Value::Int64(5)]]);
+        let mut ctx = returns_ctx(vec![vec![Value::Null], vec![Value::Int64(5)]]);
         assert_eq!(set_sum(&mut ctx).unwrap(), Some(5));
     }
 }

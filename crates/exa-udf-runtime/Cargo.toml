@@ -38,6 +38,7 @@ connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch"]
 
 [dev-dependencies]
+exasol-udf-sdk = { path = "../exasol-udf-sdk", features = ["test-support"] }
 zmq = { workspace = true }
 prost = { workspace = true }
 tracing-subscriber = { workspace = true }

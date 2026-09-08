@@ -34,6 +34,7 @@ const TS_NOW_LIB: &str = "libtimestamp_now.so";
 const TS_PASS_LIB: &str = "libtimestamp_passthrough.so";
 const ANNOTATED_FIXTURE_LIB: &str = "libannotated_fixture.so";
 const HANDSHAKE_LIB: &str = "libhandshake_meta.so";
+const CURRENT_USER_META_LIB: &str = "libcurrent_user_meta.so";
 const SET_SUM_LIB: &str = "libset_sum.so";
 const EMIT_K_LIB: &str = "libemit_k.so";
 const SCALAR_NEXT_ILLEGAL_LIB: &str = "libscalar_next_illegal.so";
@@ -167,6 +168,12 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let handshake_path = harness
         .upload_udf(HANDSHAKE_LIB, read_udf_artifact(HANDSHAKE_LIB)?)
         .await?;
+    let current_user_meta_path = harness
+        .upload_udf(
+            CURRENT_USER_META_LIB,
+            read_udf_artifact(CURRENT_USER_META_LIB)?,
+        )
+        .await?;
     let set_sum_path = harness
         .upload_udf(SET_SUM_LIB, read_udf_artifact(SET_SUM_LIB)?)
         .await?;
@@ -220,6 +227,53 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario single_call_unimplemented ok");
     single_call_adapter_surfaces_live_handshake_metadata(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_adapter_handshake_metadata ok");
+
+    // Identity-metadata scenarios. The baseline runs on the shared connection;
+    // the four that follow mutate session state (OPEN SCHEMA, CLOSE SCHEMA,
+    // IMPERSONATE) and so run on a dedicated side connection, which registers
+    // its own SLC because ALTER SESSION SET SCRIPT_LANGUAGES is session-scoped.
+    // The order is load-bearing: only the last scenario impersonates, and it
+    // consumes the side connection, so nothing that follows can run under a
+    // foreign identity or on a closed connection.
+    current_user_meta_reports_session_user_and_open_schema(&mut conn, &current_user_meta_path)
+        .await?;
+    eprintln!("[it] scenario current_user_meta_reports_session_user_and_open_schema ok");
+
+    let mut identity_conn = harness.connect().await?;
+    register_slc(&mut identity_conn, &slc).await?;
+    identity_conn.execute("OPEN SCHEMA it_rust").await?;
+
+    if let Err(e) = current_user_meta_current_schema_tracks_open_schema(&mut identity_conn).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!(
+            "[it] UDF logs after current_user_meta_current_schema_tracks_open_schema failure:\n{logs}"
+        );
+        return Err(e);
+    }
+    eprintln!("[it] scenario current_user_meta_current_schema_tracks_open_schema ok");
+
+    if let Err(e) = current_user_meta_absent_current_schema(&mut identity_conn).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after current_user_meta_absent_current_schema failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario current_user_meta_absent_current_schema ok");
+
+    if let Err(e) = current_user_meta_scope_user_is_view_owner(&mut identity_conn).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!(
+            "[it] UDF logs after current_user_meta_scope_user_is_view_owner failure:\n{logs}"
+        );
+        return Err(e);
+    }
+    eprintln!("[it] scenario current_user_meta_scope_user_is_view_owner ok");
+
+    if let Err(e) = current_user_meta_follows_impersonate(identity_conn, &mut conn).await {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after current_user_meta_follows_impersonate failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario current_user_meta_follows_impersonate ok");
 
     connect_back_cluster_ip_emits_node_ip(&mut conn, &cb_cluster_ip_path).await?;
     eprintln!("[it] scenario connect_back_cluster_ip ok");
@@ -519,6 +573,474 @@ async fn handshake_metadata_udf_emits_session_and_node(
              registered script name HANDSHAKE_META: {summary:?}"
         );
     }
+    Ok(())
+}
+
+/// The `current-user-meta` fixture renders an identity field the database did
+/// not report as this literal. The five fields share one text column, so the
+/// marker is what keeps an omitted field distinguishable from an empty one —
+/// and what distinguishes the accessor's neutral default from a live value.
+const META_ABSENT: &str = "<none>";
+
+/// Password for the throwaway users the identity scenarios create. Exasol
+/// parses the `IDENTIFIED BY` clause as a delimited identifier, so the literal
+/// keeps its double quotes and its case.
+/// See <https://docs.exasol.com/db/latest/sql/create_user.htm>.
+const IT_USER_PASSWORD: &str = "Xh12_itRust";
+
+/// Selects the identity fixture by qualified name, so the statement neither
+/// depends on which schema the session has open nor on having one open at all.
+const SELECT_CURRENT_USER_META: &str = "SELECT TO_CHAR(IT_RUST.CURRENT_USER_META())";
+
+/// The five identity fields `current-user-meta` joins with `|`, in that order.
+struct IdentityMeta {
+    current_user: String,
+    scope_user: String,
+    current_schema: String,
+    script_schema: String,
+    script_name: String,
+}
+
+/// Run `sql`, expecting the single VARCHAR cell the identity fixture renders,
+/// and split it back into its five fields.
+async fn read_identity_meta(conn: &mut Connection, sql: &str) -> Result<IdentityMeta> {
+    let summary = query_single_string(conn, sql)
+        .await?
+        .ok_or_else(|| anyhow!("identity fixture returned NULL for: {sql}"))?;
+    let parts: Vec<&str> = summary.split('|').collect();
+    let [
+        current_user,
+        scope_user,
+        current_schema,
+        script_schema,
+        script_name,
+    ] = parts[..]
+    else {
+        bail!("current_user_meta emitted {summary:?}, expected 5 pipe-delimited fields");
+    };
+    Ok(IdentityMeta {
+        current_user: current_user.to_string(),
+        scope_user: scope_user.to_string(),
+        current_schema: current_schema.to_string(),
+        script_schema: script_schema.to_string(),
+        script_name: script_name.to_string(),
+    })
+}
+
+/// Scenario: the live handshake identity fields reach UDF code through the
+/// `UdfContext` accessors. The `current_user_meta` SCALAR fixture returns one
+/// pipe-delimited string built from `ctx.current_user()`, `ctx.scope_user()`,
+/// `ctx.current_schema()`, `ctx.script_schema()` and `ctx.script_name()`.
+///
+/// Every assertion separates a LIVE database value from the neutral default the
+/// accessor returns on a context that does not override it:
+///
+///  - `current_user` defaults to `None`, which the fixture renders as the
+///    `<none>` marker, so reporting `SYS` proves the database filled the field.
+///  - `scope_user` shares that `None` default, and MUST equal `current_user`
+///    here: Exasol defines it as the current user except inside a view, so
+///    absent a view the two cannot diverge (see
+///    `current_user_meta_scope_user_is_view_owner` for the case that splits
+///    them).
+///  - `current_schema` shares that `None` default. Reporting the schema this
+///    session opened proves it came from live session state, which the host
+///    copies verbatim and cannot originate.
+///  - `script_schema` defaults to the empty string, so reporting `IT_RUST`
+///    proves the database named the script's home schema.
+///  - `script_name` also defaults to the empty string. Exasol upper-cases
+///    unquoted identifiers, so the comparison is case-insensitive.
+async fn current_user_meta_reports_session_user_and_open_schema(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT current_user_meta() RETURNS VARCHAR(2000) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let meta = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
+
+    for (field, value) in [
+        ("current_user", &meta.current_user),
+        ("scope_user", &meta.scope_user),
+        ("current_schema", &meta.current_schema),
+    ] {
+        if value == META_ABSENT {
+            bail!(
+                "current_user_meta {field} rendered the {META_ABSENT} marker — that is \
+                 the accessor default for an absent optional, not a live database value"
+            );
+        }
+    }
+
+    if !meta.current_user.eq_ignore_ascii_case("SYS") {
+        bail!(
+            "current_user is {:?}, expected SYS — the user that authenticated the session",
+            meta.current_user
+        );
+    }
+    if !meta.scope_user.eq_ignore_ascii_case(&meta.current_user) {
+        bail!(
+            "scope_user {:?} differs from current_user {:?}, but no view wraps this call",
+            meta.scope_user,
+            meta.current_user
+        );
+    }
+    if !meta.current_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "current_schema is {:?}, expected the session's open schema IT_RUST",
+            meta.current_schema
+        );
+    }
+    if !meta.script_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "script_schema is {:?}, expected the script's home schema IT_RUST",
+            meta.script_schema
+        );
+    }
+    if !meta
+        .script_name
+        .to_ascii_uppercase()
+        .contains("CURRENT_USER_META")
+    {
+        bail!(
+            "script_name {:?} does not match the registered script name CURRENT_USER_META",
+            meta.script_name
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: `current_schema` follows `OPEN SCHEMA` while `script_schema`
+/// follows the script, so the two fields report independent facts.
+///
+/// Runs on the side connection: `OPEN SCHEMA` mutates session state that every
+/// scenario on the shared connection depends on.
+async fn current_user_meta_current_schema_tracks_open_schema(conn: &mut Connection) -> Result<()> {
+    conn.execute("CREATE SCHEMA IF NOT EXISTS IT_RUST_OTHER")
+        .await?;
+    // Exasol opens a schema it has just created, so this statement is what makes
+    // the session state explicit instead of incidental.
+    conn.execute("OPEN SCHEMA IT_RUST_OTHER").await?;
+
+    let meta = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
+    if !meta.current_schema.eq_ignore_ascii_case("IT_RUST_OTHER") {
+        bail!(
+            "current_schema is {:?}, expected the newly opened IT_RUST_OTHER",
+            meta.current_schema
+        );
+    }
+    if !meta.script_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "script_schema is {:?}, expected IT_RUST — OPEN SCHEMA does not move the script",
+            meta.script_schema
+        );
+    }
+    if meta
+        .current_schema
+        .eq_ignore_ascii_case(&meta.script_schema)
+    {
+        bail!(
+            "current_schema and script_schema both report {:?}; with IT_RUST_OTHER open they \
+             must differ, which is what proves the two fields are independent",
+            meta.current_schema
+        );
+    }
+
+    conn.execute("OPEN SCHEMA IT_RUST").await?;
+    let restored = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
+    if !restored.current_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "after re-opening IT_RUST current_schema is {:?}, expected IT_RUST",
+            restored.current_schema
+        );
+    }
+    if !restored
+        .current_schema
+        .eq_ignore_ascii_case(&restored.script_schema)
+    {
+        bail!(
+            "after re-opening IT_RUST current_schema {:?} and script_schema {:?} must be equal \
+             again",
+            restored.current_schema,
+            restored.script_schema
+        );
+    }
+
+    conn.execute("DROP SCHEMA IT_RUST_OTHER CASCADE").await?;
+    Ok(())
+}
+
+/// Scenario: a session with no schema open reports no current schema, the only
+/// end-to-end coverage of the `optional` handshake field arriving absent.
+///
+/// Runs on the side connection: `CLOSE SCHEMA` would strand every later scenario
+/// on the shared connection.
+async fn current_user_meta_absent_current_schema(conn: &mut Connection) -> Result<()> {
+    conn.execute("CLOSE SCHEMA").await?;
+
+    let meta = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
+    // The database reports SQL NULL as the current schema of a session with none
+    // open, so the field reaches the fixture either omitted (rendered as the
+    // marker) or empty. Both denote absence; a schema name does not.
+    if meta.current_schema != META_ABSENT && !meta.current_schema.is_empty() {
+        bail!(
+            "with no schema open current_schema is {:?}, expected the {META_ABSENT} marker or \
+             an empty field",
+            meta.current_schema
+        );
+    }
+    eprintln!(
+        "[it] current_user_meta_absent_current_schema: current_schema arrived as {}",
+        if meta.current_schema == META_ABSENT {
+            format!("the {META_ABSENT} marker (field omitted)")
+        } else {
+            "an empty string (field present but empty)".to_string()
+        }
+    );
+    if !meta.script_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "script_schema is {:?}, expected IT_RUST — the script's home schema does not \
+             depend on session state",
+            meta.script_schema
+        );
+    }
+
+    conn.execute("OPEN SCHEMA IT_RUST").await?;
+    let restored = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
+    if !restored.current_schema.eq_ignore_ascii_case("IT_RUST") {
+        bail!(
+            "after re-opening IT_RUST current_schema is {:?}, expected IT_RUST",
+            restored.current_schema
+        );
+    }
+    Ok(())
+}
+
+/// Scenario: `scope_user` reports the view owner when a view wraps the script
+/// call — the one database configuration that separates it from `current_user`.
+///
+/// The statement order is load-bearing. The view is created while `SYS` still
+/// owns `IT_VIEW_SCOPE`, and `ALTER SCHEMA ... CHANGE OWNER` re-owns it
+/// afterwards: Exasol documents that statement as making "the schema and all its
+/// objects" belong to the new owner, while no page documents who owns a view
+/// `SYS` creates inside a schema another user already owns.
+/// See <https://docs.exasol.com/db/latest/sql/alter_schema.htm>.
+///
+/// `IT_VIEW_OWNER` needs both `USAGE ON SCHEMA IT_RUST` and `EXECUTE ON SCRIPT`,
+/// because Exasol validates a view's underlying query against the view's owner
+/// rather than against the user selecting from it.
+/// See <https://docs.exasol.com/db/latest/database_concepts/privileges/details_rights_management.htm>.
+///
+/// The view body carries no `FROM` clause: Exasol ships
+/// `CREATE VIEW scope_view AS SELECT SCOPE_USER;` as the official example on
+/// `functions/alphabeticallistfunctions/scope_user.htm`, and a live probe
+/// confirmed a `FROM`-less body resolves. Wrapping the call over a one-row
+/// source is the fallback should a release withdraw that.
+async fn current_user_meta_scope_user_is_view_owner(conn: &mut Connection) -> Result<()> {
+    conn.execute("DROP SCHEMA IF EXISTS IT_VIEW_SCOPE CASCADE")
+        .await?;
+    conn.execute("DROP USER IF EXISTS IT_VIEW_OWNER CASCADE")
+        .await?;
+
+    conn.execute(&format!(
+        "CREATE USER IT_VIEW_OWNER IDENTIFIED BY \"{IT_USER_PASSWORD}\""
+    ))
+    .await?;
+    conn.execute("GRANT USAGE ON SCHEMA IT_RUST TO IT_VIEW_OWNER")
+        .await?;
+    conn.execute("GRANT EXECUTE ON SCRIPT IT_RUST.CURRENT_USER_META TO IT_VIEW_OWNER")
+        .await?;
+
+    conn.execute("CREATE SCHEMA IT_VIEW_SCOPE").await?;
+    // Exasol opens the schema it just created. Re-open IT_RUST immediately, so
+    // this scenario hands the connection to the next one in the state it found
+    // it, whatever happens below.
+    conn.execute("OPEN SCHEMA IT_RUST").await?;
+
+    conn.execute(&format!(
+        "CREATE OR REPLACE VIEW IT_VIEW_SCOPE.V_CURRENT_USER_META AS \
+         {SELECT_CURRENT_USER_META} AS META"
+    ))
+    .await?;
+    conn.execute("ALTER SCHEMA IT_VIEW_SCOPE CHANGE OWNER IT_VIEW_OWNER")
+        .await?;
+
+    let meta =
+        read_identity_meta(conn, "SELECT META FROM IT_VIEW_SCOPE.V_CURRENT_USER_META").await?;
+
+    if !meta.current_user.eq_ignore_ascii_case("SYS") {
+        bail!(
+            "current_user is {:?}, expected SYS — selecting from the view does not change \
+             which user executes the statement",
+            meta.current_user
+        );
+    }
+    if !meta.scope_user.eq_ignore_ascii_case("IT_VIEW_OWNER") {
+        bail!(
+            "scope_user is {:?}, expected the view owner IT_VIEW_OWNER",
+            meta.scope_user
+        );
+    }
+    if meta.scope_user.eq_ignore_ascii_case(&meta.current_user) {
+        bail!(
+            "scope_user and current_user both report {:?}; inside a view owned by another \
+             user they must differ",
+            meta.scope_user
+        );
+    }
+
+    conn.execute("DROP VIEW IT_VIEW_SCOPE.V_CURRENT_USER_META")
+        .await?;
+    conn.execute("DROP SCHEMA IT_VIEW_SCOPE CASCADE").await?;
+    conn.execute("DROP USER IT_VIEW_OWNER CASCADE").await?;
+    Ok(())
+}
+
+/// Scenario: `IMPERSONATE` establishes which user the `current_user` field
+/// reports.
+///
+/// Runs last on the side connection and CONSUMES it. `IMPERSONATE` has no
+/// withdraw statement ("To revert to the user that initiated the session, the
+/// user must impersonate again as the original user"), so taking the connection
+/// by value is what makes it impossible for a later scenario to run under the
+/// identity this one installs, or on the connection after it closes.
+/// See <https://docs.exasol.com/db/latest/sql/impersonate.htm>.
+///
+/// Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`, so this
+/// scenario discovers the mapping rather than predicting it. It asserts only the
+/// two equalities that must hold whichever user the field names, and prints
+/// which `EXA_DBA_SESSIONS` column matched. A probe against Exasol 2026.1
+/// matched `EFFECTIVE_USER`, with `USER_NAME` staying `SYS`; the assertion still
+/// accepts either column, so a release that maps it differently records itself
+/// instead of failing. Nothing here asserts a direction of change.
+///
+/// `EXA_DBA_SESSIONS` is read on the shared `SYS` connection because an
+/// impersonating user "loses all their current privileges": a probe confirmed
+/// the impersonated user is refused that view with SQL state 42500.
+///
+/// The grants are the least-privilege set. A probe showed `EXECUTE ON SCRIPT`
+/// alone lets an impersonated session call a script by qualified name, with no
+/// `USAGE ON SCHEMA`, and showed the session keeps its open schema across
+/// `IMPERSONATE`. `GRANT IMPERSONATION ON SYS TO IT_IMPERSONATED` is issued
+/// before the first `IMPERSONATE`, because it is the revert path and the session
+/// would otherwise be stranded under the foreign identity. Each statement
+/// autocommits through `exarrow-rs`, so no write lock is open when `IMPERSONATE`
+/// runs — Exasol rejects it otherwise.
+async fn current_user_meta_follows_impersonate(
+    mut side: Connection,
+    shared: &mut Connection,
+) -> Result<()> {
+    let before = read_identity_meta(&mut side, SELECT_CURRENT_USER_META).await?;
+    let session_id = query_single_string(&mut side, "SELECT TO_CHAR(CURRENT_SESSION)")
+        .await?
+        .ok_or_else(|| anyhow!("CURRENT_SESSION returned NULL on the identity connection"))?;
+
+    side.execute("DROP USER IF EXISTS IT_IMPERSONATED CASCADE")
+        .await?;
+    side.execute(&format!(
+        "CREATE USER IT_IMPERSONATED IDENTIFIED BY \"{IT_USER_PASSWORD}\""
+    ))
+    .await?;
+    side.execute("GRANT EXECUTE ON SCRIPT IT_RUST.CURRENT_USER_META TO IT_IMPERSONATED")
+        .await?;
+    side.execute("GRANT IMPERSONATION ON IT_IMPERSONATED TO SYS")
+        .await?;
+    side.execute("GRANT IMPERSONATION ON SYS TO IT_IMPERSONATED")
+        .await?;
+
+    side.execute("IMPERSONATE IT_IMPERSONATED").await?;
+
+    let after = read_identity_meta(&mut side, SELECT_CURRENT_USER_META).await?;
+    let sql_current_user =
+        query_single_string(&mut side, "SELECT CAST(CURRENT_USER AS VARCHAR(128))")
+            .await?
+            .ok_or_else(|| anyhow!("CURRENT_USER returned NULL in the impersonated session"))?;
+
+    if !after.current_user.eq_ignore_ascii_case(&sql_current_user) {
+        bail!(
+            "current_user_meta reports current_user {:?} but SELECT CURRENT_USER in the same \
+             impersonated session reports {sql_current_user:?}; one session names one \
+             executing user",
+            after.current_user
+        );
+    }
+
+    let pair = query_single_string(
+        shared,
+        &format!(
+            "SELECT CAST(NVL(USER_NAME, '<null>') || '|' || NVL(EFFECTIVE_USER, '<null>') AS VARCHAR(256)) \
+             FROM EXA_DBA_SESSIONS WHERE SESSION_ID = {session_id}"
+        ),
+    )
+    .await?
+    .ok_or_else(|| anyhow!("EXA_DBA_SESSIONS has no row for session {session_id}"))?;
+    let (user_name, effective_user) = pair
+        .split_once('|')
+        .ok_or_else(|| anyhow!("EXA_DBA_SESSIONS pair {pair:?} is not USER_NAME|EFFECTIVE_USER"))?;
+
+    let matched = match (
+        after.current_user.eq_ignore_ascii_case(user_name),
+        after.current_user.eq_ignore_ascii_case(effective_user),
+    ) {
+        (true, false) => "USER_NAME",
+        (false, true) => "EFFECTIVE_USER",
+        _ => bail!(
+            "current_user {:?} must equal exactly one of EXA_DBA_SESSIONS.USER_NAME \
+             {user_name:?} or EXA_DBA_SESSIONS.EFFECTIVE_USER {effective_user:?} for session \
+             {session_id}",
+            after.current_user
+        ),
+    };
+    eprintln!(
+        "[it] current_user_meta_follows_impersonate: current_user {:?} matched \
+         EXA_DBA_SESSIONS.{matched} (USER_NAME={user_name:?}, EFFECTIVE_USER={effective_user:?})",
+        after.current_user
+    );
+    eprintln!(
+        "[it] current_user_meta_follows_impersonate: current_user {} across IMPERSONATE \
+         ({:?} before, {:?} after)",
+        if before.current_user == after.current_user {
+            "held"
+        } else {
+            "changed"
+        },
+        before.current_user,
+        after.current_user
+    );
+
+    if !after.scope_user.eq_ignore_ascii_case(&after.current_user) {
+        bail!(
+            "scope_user {:?} differs from current_user {:?} under IMPERSONATE, but no view \
+             wraps the call and scope_user differs only inside a view",
+            after.scope_user,
+            after.current_user
+        );
+    }
+    if !after
+        .script_schema
+        .eq_ignore_ascii_case(&before.script_schema)
+    {
+        bail!(
+            "script_schema moved from {:?} to {:?} across IMPERSONATE; impersonation does not \
+             move the script",
+            before.script_schema,
+            after.script_schema
+        );
+    }
+
+    side.execute("IMPERSONATE SYS").await?;
+    let reverted = read_identity_meta(&mut side, SELECT_CURRENT_USER_META).await?;
+    if !reverted.current_user.eq_ignore_ascii_case("SYS") {
+        bail!(
+            "after IMPERSONATE SYS the session reports current_user {:?}, expected SYS",
+            reverted.current_user
+        );
+    }
+
+    side.close().await?;
+    shared.execute("DROP USER IT_IMPERSONATED CASCADE").await?;
     Ok(())
 }
 

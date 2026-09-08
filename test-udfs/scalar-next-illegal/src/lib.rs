@@ -17,43 +17,14 @@ pub fn scalar_next_illegal(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Mimics the runtime's scalar-input gate: `next()` always errors.
-    struct TestCtx {
-        input: Vec<Value>,
-    }
-
-    impl TestCtx {
-        fn new(row: Vec<Value>) -> Self {
-            Self { input: row }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.input.len()
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.input
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Err(UdfError::User(
-                "next() is not allowed in scalar context".into(),
-            ))
-        }
-    }
+    use exasol_udf_sdk::test_support::{NextPolicy, TestContext};
 
     #[test]
     fn next_in_scalar_context_errors() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(1)]);
+        let mut ctx =
+            TestContext::scalar(vec![Value::Int64(1)]).with_next_policy(NextPolicy::Reject(
+                UdfError::User("next() is not allowed in scalar context".into()),
+            ));
         let err = scalar_next_illegal(&mut ctx).unwrap_err();
         assert!(matches!(err, UdfError::User(msg) if msg.contains("scalar")));
     }

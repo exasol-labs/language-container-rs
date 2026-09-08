@@ -20,70 +20,45 @@ pub fn json_parse(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
 
-    struct TestCtx {
-        input: Vec<Value>,
-    }
-
-    impl TestCtx {
-        fn new(row: Vec<Value>) -> Self {
-            Self { input: row }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.input.len()
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.input
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Err(UdfError::Unimplemented(
-                "emit is banned in RETURNS output".into(),
-            ))
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
+    fn returns_ctx(row: Vec<Value>) -> TestContext {
+        TestContext::scalar(row).with_emit_policy(EmitPolicy::Reject(UdfError::Unimplemented(
+            "emit is banned in RETURNS output".into(),
+        )))
     }
 
     #[test]
     fn extracts_name_field() {
-        let mut ctx = TestCtx::new(vec![Value::String(r#"{"name":"exa"}"#.into())]);
+        let mut ctx = returns_ctx(vec![Value::String(r#"{"name":"exa"}"#.into())]);
         let result = json_parse(&mut ctx).unwrap();
         assert_eq!(result, Some("exa".to_string()));
     }
 
     #[test]
     fn returns_empty_string_when_name_absent() {
-        let mut ctx = TestCtx::new(vec![Value::String(r#"{"other":"val"}"#.into())]);
+        let mut ctx = returns_ctx(vec![Value::String(r#"{"other":"val"}"#.into())]);
         let result = json_parse(&mut ctx).unwrap();
         assert_eq!(result, Some("".to_string()));
     }
 
     #[test]
     fn passes_null_through() {
-        let mut ctx = TestCtx::new(vec![Value::Null]);
+        let mut ctx = returns_ctx(vec![Value::Null]);
         let result = json_parse(&mut ctx).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
     fn errors_on_invalid_json() {
-        let mut ctx = TestCtx::new(vec![Value::String("not json".into())]);
+        let mut ctx = returns_ctx(vec![Value::String("not json".into())]);
         let err = json_parse(&mut ctx).unwrap_err();
         assert!(matches!(err, UdfError::User(_)));
     }
 
     #[test]
     fn rejects_wrong_type() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(42)]);
+        let mut ctx = returns_ctx(vec![Value::Int64(42)]);
         let err = json_parse(&mut ctx).unwrap_err();
         assert!(matches!(err, UdfError::Type(_)));
     }

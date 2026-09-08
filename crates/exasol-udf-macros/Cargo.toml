@@ -18,3 +18,4 @@ exasol-udf-sdk = { workspace = true }
 
 [dev-dependencies]
 trybuild = "1"
+exasol-udf-sdk = { path = "../exasol-udf-sdk", features = ["test-support"] }

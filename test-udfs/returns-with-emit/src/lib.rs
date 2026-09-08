@@ -16,43 +16,13 @@ pub fn returns_with_emit(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfE
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestCtx {
-        emitted: Vec<Vec<Value>>,
-    }
-
-    impl TestCtx {
-        fn new() -> Self {
-            Self {
-                emitted: Vec::new(),
-            }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            0
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            Err(UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
-    }
+    use exasol_udf_sdk::test_support::TestContext;
 
     #[test]
     fn calls_emit_then_returns_a_value() {
-        let mut ctx = TestCtx::new();
+        let mut ctx = TestContext::scalar(vec![]);
         let result = returns_with_emit(&mut ctx).unwrap();
         assert_eq!(result, Some(Value::Int64(42)));
-        assert_eq!(ctx.emitted, vec![vec![Value::Int64(1)]]);
+        assert_eq!(ctx.emitted(), vec![vec![Value::Int64(1)]]);
     }
 }

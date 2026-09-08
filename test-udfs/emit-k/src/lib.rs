@@ -18,62 +18,28 @@ pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestCtx {
-        input: Vec<Value>,
-        emitted: Vec<Vec<Value>>,
-    }
-
-    impl TestCtx {
-        fn new(row: Vec<Value>) -> Self {
-            Self {
-                input: row,
-                emitted: Vec::new(),
-            }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.input.len()
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.input
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
-    }
+    use exasol_udf_sdk::test_support::TestContext;
 
     #[test]
     fn emits_zero_rows_for_zero_count() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(0)]);
+        let mut ctx = TestContext::scalar(vec![Value::Int64(0)]);
         emit_k(&mut ctx).unwrap();
-        assert!(ctx.emitted.is_empty());
+        assert!(ctx.emitted().is_empty());
     }
 
     #[test]
     fn emits_one_row_for_count_one() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(1)]);
+        let mut ctx = TestContext::scalar(vec![Value::Int64(1)]);
         emit_k(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, vec![vec![Value::Int64(0)]]);
+        assert_eq!(ctx.emitted(), vec![vec![Value::Int64(0)]]);
     }
 
     #[test]
     fn emits_n_rows_for_count_n() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(4)]);
+        let mut ctx = TestContext::scalar(vec![Value::Int64(4)]);
         emit_k(&mut ctx).unwrap();
         assert_eq!(
-            ctx.emitted,
+            ctx.emitted(),
             vec![
                 vec![Value::Int64(0)],
                 vec![Value::Int64(1)],
@@ -85,8 +51,8 @@ mod tests {
 
     #[test]
     fn null_count_emits_nothing() {
-        let mut ctx = TestCtx::new(vec![Value::Null]);
+        let mut ctx = TestContext::scalar(vec![Value::Null]);
         emit_k(&mut ctx).unwrap();
-        assert!(ctx.emitted.is_empty());
+        assert!(ctx.emitted().is_empty());
     }
 }

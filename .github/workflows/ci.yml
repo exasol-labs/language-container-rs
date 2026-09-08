@@ -84,6 +84,7 @@ jobs:
             -p numeric-temporal-emit \
             -p numeric-temporal-ingest \
             -p handshake-meta \
+            -p current-user-meta \
             -p annotated-fixture \
             -p set-sum \
             -p emit-k \

@@ -22,42 +22,17 @@ pub fn resolv_udf(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
 
-    struct TestCtx {
-        input: Vec<Value>,
-    }
-
-    impl TestCtx {
-        fn new(row: Vec<Value>) -> Self {
-            Self { input: row }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.input.len()
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.input
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {col} out of range")))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Err(UdfError::Unimplemented(
-                "emit is banned in RETURNS output".into(),
-            ))
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
+    fn returns_ctx(row: Vec<Value>) -> TestContext {
+        TestContext::scalar(row).with_emit_policy(EmitPolicy::Reject(UdfError::Unimplemented(
+            "emit is banned in RETURNS output".into(),
+        )))
     }
 
     #[test]
     fn resolves_localhost_to_ip() {
-        let mut ctx = TestCtx::new(vec![Value::String("localhost".into())]);
+        let mut ctx = returns_ctx(vec![Value::String("localhost".into())]);
         let result = resolv_udf(&mut ctx).unwrap();
         let ip = result.expect("resolv_udf should return Some(ip)");
         ip.parse::<std::net::IpAddr>()
@@ -66,7 +41,7 @@ mod tests {
 
     #[test]
     fn errors_on_unresolvable_host() {
-        let mut ctx = TestCtx::new(vec![Value::String(
+        let mut ctx = returns_ctx(vec![Value::String(
             "this-host-definitely-does-not-exist.invalid".into(),
         )]);
         let err = resolv_udf(&mut ctx).unwrap_err();
@@ -75,7 +50,7 @@ mod tests {
 
     #[test]
     fn errors_on_non_string_input() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(42)]);
+        let mut ctx = returns_ctx(vec![Value::Int64(42)]);
         let err = resolv_udf(&mut ctx).unwrap_err();
         assert!(matches!(err, UdfError::Type(_)));
     }
