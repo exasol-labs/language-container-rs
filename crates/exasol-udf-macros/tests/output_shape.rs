@@ -2,6 +2,7 @@ use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::abi::OutputShape;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
+use exasol_udf_sdk::test_support::TestContext;
 use exasol_udf_sdk::value::Value;
 
 // A unit-returning fn is EMITS: it produces rows via `ctx.emit`.
@@ -29,34 +30,9 @@ fn returns_some(_ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
     Ok(Some(7))
 }
 
-// Captures whatever the shim passes to `set_return`.
-#[derive(Default)]
-struct RecordingCtx {
-    captured: Option<Option<Value>>,
-}
-
-impl UdfContext for RecordingCtx {
-    fn num_columns(&self) -> usize {
-        0
-    }
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Type("no columns".into()))
-    }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-        Ok(())
-    }
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Ok(false)
-    }
-    fn set_return(&mut self, value: Option<Value>) -> Result<(), UdfError> {
-        self.captured = Some(value);
-        Ok(())
-    }
-}
-
 fn run_shim(
     vt_run: unsafe extern "C" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_char) -> i32,
-    ctx: &mut RecordingCtx,
+    ctx: &mut TestContext,
 ) {
     let mut dyn_ref: &mut dyn UdfContext = ctx;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
@@ -75,11 +51,11 @@ fn returns_none_passes_none_to_set_return_not_some_null() {
     // documented `None` → SQL NULL contract. The shim now maps the inner
     // value, preserving `None` as `None`.
     let vt = unsafe { &*__exa_udf_entry_RETURNS_NONE() };
-    let mut ctx = RecordingCtx::default();
+    let mut ctx = TestContext::scalar(vec![]);
     run_shim(vt.run, &mut ctx);
     assert_eq!(
-        ctx.captured,
-        Some(None),
+        ctx.captured_return(),
+        Some(&None),
         "None must reach set_return as None, not Some(Value::Null)"
     );
 }
@@ -87,9 +63,9 @@ fn returns_none_passes_none_to_set_return_not_some_null() {
 #[test]
 fn returns_some_passes_converted_value_to_set_return() {
     let vt = unsafe { &*__exa_udf_entry_RETURNS_SOME() };
-    let mut ctx = RecordingCtx::default();
+    let mut ctx = TestContext::scalar(vec![]);
     run_shim(vt.run, &mut ctx);
-    assert_eq!(ctx.captured, Some(Some(Value::Int64(7))));
+    assert_eq!(ctx.captured_return(), Some(&Some(Value::Int64(7))));
 }
 
 #[test]

@@ -35,49 +35,8 @@ pub fn numeric_temporal_ingest(ctx: &mut dyn UdfContext) -> Result<(), UdfError>
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use exasol_udf_sdk::test_support::TestContext;
     use exasol_udf_sdk::value::Decimal;
-
-    struct TestCtx {
-        rows: Vec<Vec<Value>>,
-        cursor: usize,
-        emitted: Vec<Vec<Value>>,
-    }
-
-    impl TestCtx {
-        fn new(rows: Vec<Vec<Value>>) -> Self {
-            Self {
-                rows,
-                cursor: 0,
-                emitted: Vec::new(),
-            }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.rows.first().map_or(0, |r| r.len())
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.rows[self.cursor - 1]
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            if self.cursor < self.rows.len() {
-                self.cursor += 1;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-    }
 
     #[test]
     fn echoes_numeric_date_timestamp_row_unchanged() {
@@ -88,14 +47,14 @@ mod tests {
         let event_date = NaiveDate::from_ymd_opt(2026, 7, 6).unwrap();
         let event_ts = event_date.and_hms_milli_opt(12, 30, 15, 250).unwrap();
 
-        let mut ctx = TestCtx::new(vec![vec![
+        let mut ctx = TestContext::set(vec![vec![
             Value::Numeric(amount.clone()),
             Value::Date(event_date),
             Value::Timestamp(event_ts),
         ]]);
         numeric_temporal_ingest(&mut ctx).unwrap();
         assert_eq!(
-            ctx.emitted,
+            ctx.emitted(),
             vec![vec![
                 Value::Numeric(amount),
                 Value::Date(event_date),
@@ -135,17 +94,17 @@ mod tests {
             ],
         ];
 
-        let mut ctx = TestCtx::new(rows.clone());
+        let mut ctx = TestContext::set(rows.clone());
         numeric_temporal_ingest(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted, rows);
+        assert_eq!(ctx.emitted(), rows);
     }
 
     #[test]
     fn echoes_null_row_unchanged() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Null, Value::Null, Value::Null]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Null, Value::Null, Value::Null]]);
         numeric_temporal_ingest(&mut ctx).unwrap();
         assert_eq!(
-            ctx.emitted,
+            ctx.emitted(),
             vec![vec![Value::Null, Value::Null, Value::Null]]
         );
     }

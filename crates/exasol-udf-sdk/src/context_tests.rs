@@ -1,21 +1,5 @@
 use super::*;
-
-struct DummyCtx;
-
-impl UdfContext for DummyCtx {
-    fn num_columns(&self) -> usize {
-        0
-    }
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Type("no columns".into()))
-    }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-        Ok(())
-    }
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Ok(false)
-    }
-}
+use crate::test_support::{DefaultsCtx, TestContext};
 
 struct DummyUdf;
 
@@ -25,46 +9,23 @@ impl UdfRun for DummyUdf {
     }
 }
 
-struct TypedDummyCtx {
-    values: Vec<Value>,
-}
-
-impl UdfContext for TypedDummyCtx {
-    fn num_columns(&self) -> usize {
-        self.values.len()
-    }
-    fn get(&self, col: usize) -> Result<&Value, UdfError> {
-        self.values
-            .get(col)
-            .ok_or_else(|| UdfError::Type("out of range".into()))
-    }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-        Ok(())
-    }
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Ok(false)
-    }
-}
-
 #[test]
 fn bridge_typed_getters_return_typed_options() {
     let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 14).unwrap();
-    let ctx = TypedDummyCtx {
-        values: vec![
-            Value::Int64(42),
-            Value::Numeric(Decimal {
-                unscaled: 100,
-                scale: 0,
-            }),
-            Value::Numeric(Decimal {
-                unscaled: 15,
-                scale: 1,
-            }),
-            Value::Date(date),
-            Value::Null,
-            Value::Int64(1),
-        ],
-    };
+    let ctx = TestContext::scalar(vec![
+        Value::Int64(42),
+        Value::Numeric(Decimal {
+            unscaled: 100,
+            scale: 0,
+        }),
+        Value::Numeric(Decimal {
+            unscaled: 15,
+            scale: 1,
+        }),
+        Value::Date(date),
+        Value::Null,
+        Value::Int64(1),
+    ]);
 
     assert_eq!(ctx.get_i64(0).unwrap(), Some(42));
     assert_eq!(ctx.get_i64(1).unwrap(), Some(100));
@@ -83,13 +44,13 @@ fn bridge_typed_getters_return_typed_options() {
 
 #[test]
 fn default_memory_limit_is_zero() {
-    let ctx = DummyCtx;
+    let ctx = DefaultsCtx;
     assert_eq!(ctx.memory_limit(), 0);
 }
 
 #[test]
 fn default_set_return_unimplemented() {
-    let mut ctx = DummyCtx;
+    let mut ctx = DefaultsCtx;
     assert!(matches!(
         ctx.set_return(Some(Value::Int64(1))),
         Err(UdfError::Unimplemented(_))
@@ -102,7 +63,7 @@ fn default_set_return_unimplemented() {
 
 #[test]
 fn default_handshake_metadata_is_neutral() {
-    let ctx = DummyCtx;
+    let ctx = DefaultsCtx;
     // Numeric accessors default to 0 ("not reported").
     assert_eq!(ctx.session_id(), 0u64);
     assert_eq!(ctx.statement_id(), 0u32);
@@ -122,13 +83,13 @@ fn default_handshake_metadata_is_neutral() {
 
 #[test]
 fn default_debug_level_is_info() {
-    let ctx = DummyCtx;
+    let ctx = DefaultsCtx;
     assert_eq!(ctx.debug_level(), tracing::Level::INFO);
 }
 
 #[test]
 fn default_hooks_unimplemented() {
-    let mut ctx = DummyCtx;
+    let mut ctx = DefaultsCtx;
 
     let vsa = DummyUdf::virtual_schema_adapter_call(&mut ctx, "{}");
     assert!(matches!(vsa, Err(UdfError::Unimplemented(_))));
@@ -153,7 +114,7 @@ fn default_emit_batch_unimplemented() {
     // `emit_batch` (the EmitBatch ext-trait) serialises to IPC then calls
     // the default `emit_record_batch_ipc`, which is unimplemented on a
     // context that does not override it.
-    let mut ctx = DummyCtx;
+    let mut ctx = DefaultsCtx;
     assert!(matches!(
         ctx.emit_batch(&batch),
         Err(UdfError::Unimplemented(_))

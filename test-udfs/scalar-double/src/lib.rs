@@ -34,63 +34,38 @@ pub fn scalar_double(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
 
-    struct TestCtx {
-        input: Vec<Value>,
-    }
-
-    impl TestCtx {
-        fn new(row: Vec<Value>) -> Self {
-            Self { input: row }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.input.len()
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.input
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-            Err(UdfError::Unimplemented(
-                "emit is banned in RETURNS output".into(),
-            ))
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            Ok(false)
-        }
+    fn returns_ctx(row: Vec<Value>) -> TestContext {
+        TestContext::scalar(row).with_emit_policy(EmitPolicy::Reject(UdfError::Unimplemented(
+            "emit is banned in RETURNS output".into(),
+        )))
     }
 
     #[test]
     fn doubles_positive_int64() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(21)]);
+        let mut ctx = returns_ctx(vec![Value::Int64(21)]);
         let result = scalar_double(&mut ctx).unwrap();
         assert_eq!(result, Some(Value::Int64(42)));
     }
 
     #[test]
     fn doubles_negative_int64() {
-        let mut ctx = TestCtx::new(vec![Value::Int64(-5)]);
+        let mut ctx = returns_ctx(vec![Value::Int64(-5)]);
         let result = scalar_double(&mut ctx).unwrap();
         assert_eq!(result, Some(Value::Int64(-10)));
     }
 
     #[test]
     fn passes_null_through() {
-        let mut ctx = TestCtx::new(vec![Value::Null]);
+        let mut ctx = returns_ctx(vec![Value::Null]);
         let result = scalar_double(&mut ctx).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
     fn rejects_wrong_type() {
-        let mut ctx = TestCtx::new(vec![Value::String("x".into())]);
+        let mut ctx = returns_ctx(vec![Value::String("x".into())]);
         let err = scalar_double(&mut ctx).unwrap_err();
         assert!(matches!(err, UdfError::Type(_)));
     }

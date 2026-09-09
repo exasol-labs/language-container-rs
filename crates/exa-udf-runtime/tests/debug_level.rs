@@ -9,6 +9,7 @@ use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
 use exa_zmq_protocol::{ColumnMeta, ExaType};
 use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::test_support::TestContext;
 use exasol_udf_sdk::value::Value;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
@@ -443,36 +444,16 @@ fn udf_log_macro_writes_to_stderr_when_permitted() {
     let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use exasol_udf_sdk::udf_log;
 
-    struct FixedCtx(tracing::Level);
-
-    impl UdfContext for FixedCtx {
-        fn num_columns(&self) -> usize {
-            0
-        }
-        fn get(&self, _col: usize) -> Result<&Value, exasol_udf_sdk::error::UdfError> {
-            Err(exasol_udf_sdk::error::UdfError::Type("no cols".into()))
-        }
-        fn emit(&mut self, _values: &[Value]) -> Result<(), exasol_udf_sdk::error::UdfError> {
-            Ok(())
-        }
-        fn next(&mut self) -> Result<bool, exasol_udf_sdk::error::UdfError> {
-            Ok(false)
-        }
-        fn debug_level(&self) -> tracing::Level {
-            self.0
-        }
-    }
-
     // Permitted path: DEBUG context allows debug/info/warn/error messages.
     // The macro calls writeln!(stderr(), …) which must not panic.
-    let ctx = FixedCtx(tracing::Level::DEBUG);
+    let ctx = TestContext::scalar(vec![]).with_debug_level(tracing::Level::DEBUG);
     udf_log!(ctx, debug, "permitted debug message from test");
     udf_log!(ctx, info, "permitted info message from test");
     udf_log!(ctx, warn, "permitted warn message from test");
     udf_log!(ctx, error, "permitted error message from test");
 
     // Suppressed path: INFO context rejects debug/trace messages — no-op.
-    let ctx_info = FixedCtx(tracing::Level::INFO);
+    let ctx_info = TestContext::scalar(vec![]).with_debug_level(tracing::Level::INFO);
     udf_log!(ctx_info, debug, "suppressed at info level");
     udf_log!(ctx_info, trace, "suppressed at info level");
 

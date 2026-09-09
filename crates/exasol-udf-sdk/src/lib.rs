@@ -2,6 +2,8 @@ pub mod abi;
 pub mod connect_back;
 pub mod context;
 pub mod error;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod value;
 
 pub use connect_back::{ConnectionObject, ExaConnection};

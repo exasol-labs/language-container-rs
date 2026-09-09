@@ -7,7 +7,7 @@
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
-use exasol_udf_sdk::value::Value;
+use exasol_udf_sdk::test_support::DefaultsCtx;
 use std::ffi::{CStr, CString, c_char};
 
 unsafe extern "C" {
@@ -23,23 +23,6 @@ fn vs_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Ok(())
 }
 
-struct NoopCtx;
-
-impl UdfContext for NoopCtx {
-    fn num_columns(&self) -> usize {
-        0
-    }
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Type("none".into()))
-    }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
-        Ok(())
-    }
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Ok(false)
-    }
-}
-
 #[test]
 fn vs_adapter_annotation_wires_slot_and_echoes_through_context_abi() {
     // fn vs_run → SQL name VS_RUN → entry __exa_udf_entry_VS_RUN
@@ -50,7 +33,7 @@ fn vs_adapter_annotation_wires_slot_and_echoes_through_context_abi() {
 
     // Build the double-indirected context pointer exactly as the host runtime
     // does for `run`: a `&mut &mut dyn UdfContext` erased to `*mut c_void`.
-    let mut ctx = NoopCtx;
+    let mut ctx = DefaultsCtx;
     let mut dyn_ref: &mut dyn UdfContext = &mut ctx;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
 

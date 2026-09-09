@@ -48,75 +48,34 @@ pub fn emit_bulk(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct TestCtx {
-        rows: Vec<Vec<Value>>,
-        cursor: usize,
-        emitted: Vec<Vec<Value>>,
-    }
-
-    impl TestCtx {
-        fn new(rows: Vec<Vec<Value>>) -> Self {
-            Self {
-                rows,
-                cursor: 0,
-                emitted: Vec::new(),
-            }
-        }
-    }
-
-    impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
-            self.rows.first().map_or(0, |r| r.len())
-        }
-
-        fn get(&self, col: usize) -> Result<&Value, UdfError> {
-            self.rows[self.cursor - 1]
-                .get(col)
-                .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
-        }
-
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
-            Ok(())
-        }
-
-        fn next(&mut self) -> Result<bool, UdfError> {
-            if self.cursor < self.rows.len() {
-                self.cursor += 1;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
-    }
+    use exasol_udf_sdk::test_support::TestContext;
 
     #[test]
     fn default_payload_when_width_column_absent() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Int64(2)]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Int64(2)]]);
         emit_bulk(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted.len(), 2);
-        for row in &ctx.emitted {
+        assert_eq!(ctx.emitted().len(), 2);
+        for row in ctx.emitted() {
             assert_eq!(row, &vec![Value::String(DEFAULT_PAYLOAD.to_string())]);
         }
     }
 
     #[test]
     fn default_payload_when_width_is_null() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Int64(1), Value::Null]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Int64(1), Value::Null]]);
         emit_bulk(&mut ctx).unwrap();
         assert_eq!(
-            ctx.emitted,
+            ctx.emitted(),
             vec![vec![Value::String(DEFAULT_PAYLOAD.to_string())]]
         );
     }
 
     #[test]
     fn explicit_width_controls_payload_size() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Int64(1), Value::Int64(10)]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Int64(1), Value::Int64(10)]]);
         emit_bulk(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted.len(), 1);
-        match &ctx.emitted[0][0] {
+        assert_eq!(ctx.emitted().len(), 1);
+        match &ctx.emitted()[0][0] {
             Value::String(s) => assert_eq!(s.len(), 10),
             other => panic!("expected string, got {other:?}"),
         }
@@ -125,10 +84,10 @@ mod tests {
     #[test]
     fn width_can_exceed_emit_buffer_threshold() {
         let over_threshold = 4_000_001;
-        let mut ctx = TestCtx::new(vec![vec![Value::Int64(1), Value::Int64(over_threshold)]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Int64(1), Value::Int64(over_threshold)]]);
         emit_bulk(&mut ctx).unwrap();
-        assert_eq!(ctx.emitted.len(), 1);
-        match &ctx.emitted[0][0] {
+        assert_eq!(ctx.emitted().len(), 1);
+        match &ctx.emitted()[0][0] {
             Value::String(s) => assert_eq!(s.len(), over_threshold as usize),
             other => panic!("expected string, got {other:?}"),
         }
@@ -136,8 +95,8 @@ mod tests {
 
     #[test]
     fn zero_count_emits_nothing() {
-        let mut ctx = TestCtx::new(vec![vec![Value::Int64(0)]]);
+        let mut ctx = TestContext::set(vec![vec![Value::Int64(0)]]);
         emit_bulk(&mut ctx).unwrap();
-        assert!(ctx.emitted.is_empty());
+        assert!(ctx.emitted().is_empty());
     }
 }
