@@ -35,8 +35,7 @@ The wire-level accessor contract (`UdfContext` methods, `UdfMeta` shape, default
 
 * *GIVEN* a live session that has run `CLOSE SCHEMA`
 * *WHEN* the session selects the script by its qualified name `IT_RUST.CURRENT_USER_META`
-* *THEN* `current_schema` MUST NOT report `IT_RUST` or any other schema name
-* *AND* the field MUST render as the literal string `NULL` — the database delivers the text `"NULL"` (not an SQL NULL) through the protocol when no schema is selected (this is ambiguous with a schema literally named `NULL`; tracked in [#93](https://github.com/exasol-labs/language-container-rs/issues/93))
+* *THEN* `current_schema` MUST render as the literal string `NULL` — the database delivers the text `"NULL"` (not an SQL NULL) through the protocol when no schema is selected (this is ambiguous with a schema literally named `NULL`; tracked in [#93](https://github.com/exasol-labs/language-container-rs/issues/93))
 * *AND* `script_schema` MUST still report `IT_RUST`, because the script's home schema is independent of session state
 * *AND* re-opening `IT_RUST` MUST restore a reported `current_schema` of `IT_RUST`
 
