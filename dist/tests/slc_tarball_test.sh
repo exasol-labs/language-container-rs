@@ -496,29 +496,26 @@ slc_tarball_glibc_floor_matches_committed_value() {
 }
 
 slc_tarball_language_definitions_well_formed() {
-    local defs="$TREE/build_info/language_definitions.json" compact declared declaration
-    local -a expected
+    local defs="$TREE/build_info/language_definitions.json"
+    local source="$ROOT/build_info/language_definitions.json"
+    local shape_output declared
     if [[ ! -s "$defs" ]]; then
         fail "slc_tarball_language_definitions_well_formed: build_info/language_definitions.json is missing or empty"
         return
     fi
-    compact="$(tr -d ' \t\n' <"$defs")"
-    expected=(
-        '"schema_version":2'
-        '"aliases":["RUST"]'
-        '"protocol":"localzmq+protobuf"'
-        '"language_identifier":"rust"'
-        '"arguments":["lang=rust"]'
-        '"executable":"/exaudf/exaudfclient"'
-    )
-    for declaration in "${expected[@]}"; do
-        if [[ "$compact" != *"$declaration"* ]]; then
-            fail "slc_tarball_language_definitions_well_formed: build_info/language_definitions.json does not declare $declaration"
-            return
-        fi
-    done
 
-    declared="$(printf '%s' "$compact" | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p')"
+    if ! shape_output="$(bash "$HERE/language_definitions_test.sh" "$defs" 2>&1)"; then
+        fail "slc_tarball_language_definitions_well_formed: shape check on $defs failed:
+$shape_output"
+        return
+    fi
+
+    if ! cmp -s "$defs" "$source"; then
+        fail "slc_tarball_language_definitions_well_formed: shipped build_info/language_definitions.json is not byte-identical to committed $source"
+        return
+    fi
+
+    declared="$(jq -r '.language_definitions[0].udf_client_path.executable' "$defs")"
     if [[ ! -x "$TREE$declared" ]]; then
         fail "slc_tarball_language_definitions_well_formed: declared executable '$declared' is not an executable file in the tree"
         return
@@ -635,6 +632,7 @@ fi
 TARBALL="$1"
 [[ -f "$TARBALL" ]] || die "no such tarball: $TARBALL"
 command -v readelf >/dev/null 2>&1 || die "readelf not found — install binutils"
+command -v jq >/dev/null 2>&1 || die "jq not found — install jq"
 
 TREE="$(mktemp -d)"
 trap 'rm -rf "$TREE"' EXIT
