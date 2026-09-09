@@ -18,6 +18,9 @@
 //! [`DefaultsCtx`] exists as a double that overrides nothing beyond the four
 //! required methods and therefore cannot shadow a default under test.
 
+use std::collections::HashMap;
+
+use crate::connect_back::ConnectionObject;
 use crate::context::UdfContext;
 use crate::error::UdfError;
 use crate::value::Value;
@@ -215,6 +218,20 @@ impl TestContext {
         self
     }
 
+    /// Set the cluster IP this context reports.
+    pub fn with_cluster_ip(mut self, ip: impl Into<String>) -> Self {
+        self.meta.cluster_ip = Some(ip.into());
+        self
+    }
+
+    /// Register a named CONNECTION object this context can look up.
+    pub fn with_connection(mut self, name: impl Into<String>, obj: ConnectionObject) -> Self {
+        self.meta
+            .connections
+            .insert(name.into().to_ascii_uppercase(), obj);
+        self
+    }
+
     fn current_row(&self) -> Option<&Vec<Value>> {
         self.cursor.checked_sub(1).and_then(|i| self.rows.get(i))
     }
@@ -321,6 +338,23 @@ impl UdfContext for TestContext {
     fn debug_level(&self) -> tracing::Level {
         self.meta.debug_level
     }
+
+    fn cluster_ip(&self) -> Result<String, UdfError> {
+        self.meta
+            .cluster_ip
+            .clone()
+            .ok_or_else(|| UdfError::Unimplemented("cluster_ip not set on TestContext".into()))
+    }
+
+    fn connection(&self, name: &str) -> Result<ConnectionObject, UdfError> {
+        self.meta
+            .connections
+            .get(&name.to_ascii_uppercase())
+            .cloned()
+            .ok_or_else(|| {
+                UdfError::Unimplemented(format!("connection {name:?} not set on TestContext"))
+            })
+    }
 }
 
 /// A `UdfContext` that overrides only the four required methods.
@@ -374,6 +408,8 @@ struct Metadata {
     current_schema: Option<String>,
     scope_user: Option<String>,
     debug_level: tracing::Level,
+    cluster_ip: Option<String>,
+    connections: HashMap<String, ConnectionObject>,
 }
 
 impl Default for Metadata {
@@ -393,6 +429,8 @@ impl Default for Metadata {
             current_schema: None,
             scope_user: None,
             debug_level: tracing::Level::INFO,
+            cluster_ip: None,
+            connections: HashMap::new(),
         }
     }
 }

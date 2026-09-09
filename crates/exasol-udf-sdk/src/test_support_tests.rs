@@ -1,4 +1,5 @@
-use super::*;
+use super::{DefaultsCtx, EmitPolicy, NextPolicy, TestContext};
+use crate::connect_back::ConnectionObject;
 use crate::context::UdfContext;
 use crate::error::UdfError;
 use crate::value::Value;
@@ -86,6 +87,12 @@ fn metadata_defaults_match_the_trait_defaults() {
     assert_eq!(ctx.current_schema(), defaults.current_schema());
     assert_eq!(ctx.scope_user(), defaults.scope_user());
     assert_eq!(ctx.debug_level(), defaults.debug_level());
+
+    assert!(ctx.cluster_ip().is_err(), "cluster_ip unset by default");
+    assert!(
+        ctx.connection("ANY").is_err(),
+        "connection unset by default"
+    );
 }
 
 #[test]
@@ -104,7 +111,17 @@ fn metadata_setters_override_every_accessor() {
         .with_current_user("SYS")
         .with_current_schema("IT_RUST_OTHER")
         .with_scope_user("IT_VIEW_OWNER")
-        .with_debug_level(tracing::Level::TRACE);
+        .with_debug_level(tracing::Level::TRACE)
+        .with_cluster_ip("10.0.0.5")
+        .with_connection(
+            "MY_CONN",
+            ConnectionObject {
+                kind: "EXA".into(),
+                address: "10.0.0.5:8563".into(),
+                user: "sys".into(),
+                password: "secret".into(),
+            },
+        );
 
     assert_eq!(ctx.memory_limit(), 4_000_000);
     assert_eq!(ctx.session_id(), 1_700_000_000_000_123);
@@ -120,6 +137,24 @@ fn metadata_setters_override_every_accessor() {
     assert_eq!(ctx.current_schema().as_deref(), Some("IT_RUST_OTHER"));
     assert_eq!(ctx.scope_user().as_deref(), Some("IT_VIEW_OWNER"));
     assert_eq!(ctx.debug_level(), tracing::Level::TRACE);
+    assert_eq!(ctx.cluster_ip().unwrap(), "10.0.0.5");
+    let conn = ctx.connection("MY_CONN").unwrap();
+    assert_eq!(conn.address, "10.0.0.5:8563");
+    assert_eq!(conn.user, "sys");
+}
+
+#[test]
+fn connection_lookup_is_case_insensitive() {
+    let obj = ConnectionObject {
+        kind: "EXA".into(),
+        address: "10.0.0.1:8563".into(),
+        user: "u".into(),
+        password: "p".into(),
+    };
+    let ctx = TestContext::scalar(vec![]).with_connection("my_conn", obj);
+    assert!(ctx.connection("MY_CONN").is_ok());
+    assert!(ctx.connection("my_conn").is_ok());
+    assert!(ctx.connection("MISSING").is_err());
 }
 
 #[test]

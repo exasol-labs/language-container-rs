@@ -58,38 +58,11 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     sanity_select_one(&mut conn).await?;
     eprintln!("[it] SELECT 1 ok");
 
-    // Diagnostic: test Python3 built-in SLC connect-back BEFORE our SLC is
-    // registered (ALTER SESSION SET SCRIPT_LANGUAGES replaces all languages,
-    // so Python3 is only available in the default session state).
-    //
-    // Run on a dedicated throwaway connection so a VM crash (or any other
-    // non-fatal failure) cannot poison the shared `conn` used by all asserted
-    // scenarios below. The CONNECTION and SCRIPT objects created here are
-    // DB-global and persist across sessions, so the main connection still has
-    // access to them if needed.
     conn.execute("CREATE SCHEMA IF NOT EXISTS it_rust").await?;
     conn.execute("OPEN SCHEMA it_rust").await?;
     let python3_cb_addr = harness.connect_back_sql_address().await?;
     eprintln!("[it] python3_connect_back: CB_SELF address = {python3_cb_addr}");
-    match harness.connect().await {
-        Ok(mut diag_conn) => {
-            diag_conn
-                .execute("CREATE SCHEMA IF NOT EXISTS it_rust")
-                .await
-                .ok();
-            diag_conn.execute("OPEN SCHEMA it_rust").await.ok();
-            match connect_back_python3_queries_and_emits(&mut diag_conn, &python3_cb_addr).await {
-                Ok(()) => eprintln!("[it] scenario python3_connect_back ok"),
-                Err(e) => eprintln!("[it] scenario python3_connect_back FAILED: {e:#}"),
-            }
-            let _ = diag_conn.close().await;
-        }
-        Err(e) => {
-            eprintln!(
-                "[it] scenario python3_connect_back SKIPPED: could not open diagnostic connection: {e:#}"
-            );
-        }
-    }
+    python3_connect_back_diagnostic(&harness, &python3_cb_addr).await;
 
     // Register the slim Rust SLC for this session.
     eprintln!("[it] exporting + uploading SLC to BucketFS");
@@ -390,6 +363,29 @@ async fn seed_digits(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// Run the Python3 connect-back diagnostic on a dedicated throwaway connection.
+async fn python3_connect_back_diagnostic(harness: &Harness, cb_addr: &str) {
+    match harness.connect().await {
+        Ok(mut diag_conn) => {
+            diag_conn
+                .execute("CREATE SCHEMA IF NOT EXISTS it_rust")
+                .await
+                .ok();
+            diag_conn.execute("OPEN SCHEMA it_rust").await.ok();
+            match connect_back_python3_queries_and_emits(&mut diag_conn, cb_addr).await {
+                Ok(()) => eprintln!("[it] scenario python3_connect_back ok"),
+                Err(e) => eprintln!("[it] scenario python3_connect_back FAILED: {e:#}"),
+            }
+            let _ = diag_conn.close().await;
+        }
+        Err(e) => {
+            eprintln!(
+                "[it] scenario python3_connect_back SKIPPED: could not open diagnostic connection: {e:#}"
+            );
+        }
+    }
+}
+
 /// Diagnostic: Python3 built-in SLC connect-back. Tests whether the SIGABRT is
 /// Rust-SLC-specific or a universal Exasol single-node-Docker bug. Uses Python3's
 /// built-in PyExasol (same approach as strata-rs CACHE_QUERY) to SELECT 42 via
@@ -582,9 +578,9 @@ async fn handshake_metadata_udf_emits_session_and_node(
 /// and what distinguishes the accessor's neutral default from a live value.
 const META_ABSENT: &str = "<none>";
 
-/// Password for the throwaway users the identity scenarios create. Exasol
-/// parses the `IDENTIFIED BY` clause as a delimited identifier, so the literal
-/// keeps its double quotes and its case.
+/// Password for the throwaway users the identity scenarios create. The SQL
+/// wraps the value in double quotes (`IDENTIFIED BY "…"`) so Exasol treats it
+/// as a delimited identifier and preserves case exactly as written.
 /// See <https://docs.exasol.com/db/latest/sql/create_user.htm>.
 const IT_USER_PASSWORD: &str = "Xh12_itRust";
 
@@ -699,11 +695,7 @@ async fn current_user_meta_reports_session_user_and_open_schema(
             meta.script_schema
         );
     }
-    if !meta
-        .script_name
-        .to_ascii_uppercase()
-        .contains("CURRENT_USER_META")
-    {
+    if meta.script_name.to_ascii_uppercase() != "CURRENT_USER_META" {
         bail!(
             "script_name {:?} does not match the registered script name CURRENT_USER_META",
             meta.script_name
