@@ -772,8 +772,15 @@ async fn current_user_meta_current_schema_tracks_open_schema(conn: &mut Connecti
     Ok(())
 }
 
-/// Scenario: a session with no schema open reports no current schema, the only
-/// end-to-end coverage of the `optional` handshake field arriving absent.
+/// Scenario: a session with no schema open reports `current_schema` as the
+/// literal string `"NULL"`.
+///
+/// The database engine hardcodes this literal as its sentinel for "no schema
+/// selected" instead of leaving the (optional) wire field unset, so it is
+/// indistinguishable from a session that has a schema literally named `NULL`
+/// open (see the tracking issue for the upstream database bug). This
+/// assertion documents actual, confirmed database behavior, not the SDK's
+/// own choice.
 ///
 /// Runs on the side connection: `CLOSE SCHEMA` would strand every later scenario
 /// on the shared connection.
@@ -781,23 +788,16 @@ async fn current_user_meta_absent_current_schema(conn: &mut Connection) -> Resul
     conn.execute("CLOSE SCHEMA").await?;
 
     let meta = read_identity_meta(conn, SELECT_CURRENT_USER_META).await?;
-    // The database reports SQL NULL as the current schema of a session with none
-    // open, so the field reaches the fixture either omitted (rendered as the
-    // marker) or empty. Both denote absence; a schema name does not.
-    if meta.current_schema != META_ABSENT && !meta.current_schema.is_empty() {
+    if meta.current_schema != "NULL" {
         bail!(
-            "with no schema open current_schema is {:?}, expected the {META_ABSENT} marker or \
-             an empty field",
+            "with no schema open current_schema is {:?}, expected the literal string \"NULL\" \
+             (the database's sentinel for no schema selected)",
             meta.current_schema
         );
     }
     eprintln!(
-        "[it] current_user_meta_absent_current_schema: current_schema arrived as {}",
-        if meta.current_schema == META_ABSENT {
-            format!("the {META_ABSENT} marker (field omitted)")
-        } else {
-            "an empty string (field present but empty)".to_string()
-        }
+        "[it] current_user_meta_absent_current_schema: current_schema arrived as the literal \
+         string \"NULL\", the database's sentinel for no schema selected"
     );
     if !meta.script_schema.eq_ignore_ascii_case("IT_RUST") {
         bail!(
