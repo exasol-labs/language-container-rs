@@ -695,7 +695,7 @@ async fn current_user_meta_reports_session_user_and_open_schema(
             meta.script_schema
         );
     }
-    if meta.script_name.to_ascii_uppercase() != "CURRENT_USER_META" {
+    if !meta.script_name.eq_ignore_ascii_case("CURRENT_USER_META") {
         bail!(
             "script_name {:?} does not match the registered script name CURRENT_USER_META",
             meta.script_name
