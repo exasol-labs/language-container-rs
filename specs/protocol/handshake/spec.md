@@ -8,6 +8,8 @@ The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a
 
 The handshake exchange surfaces `exascript_info` metadata on `UdfMeta` (session/node/vm identity, the memory limit, and DB/script/user fields), and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response. Connect-back credentials, by contrast, are resolved on demand per CONNECTION name via the live `MT_IMPORT` exchange and are NOT buffered onto `UdfMeta`.
 
+The database-side semantics of the `exascript_info` identity fields (`current_user`, `scope_user`, `current_schema`, `script_schema`) are specified in the sibling feature `protocol/handshake-identity`.
+
 ## Scenarios
 
 ### Scenario: REQ transport connects to the IPC socket

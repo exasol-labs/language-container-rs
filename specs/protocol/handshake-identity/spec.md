@@ -1,24 +1,19 @@
-# Feature: handshake
+# Feature: handshake-identity
 
-Opens the ZMQ REQ transport to the database's REP socket and drives the `MT_CLIENT`/`MT_INFO`/`MT_META` exchange that bootstraps a UDF session, surfacing connection metadata and the memory limit to the host without buffering connect-back credentials.
+Specifies the database-side semantics of the `exascript_info` identity fields (`current_user`, `scope_user`, `current_schema`, `script_schema`) that the handshake surfaces on `UdfMeta`, verified end to end against a live Exasol session.
 
 ## Background
-
-<!-- DELTA:CHANGED -->
-The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a `REQ` socket to `ipc://<socket_path>`. Each protobuf message is a single ZMQ frame; the `REQ` socket manages the request/reply delimiter automatically, so the client neither writes nor strips an empty delimiter frame. A transient ZMQ `EAGAIN` on `send`/`recv` MUST be retried rather than treated as fatal, bounded by a 120 s backstop (`MAX_TOTAL_WAIT`), preserving the REQ/REP lock-step exchange.
-
-The handshake exchange surfaces `exascript_info` metadata on `UdfMeta` (session/node/vm identity, the memory limit, and DB/script/user fields), and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response. Connect-back credentials, by contrast, are resolved on demand per CONNECTION name via the live `MT_IMPORT` exchange and are NOT buffered onto `UdfMeta`.
 
 The database fills the `exascript_info` identity fields from live session state, so their values are database behavior rather than host behavior. `current_user` names the user that executes the statement. `scope_user` equals `current_user` in every case except a UDF call wrapped in a view, where `scope_user` reports the view owner. The two fields therefore cannot diverge unless a view wraps the call.
 
 Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSIONS` instead carries two user columns, `USER_NAME` for the logged-in user and `EFFECTIVE_USER` for the impersonated user. The IMPERSONATE scenario below records which of the two the `current_user` field reports.
 
 `current_schema` names the schema the session has open, which `OPEN SCHEMA` and `CLOSE SCHEMA` change. `script_schema` names the schema that stores the script and stays fixed regardless of the open schema. Only a live-database test can verify these four fields, because the host copies them verbatim and cannot originate them. The scenarios below observe them end to end through the `current-user-meta` fixture, which renders an absent `Option` field as the literal `<none>`.
-<!-- /DELTA:CHANGED -->
+
+The wire-level accessor contract (`UdfContext` methods, `UdfMeta` shape, defaulting) is specified separately in `sdk/udf-sdk`; this feature specifies only what the database puts in those fields.
 
 ## Scenarios
 
-<!-- DELTA:NEW -->
 ### Scenario: Identity metadata reports the executing user and the open schema
 
 * *GIVEN* a live Exasol session authenticated as user `SYS` with schema `IT_RUST` open, and a `RUST SCALAR SCRIPT` registered in `IT_RUST` that returns `current_user`, `scope_user`, `current_schema`, `script_schema`, and `script_name` as one pipe-delimited string
@@ -27,9 +22,7 @@ Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSI
 * *AND* `scope_user` MUST report `SYS`, equal to `current_user`, because no view wraps the call
 * *AND* `current_schema` and `script_schema` MUST both report `IT_RUST`, being the open schema and the script's home schema respectively
 * *AND* none of `current_user`, `scope_user`, or `current_schema` MAY render as the fixture's `<none>` marker, because that marker denotes the accessor default rather than a live database value
-<!-- /DELTA:NEW -->
 
-<!-- DELTA:NEW -->
 ### Scenario: current_schema tracks the open schema independently of script_schema
 
 * *GIVEN* a live session with the script stored in schema `IT_RUST`, and a second schema `IT_RUST_OTHER`
@@ -37,9 +30,7 @@ Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSI
 * *THEN* `current_schema` MUST report `IT_RUST_OTHER`, the schema the session has open
 * *AND* `script_schema` MUST report `IT_RUST`, so the two fields MUST differ, proving `current_schema` follows `OPEN SCHEMA` while `script_schema` follows the script
 * *AND* re-opening `IT_RUST` MUST return `current_schema` to `IT_RUST`, making the two fields equal again
-<!-- /DELTA:NEW -->
 
-<!-- DELTA:NEW -->
 ### Scenario: A session with no open schema reports no current schema
 
 * *GIVEN* a live session that has run `CLOSE SCHEMA`
@@ -48,9 +39,7 @@ Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSI
 * *AND* the field MUST render either as the fixture's `<none>` marker or as an empty string, both of which denote that the session has no schema open
 * *AND* `script_schema` MUST still report `IT_RUST`, because the script's home schema is independent of session state
 * *AND* re-opening `IT_RUST` MUST restore a reported `current_schema` of `IT_RUST`
-<!-- /DELTA:NEW -->
 
-<!-- DELTA:NEW -->
 ### Scenario: scope_user reports the view owner when the script runs inside a view
 
 * *GIVEN* a live session authenticated as `SYS` with the script stored in schema `IT_RUST`
@@ -59,9 +48,7 @@ Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSI
 * *WHEN* the `SYS` session selects from that view
 * *THEN* `current_user` MUST report `SYS`, the user that executes the statement
 * *AND* `scope_user` MUST report `IT_VIEW_OWNER`, the owner of the view that wraps the script call, so the two fields MUST differ
-<!-- /DELTA:NEW -->
 
-<!-- DELTA:NEW -->
 ### Scenario: IMPERSONATE establishes which user the current_user field reports
 
 * *GIVEN* a live session authenticated as `SYS` that has already read the identity metadata once and recorded the reported `current_user`, and that holds no open write locks, because Exasol rejects `IMPERSONATE` while a transaction holds write locks
@@ -70,4 +57,3 @@ Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`. `EXA_DBA_SESSI
 * *THEN* the reported `current_user` MUST equal the value that `SELECT CURRENT_USER` returns in the same impersonated session, because one session MUST name one executing user
 * *AND* the reported `current_user` MUST equal exactly one of `EXA_DBA_SESSIONS.USER_NAME` or `EXA_DBA_SESSIONS.EFFECTIVE_USER` read for that session, and the test MUST record which column matched, because Exasol documents no mapping from `IMPERSONATE` to `CURRENT_USER`
 * *AND* `scope_user` MUST equal the reported `current_user` and `script_schema` MUST stay unchanged, because no view wraps the call and `IMPERSONATE` does not move the script
-<!-- /DELTA:NEW -->
