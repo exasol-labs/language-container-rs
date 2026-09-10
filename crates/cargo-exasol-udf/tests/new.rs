@@ -46,6 +46,18 @@ fn new_scaffolds_crate_files() {
         contents.contains("exasol-udf-sdk"),
         "Cargo.toml must depend on exasol-udf-sdk"
     );
+    assert!(
+        contents.contains("lto = \"fat\""),
+        "Cargo.toml release profile must set lto = \"fat\""
+    );
+    assert!(
+        contents.contains("codegen-units = 1"),
+        "Cargo.toml release profile must set codegen-units = 1"
+    );
+    assert!(
+        !contents.contains("panic"),
+        "Cargo.toml release profile must not set panic = \"abort\""
+    );
 
     // src/lib.rs must exist
     let lib_rs = udf_path.join("src").join("lib.rs");

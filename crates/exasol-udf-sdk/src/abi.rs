@@ -1,7 +1,7 @@
 use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout changes.
-pub const EXA_UDF_ABI_VERSION: u32 = 7;
+pub const EXA_UDF_ABI_VERSION: u32 = 8;
 
 /// Compiled output shape of a UDF, stamped into the vtable so the host can
 /// validate it against the DB's `output_iter_type` at load/run time.

@@ -1,7 +1,6 @@
 use crate::error::ProtocolError;
 use exa_proto::{ExascriptRequest, ExascriptResponse};
 use prost::Message;
-use std::time::{Duration, Instant};
 
 /// Poll interval for blocking recv/send, in milliseconds. Matches the reference
 /// libexaudflib client's `RCVTIMEO`/`SNDTIMEO`. Kept short on purpose: it is a
@@ -9,23 +8,6 @@ use std::time::{Duration, Instant};
 /// retry loop treats as "still waiting" rather than fatal, so the loop stays
 /// responsive (and could log progress) instead of blocking opaquely forever.
 const POLL_INTERVAL_MS: i32 = 1000;
-
-/// Generous overall wall-clock cap on a single blocking recv/send before the
-/// transport gives up and surfaces a timeout error.
-///
-/// The 1 s `RCVTIMEO` alone is *not* a safe deadline: under a loaded cluster the
-/// engine routinely takes longer than 1 s to reply (e.g. while draining a large
-/// MT_EMIT stream from many concurrent VMs). The reference client survives this
-/// by retrying on `EAGAIN` and polling effectively unbounded — relying on the
-/// engine's own session watchdog to kill genuinely stalled sessions. This port
-/// dropped the retry, so a single slow reply aborted the VM (crash signature
-/// `handleDead() ... state=15; signaled=FALSE`, then the engine SIGKILLs the
-/// sibling VMs).
-///
-/// We restore the retry but keep a backstop far above any plausible under-load
-/// reply latency, so it never trips in practice yet still bounds a truly wedged
-/// peer should the engine watchdog ever fail to act.
-const MAX_TOTAL_WAIT: Duration = Duration::from_secs(120);
 
 pub struct ZmqTransport {
     socket: zmq::Socket,
@@ -36,6 +18,26 @@ pub struct ZmqTransport {
 /// socket failure. Only `EAGAIN` is retryable; everything else is fatal.
 fn is_transient_timeout(err: &zmq::Error) -> bool {
     matches!(err, zmq::Error::EAGAIN)
+}
+
+/// Retries a single blocking socket operation through transient `EAGAIN`
+/// timeouts until it succeeds or a genuine socket error occurs. No wall-clock
+/// cap: the database's own session watchdog ends a genuinely wedged peer, so
+/// a client-side deadline would only turn a slow-but-alive reply into a crash.
+/// Socket-free so it is unit-testable without a real `zmq::Socket`.
+fn retry_transient<T>(
+    mut op: impl FnMut() -> Result<T, zmq::Error>,
+    what: &str,
+) -> Result<T, ProtocolError> {
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) if is_transient_timeout(&err) => {
+                tracing::debug!("{what}: transient EAGAIN timeout, still waiting");
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 impl ZmqTransport {
@@ -67,14 +69,17 @@ impl ZmqTransport {
     ///
     /// Under backpressure the `SNDTIMEO` poll interval can elapse before ZMQ
     /// queues the frame, returning `EAGAIN`. Because the REQ socket has not yet
-    /// accepted the message, re-sending the *same* frame is safe and preserves
+    /// accepted the message, re-sending the frame is safe and preserves
     /// lockstep, so we retry transient timeouts rather than treating them as
-    /// fatal. The frame is queued at most once: the first non-`EAGAIN` return
-    /// (success or genuine error) ends the loop.
+    /// fatal — re-encoding the request on each retry, since `Socket::send`
+    /// consumes the message. The frame is queued at most once: the first
+    /// non-`EAGAIN` return (success or genuine error) ends the loop.
     pub fn send(&self, req: &ExascriptRequest) -> Result<(), ProtocolError> {
-        let buf = req.encode_to_vec();
-        tracing::debug!(mt = req.r#type, len = buf.len(), "send");
-        self.retry_transient(|| self.socket.send(&buf, 0), "send")
+        tracing::debug!(mt = req.r#type, len = req.encoded_len(), "send");
+        retry_transient(
+            || self.socket.send(zmq::Message::from(req.encode_to_vec()), 0),
+            "send",
+        )
     }
 
     /// Blocks until the DB's REP socket delivers its single reply frame; the
@@ -84,41 +89,17 @@ impl ZmqTransport {
     /// reply has not arrived, so re-receiving on the same socket is correct and
     /// keeps lockstep (no new request is sent — the pending reply is still
     /// awaited). We retry transient timeouts so a slow-but-alive DB does not
-    /// abort the VM. See `MAX_TOTAL_WAIT` for why an effectively-unbounded poll
-    /// is the right default and what backstops it.
+    /// abort the VM.
     pub fn recv(&self) -> Result<ExascriptResponse, ProtocolError> {
         tracing::debug!("recv: waiting");
-        let bytes = self.retry_transient(|| self.socket.recv_bytes(0), "recv")?;
-        tracing::debug!(len = bytes.len(), "recv: got frame");
-        let resp = ExascriptResponse::decode(bytes.as_slice())?;
+        let msg = retry_transient(|| self.socket.recv_msg(0), "recv")?;
+        tracing::debug!(len = msg.len(), "recv: got frame");
+        let resp = ExascriptResponse::decode(&*msg)?;
         tracing::debug!(mt = resp.r#type, "recv: decoded");
         Ok(resp)
     }
-
-    /// Run a single blocking socket operation, polling through transient
-    /// `EAGAIN` timeouts until it completes, a genuine socket error occurs, or
-    /// `MAX_TOTAL_WAIT` elapses. Genuine errors propagate immediately.
-    fn retry_transient<T>(
-        &self,
-        mut op: impl FnMut() -> Result<T, zmq::Error>,
-        what: &str,
-    ) -> Result<T, ProtocolError> {
-        let start = Instant::now();
-        loop {
-            match op() {
-                Ok(value) => return Ok(value),
-                Err(err) if is_transient_timeout(&err) => {
-                    let elapsed = start.elapsed();
-                    if elapsed >= MAX_TOTAL_WAIT {
-                        return Err(ProtocolError::Protocol(format!(
-                            "{what} timed out after {elapsed:?} of polling a non-responsive \
-                             database (poll interval {POLL_INTERVAL_MS} ms)"
-                        )));
-                    }
-                    tracing::debug!(?elapsed, "{what}: transient EAGAIN timeout, still waiting");
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-    }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

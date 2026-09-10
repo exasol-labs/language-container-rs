@@ -1,16 +1,21 @@
 //! Emit-throughput benchmark UDFs (Rust side).
 //!
-//! Two shapes, each with a row-at-a-time and a columnar (`ctx.emit_batch`)
+//! Three shapes, each with a row-at-a-time and a columnar (`ctx.emit_batch`)
 //! entry point, both taking `(n BIGINT, do_emit BIGINT)`:
 //!
 //! - **mixed** — `id BIGINT, label VARCHAR(100), val DOUBLE`
-//!   (`emit_mixed_row` / `emit_mixed_batch`): the original shape, no
-//!   NUMERIC/DATE/TIMESTAMP string-block columns.
+//!   (`emit_mixed_row` / `emit_mixed_batch`): `id BIGINT` is `DECIMAL(36,0)`
+//!   and arrives on the wire as `Value::Numeric`, so it is stringified into
+//!   the proto string block same as `wide`'s `amount`.
 //! - **wide** — `id BIGINT, amount DECIMAL(18,2), event_date DATE,
 //!   event_ts TIMESTAMP, label VARCHAR(100)` (`emit_wide_row` /
 //!   `emit_wide_batch`): exercises `value_to_block_string`'s chrono- and
 //!   `Decimal`-`Display`-based formatting for all three string-block
 //!   temporal/numeric types.
+//! - **native** — `id DECIMAL(18,0), val DOUBLE` (`emit_native_row` /
+//!   `emit_native_batch`): both columns are native fixed-width wire types
+//!   (`Value::Int64`/`Value::Double`), with no string-block column at all —
+//!   the baseline `mixed` and `wide` do not provide.
 //!
 //! The `do_emit` flag is what lets the driver isolate the three measure points:
 //! with `do_emit = 0` the UDF builds all N rows (same per-row construction cost)
@@ -18,7 +23,7 @@
 //! generation cost; `do_emit = 1` generates *and* emits, so
 //! `T_transfer = T_full − T_generation`.
 //!
-//! `sink_mixed` / `sink_wide` are the ingest-side counterpart: a SET script
+//! `sink_mixed` / `sink_wide` / `sink_native` are the ingest-side counterpart: a SET script
 //! that reads every column of every input row (forcing
 //! `InputRowSet::from_proto` / `decode_string_block` to materialise it) and
 //! emits a single row with the count. The driver chains
@@ -38,7 +43,7 @@ use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
 
 /// 50-char payload, comfortably inside VARCHAR(100). Matches the "mixed" shape.
-const LABEL: &str = "0123456789012345678901234567890123456789012345678";
+const LABEL: &str = "01234567890123456789012345678901234567890123456789";
 
 /// Rows per Arrow batch in the columnar path. The host re-splits at the
 /// 4,000,000-byte MT_EMIT limit anyway; this just bounds peak UDF-side memory.
@@ -304,6 +309,85 @@ pub fn sink_wide(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Ok(())
 }
 
+/// Build one native row's values: `id, val`. Both columns are native
+/// fixed-width wire types (`DECIMAL(18,0)` → `Value::Int64`, `DOUBLE` →
+/// `Value::Double`) — unlike `mixed`'s `id BIGINT`, neither is stringified
+/// into the proto string block.
+#[inline]
+fn native_row(i: i64) -> [Value; 2] {
+    [Value::Int64(i), Value::Double(i as f64 * 1.5)]
+}
+
+#[exasol_udf]
+pub fn emit_native_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let (n, do_emit) = read_params(ctx)?;
+    if do_emit {
+        for i in 0..n {
+            ctx.emit(&native_row(i))?;
+        }
+    } else {
+        for i in 0..n {
+            std::hint::black_box(native_row(i));
+        }
+        ctx.emit(&native_row(0))?;
+    }
+    Ok(())
+}
+
+#[exasol_udf]
+pub fn emit_native_batch(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let (n, do_emit) = read_params(ctx)?;
+    let mut emitted = 0i64;
+    while emitted < n {
+        let len = (n - emitted).min(CHUNK);
+        let batch = build_native_batch(emitted, len)?;
+        if do_emit {
+            ctx.emit_batch(&batch)?;
+        } else {
+            std::hint::black_box(&batch);
+        }
+        emitted += len;
+    }
+    if !do_emit {
+        ctx.emit_batch(&build_native_batch(0, 1)?)?;
+    }
+    Ok(())
+}
+
+/// Build a `len`-row native RecordBatch starting at id `start`.
+fn build_native_batch(start: i64, len: i64) -> Result<RecordBatch, UdfError> {
+    let len = len as usize;
+    let ids: Vec<i64> = (0..len as i64).map(|k| start + k).collect();
+    let vals: Vec<f64> = ids.iter().map(|&i| i as f64 * 1.5).collect();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("val", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(ids)),
+            Arc::new(Float64Array::from(vals)),
+        ],
+    )
+    .map_err(|e| UdfError::User(e.to_string()))
+}
+
+/// Ingest-side counterpart of `emit_native_*`: read every column of every
+/// input row and emit the row count.
+#[exasol_udf]
+pub fn sink_native(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let mut count: i64 = 0;
+    while ctx.next()? {
+        std::hint::black_box(ctx.get(0)?);
+        std::hint::black_box(ctx.get(1)?);
+        count += 1;
+    }
+    ctx.emit(&[Value::Int64(count)])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +458,19 @@ mod tests {
                 date_to_epoch_days(wide_event_date(10 + k as i64))
             );
         }
+    }
+
+    #[test]
+    fn native_row_has_two_native_typed_columns() {
+        let row = native_row(42);
+        assert!(matches!(row[0], Value::Int64(42)));
+        assert!(matches!(row[1], Value::Double(_)));
+    }
+
+    #[test]
+    fn build_native_batch_produces_expected_shape() {
+        let batch = build_native_batch(0, 5).unwrap();
+        assert_eq!(batch.num_rows(), 5);
+        assert_eq!(batch.num_columns(), 2);
     }
 }

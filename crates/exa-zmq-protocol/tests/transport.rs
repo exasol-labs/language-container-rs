@@ -1,4 +1,7 @@
-use exa_proto::{ExascriptClient, ExascriptRequest, ExascriptResponse, MessageType};
+use exa_proto::{
+    ExascriptClient, ExascriptNextDataRep, ExascriptRequest, ExascriptResponse, ExascriptTableData,
+    MessageType,
+};
 use exa_zmq_protocol::ZmqTransport;
 use prost::Message;
 use std::time::Duration;
@@ -106,4 +109,64 @@ fn recv_waits_through_a_reply_slower_than_the_poll_interval() {
     assert_eq!(got.r#type, MessageType::MtInfo as i32);
     assert_eq!(got.connection_id, 42);
     server_thread.join().unwrap();
+}
+
+/// `send` must re-encode the request as a fresh `zmq::Message` on every retry
+/// attempt, since `Socket::send` consumes the message it is given. A REQ
+/// socket with no connected peer yet returns `EAGAIN` from the `SNDTIMEO`
+/// poll interval, so connecting before the peer binds exercises that retry.
+#[test]
+fn send_retries_through_a_peer_that_binds_after_the_poll_interval() {
+    let ep = endpoint("late-bind-send");
+    let transport = ZmqTransport::connect(&ep).unwrap();
+
+    let ep_for_server = ep.clone();
+    let server_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        let ctx = zmq::Context::new();
+        let server = ctx.socket(zmq::REP).unwrap();
+        server.bind(&ep_for_server).unwrap();
+        let payload = server.recv_bytes(0).unwrap();
+        ExascriptRequest::decode(payload.as_slice()).unwrap()
+    });
+
+    transport.send(&client_request()).unwrap();
+    let decoded = server_thread.join().unwrap();
+    assert_eq!(decoded.r#type, MessageType::MtClient as i32);
+    assert_eq!(decoded.connection_id, 42);
+}
+
+/// `recv` decodes directly from `recv_msg`'s byte slice rather than a copied
+/// `Vec<u8>`; exercise it against a multi-field, non-trivial payload.
+#[test]
+fn recv_decodes_a_multi_field_response_from_the_message_slice() {
+    let ep = endpoint("slice-decode");
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&ep).unwrap();
+
+    let transport = ZmqTransport::connect(&ep).unwrap();
+    transport.send(&client_request()).unwrap();
+    server.recv_bytes(0).unwrap();
+
+    let reply = ExascriptResponse {
+        r#type: MessageType::MtNext as i32,
+        connection_id: 42,
+        next: Some(ExascriptNextDataRep {
+            table: ExascriptTableData {
+                rows: 3,
+                rows_in_group: 3,
+                data_string: vec!["a".into(), "bb".into(), "ccc".repeat(1000)],
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    server.send(reply.encode_to_vec(), 0).unwrap();
+
+    let got = transport.recv().unwrap();
+    assert_eq!(got.r#type, MessageType::MtNext as i32);
+    let table = got.next.unwrap().table;
+    assert_eq!(table.rows, 3);
+    assert_eq!(table.data_string, vec!["a", "bb", &"ccc".repeat(1000)]);
 }

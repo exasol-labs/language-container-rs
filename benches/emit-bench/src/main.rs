@@ -12,10 +12,12 @@
 //!   `T_ingest = T_ingest_full − T_full` (the already-measured emit `T_full`
 //!   for the same shape/mode/N).
 //!
-//! Two shapes: **mixed** (`id BIGINT, label VARCHAR(100), val DOUBLE`, no
-//! string-block NUMERIC/DATE/TIMESTAMP columns) and **wide** (`id BIGINT,
-//! amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP, label
-//! VARCHAR(100)`), in row and columnar modes, at 1M and 5M rows.
+//! Three shapes: **mixed** (`id BIGINT, label VARCHAR(100), val DOUBLE`,
+//! `id BIGINT` stringified into the string block like a NUMERIC), **wide**
+//! (`id BIGINT, amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP,
+//! label VARCHAR(100)`), and **native** (`id DECIMAL(18,0), val DOUBLE`, both
+//! columns native fixed-width wire types, no string-block column at all), in
+//! row and columnar modes, at 1M and 5M rows.
 //!
 //! Each UDF takes `(n, do_emit)`: `do_emit=0` builds all N rows but emits one
 //! sentinel (generation), `do_emit=1` emits all N (full). Transfer = full − gen.
@@ -58,13 +60,14 @@ impl Shape {
     }
 }
 
-const SHAPES: [Shape; 2] = [
+const SHAPES: [Shape; 3] = [
     Shape {
         key: "mixed",
         columns_ddl: "id BIGINT, label VARCHAR(100), val DOUBLE",
         col_names: "id, label, val",
-        // id (8) + label (50) + val (8).
-        bytes_per_row: 66.0,
+        // id BIGINT is DECIMAL(36,0), stringified on the wire like a
+        // decimal (~7) + label (50) + val (8).
+        bytes_per_row: 65.0,
     },
     Shape {
         key: "wide",
@@ -74,6 +77,14 @@ const SHAPES: [Shape; 2] = [
         // id (~7) + amount (~10) + event_date "YYYY-MM-DD" (10) +
         // event_ts "YYYY-MM-DD HH:MM:SS.NNNNNNNNN" (29) + label (50).
         bytes_per_row: 106.0,
+    },
+    Shape {
+        key: "native",
+        columns_ddl: "id DECIMAL(18,0), val DOUBLE",
+        col_names: "id, val",
+        // id DECIMAL(18,0) arrives as a native Value::Int64 (8) + val (8) —
+        // no string-block column at all.
+        bytes_per_row: 16.0,
     },
 ];
 
@@ -501,6 +512,48 @@ def run(ctx):
     .await
     .context("create py_wide_batch")?;
 
+    // Python3 row script (native shape: id/val only, no string-block column).
+    conn.execute(
+        r#"CREATE OR REPLACE PYTHON3 SET SCRIPT bench.py_native_row(n BIGINT, do_emit BIGINT) EMITS (id DECIMAL(18,0), val DOUBLE) AS
+def run(ctx):
+    n = ctx.n
+    do_emit = ctx.do_emit
+    if do_emit:
+        for i in range(n):
+            ctx.emit(i, i * 1.5)
+    else:
+        for i in range(n):
+            row = (i, i * 1.5)
+        ctx.emit(0, 0.0)
+/"#,
+    )
+    .await
+    .context("create py_native_row")?;
+
+    // Python3 columnar script (pandas DataFrame emit, native shape).
+    conn.execute(
+        r#"CREATE OR REPLACE PYTHON3 SET SCRIPT bench.py_native_batch(n BIGINT, do_emit BIGINT) EMITS (id DECIMAL(18,0), val DOUBLE) AS
+import pandas as pd
+import numpy as np
+CHUNK = 100000
+def run(ctx):
+    n = ctx.n
+    do_emit = ctx.do_emit
+    emitted = 0
+    while emitted < n:
+        ln = min(CHUNK, n - emitted)
+        ids = np.arange(emitted, emitted + ln, dtype='int64')
+        df = pd.DataFrame({'id': ids, 'val': ids * 1.5})
+        if do_emit:
+            ctx.emit(df)
+        emitted += ln
+    if not do_emit:
+        ctx.emit(pd.DataFrame({'id': [0], 'val': [0.0]}))
+/"#,
+    )
+    .await
+    .context("create py_native_batch")?;
+
     Ok(())
 }
 
@@ -566,10 +619,17 @@ fn print_report(
     ingest_cells: &[IngestCell],
 ) {
     println!("\n=== emit-throughput: Rust SLC vs native Python3 ===");
-    println!("shapes: mixed = id BIGINT, label VARCHAR(100), val DOUBLE (~66 B/row)");
     println!(
-        "        wide  = id BIGINT, amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP, \
+        "shapes: mixed  = id BIGINT, label VARCHAR(100), val DOUBLE (~65 B/row; id is \
+         string-block NUMERIC)"
+    );
+    println!(
+        "        wide   = id BIGINT, amount DECIMAL(18,2), event_date DATE, event_ts TIMESTAMP, \
          label VARCHAR(100) (~106 B/row)"
+    );
+    println!(
+        "        native = id DECIMAL(18,0), val DOUBLE (~16 B/row; native fixed-width, no \
+         string-block column)"
     );
     println!("metric: data transfer = T_full - T_generation (median of {RUNS} runs)\n");
 

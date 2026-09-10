@@ -328,6 +328,8 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario set_sum_multi_group_by ok");
     emit_k_scalar_emits_zero_one_many(&mut conn, &emit_k_path).await?;
     eprintln!("[it] scenario emit_k_scalar_emits_zero_one_many ok");
+    scalar_emits_passthrough_column_resolves_source_row(&mut conn, &emit_k_path).await?;
+    eprintln!("[it] scenario scalar_emits_passthrough_column_resolves_source_row ok");
     scalar_next_illegal_fails_with_prefixed_error(&mut conn, &scalar_next_illegal_path).await?;
     eprintln!("[it] scenario scalar_next_illegal_fails_with_prefixed_error ok");
     returns_channel_value_null_and_emit_ban(&mut conn, &scalar_path, &returns_with_emit_path)
@@ -2083,6 +2085,61 @@ async fn emit_k_scalar_emits_zero_one_many(conn: &mut Connection, udf_object: &s
              \"4:0,0,1,2\" (0 rows for k=0, 1 for k=1, 3 for k=3)"
         );
     }
+    Ok(())
+}
+
+/// Scenario: pass-through columns in a SCALAR EMITS UDF resolve to the correct
+/// source input row. `SELECT k, emit_k(k)` must pair each emitted value with
+/// the `k` that produced it. Repeated over ORDINAL_100K so the assertion
+/// crosses a scalar MT_NEXT batch boundary.
+async fn scalar_emits_passthrough_column_resolves_source_row(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) EMITS (idx BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.emit_k_src (k BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.emit_k_src VALUES (1),(2),(3)")
+        .await?;
+
+    // Each source row emits k rows. The pass-through column k must equal the
+    // source input on every emitted row.
+    let mismatch = query_single_string(
+        conn,
+        "SELECT COUNT(*) FROM (SELECT k, emit_k(k) FROM it_rust.emit_k_src) WHERE k IS NULL",
+    )
+    .await?
+    .unwrap_or_default();
+    if mismatch != "0" {
+        bail!(
+            "pass-through column k had {mismatch} NULL values; expected 0 (row_number not stamped)"
+        );
+    }
+
+    // Repeat over ORDINAL_100K to cross batch boundaries. Every row emits 1
+    // row (emit_k(1) = one row with idx=0), so the pass-through `ord` must
+    // never be NULL.
+    let big_mismatch = query_single_string(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM (\
+                SELECT ord, emit_k(1) FROM ({ORDINAL_100K})\
+             ) WHERE ord IS NULL"
+        ),
+    )
+    .await?
+    .unwrap_or_default();
+    if big_mismatch != "0" {
+        bail!(
+            "pass-through column ord had {big_mismatch} NULL values over 100K rows; \
+             row_number not stamped across batch boundaries"
+        );
+    }
+
     Ok(())
 }
 

@@ -50,40 +50,19 @@ pub struct RuntimeExaConnection {
 
 impl Drop for RuntimeExaConnection {
     fn drop(&mut self) {
-        cb_log("[cb] drop: shutdown start");
-        // Drive the async close inside the Tokio runtime so that TLS teardown
-        // (SSL_shutdown, tokio::net::TcpStream deregister) happens while the
-        // IO driver is live.  Errors are ignored — we're in a destructor.
+        tracing::debug!("connect-back: shutdown start");
         let _ = connect_back_rt().block_on(self.inner.shutdown());
-        cb_log("[cb] drop: shutdown done");
+        tracing::debug!("connect-back: shutdown done");
     }
 }
 
 impl ExaConnection for RuntimeExaConnection {
-    /// Override the default `query_for_each` so result batches are converted
-    /// and consumed one at a time, in the runtime's own arrow-link context.
-    ///
-    /// Fetching and conversion both run here, in the runtime crate, so the
-    /// per-type `downcast_ref` calls in `record_batch_to_rows` resolve against
-    /// the runtime's arrow `TypeId`s. The default trait impl would run the
-    /// conversion in the *caller's* (UDF `.so`'s) arrow context, where the
-    /// downcast fails on a `TypeId` mismatch.
-    ///
-    /// The fetch is driven with a single `block_on` over
-    /// `execute(sql).await?.fetch_all().await?`. We deliberately do not use
-    /// `ResultSet::into_iterator()` / `next_batch()`: those call
-    /// `Handle::try_current()` then `handle.block_on(...)`, which on our
-    /// `current_thread` runtime would re-enter the only runtime thread from
-    /// within an outer `block_on` and deadlock. `fetch_all` materialises the
-    /// batches once; we then iterate the owned `Vec` with `into_iter()`,
-    /// converting and dropping each batch before processing the next so a
-    /// batch's arrow buffers are released before its rows are handed to `f`.
     fn query_for_each(
         &mut self,
         sql: &str,
         f: &mut dyn FnMut(Vec<Value>) -> Result<(), UdfError>,
     ) -> Result<(), UdfError> {
-        cb_log(&format!("[cb] query_for_each: '{sql}'"));
+        tracing::debug!(sql = %sql, "connect-back: query_for_each");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             connect_back_rt().block_on(async {
                 let batches = self
@@ -94,40 +73,30 @@ impl ExaConnection for RuntimeExaConnection {
                     .fetch_all()
                     .await
                     .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-                Ok::<Vec<_>, UdfError>(batches)
+                for batch in batches {
+                    let rows = exasol_udf_sdk::connect_back::record_batch_to_rows(&batch)?;
+                    drop(batch);
+                    for row in rows {
+                        f(row)?;
+                    }
+                }
+                Ok(())
             })
         }));
-        cb_log("[cb] query_for_each: fetch done");
-        let batches = match result {
-            Ok(Ok(batches)) => batches,
-            Ok(Err(e)) => {
-                cb_log(&format!("[cb] query_for_each: error: {e}"));
-                return Err(e);
-            }
+        match result {
+            Ok(r) => r,
             Err(payload) => {
                 let msg = payload
                     .downcast_ref::<&str>()
                     .copied()
                     .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("unknown panic payload");
-                cb_log(&format!("[cb] query_for_each panic: {msg}"));
-                return Err(UdfError::ConnectBack(format!(
+                tracing::debug!(msg, "connect-back: query_for_each panic");
+                Err(UdfError::ConnectBack(format!(
                     "panic in query_for_each: {msg}"
-                )));
-            }
-        };
-        cb_log(&format!(
-            "[cb] query_for_each: ok, {} batches",
-            batches.len()
-        ));
-        for batch in batches {
-            let rows = exasol_udf_sdk::connect_back::record_batch_to_rows(&batch)?;
-            drop(batch);
-            for row in rows {
-                f(row)?;
+                )))
             }
         }
-        Ok(())
     }
 
     /// Override the default `query` so the arrow→`Value` conversion runs here,
@@ -144,14 +113,13 @@ impl ExaConnection for RuntimeExaConnection {
     }
 
     fn execute(&mut self, sql: &str) -> Result<u64, UdfError> {
-        cb_log(&format!("[cb] execute: '{sql}'"));
+        tracing::debug!(sql = %sql, "connect-back: execute");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             connect_back_rt()
                 .block_on(self.inner.execute_update(sql))
                 .map(|rows| rows.max(0) as u64)
                 .map_err(|e| UdfError::ConnectBack(e.to_string()))
         }));
-        cb_log("[cb] execute: returned from block_on");
         match result {
             Ok(r) => r,
             Err(payload) => {
@@ -160,7 +128,7 @@ impl ExaConnection for RuntimeExaConnection {
                     .copied()
                     .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("unknown panic payload");
-                cb_log(&format!("[cb] execute panic: {msg}"));
+                tracing::debug!(msg, "connect-back: execute panic");
                 Err(UdfError::ConnectBack(format!("panic in execute: {msg}")))
             }
         }
@@ -182,11 +150,7 @@ impl ExaConnection for RuntimeExaConnection {
         if rows.is_empty() {
             return Ok(0);
         }
-        cb_log(&format!(
-            "[cb] execute_batch: '{}', {} rows",
-            sql,
-            rows.len()
-        ));
+        tracing::debug!(sql = %sql, rows = rows.len(), "connect-back: execute_batch");
         let param_rows: Vec<Vec<Parameter>> = rows
             .iter()
             .map(|row| row.iter().map(value_to_parameter).collect::<Result<_, _>>())
@@ -203,14 +167,12 @@ impl ExaConnection for RuntimeExaConnection {
                     .execute_batch_update(&stmt, &param_rows)
                     .await
                     .map_err(|e| UdfError::ConnectBack(e.to_string()));
-                // Log close errors but don't replace the execution result.
                 if let Err(e) = self.inner.close_prepared(stmt).await {
-                    cb_log(&format!("[cb] execute_batch: close_prepared error: {e}"));
+                    tracing::debug!(error = %e, "connect-back: close_prepared error");
                 }
                 count.map(|n| n.max(0) as u64)
             })
         }));
-        cb_log("[cb] execute_batch: returned from block_on");
         match result {
             Ok(r) => r,
             Err(payload) => {
@@ -219,7 +181,7 @@ impl ExaConnection for RuntimeExaConnection {
                     .copied()
                     .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("unknown panic payload");
-                cb_log(&format!("[cb] execute_batch panic: {msg}"));
+                tracing::debug!(msg, "connect-back: execute_batch panic");
                 Err(UdfError::ConnectBack(format!(
                     "panic in execute_batch: {msg}"
                 )))
@@ -229,23 +191,18 @@ impl ExaConnection for RuntimeExaConnection {
 }
 
 impl RuntimeExaConnection {
-    /// Drive an async transaction control operation to completion on the shared
-    /// connect-back runtime, mapping `QueryError` to [`UdfError::ConnectBack`]
-    /// and catching any panic so it cannot cross the UDF FFI boundary — the same
-    /// contract as `query_for_each`/`execute`.
     fn run_txn_op<'a, F, Fut>(&'a mut self, name: &str, op: F) -> Result<(), UdfError>
     where
         F: FnOnce(&'a mut Connection) -> Fut,
         Fut: std::future::Future<Output = Result<(), exarrow_rs::error::QueryError>> + 'a,
     {
-        cb_log(&format!("[cb] {name}"));
+        tracing::debug!(op = name, "connect-back: txn");
         let fut = op(&mut self.inner);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             connect_back_rt()
                 .block_on(fut)
                 .map_err(|e| UdfError::ConnectBack(e.to_string()))
         }));
-        cb_log(&format!("[cb] {name}: returned from block_on"));
         match result {
             Ok(r) => r,
             Err(payload) => {
@@ -254,7 +211,7 @@ impl RuntimeExaConnection {
                     .copied()
                     .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("unknown panic payload");
-                cb_log(&format!("[cb] {name} panic: {msg}"));
+                tracing::debug!(op = name, msg, "connect-back: txn panic");
                 Err(UdfError::ConnectBack(format!("panic in {name}: {msg}")))
             }
         }
@@ -282,55 +239,19 @@ fn value_to_parameter(v: &Value) -> Result<Parameter, UdfError> {
     }
 }
 
-/// Open a new external-client session to the named-connection address.
-/// Connect-back is always a new session and a new transaction — the Exasol core
-/// cannot share the invoking query's transaction with a container UDF. SSL
-/// verification is disabled per project rules.
-fn cb_log(msg: &str) {
-    use std::io::Write;
-    for path in &["/tmp/cb_debug.txt"] {
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(f, "{msg}");
-            return;
-        }
-    }
-    let _ = writeln!(std::io::stderr(), "[slc-cb] {msg}");
-}
-
 pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, UdfError> {
     ensure_rustls_provider();
     let dsn = build_dsn(conn_info);
-    cb_log(&format!(
-        "[cb] open_connection: connecting to {}",
-        conn_info.address
-    ));
-    // Wrap in catch_unwind: panics in exarrow-rs/tokio/aws-lc-rs must not
-    // cross the FFI boundary into exaudfclient (undefined behaviour).
+    tracing::debug!(address = %conn_info.address, "connect-back: connecting");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        cb_log("[cb] creating Driver");
         let driver = Driver::new();
-        cb_log("[cb] Driver created, calling driver.open");
         let db = driver
             .open(&dsn)
             .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-        cb_log("[cb] driver.open ok, calling db.connect");
-        let r = connect_back_rt()
+        connect_back_rt()
             .block_on(db.connect())
-            .map_err(|e| UdfError::ConnectBack(e.to_string()));
-        cb_log(&format!(
-            "[cb] db.connect returned: {}",
-            match &r {
-                Ok(_) => "Ok".to_string(),
-                Err(e) => format!("Err({e})"),
-            }
-        ));
-        r
+            .map_err(|e| UdfError::ConnectBack(e.to_string()))
     }));
-    cb_log("[cb] catch_unwind returned");
     match result {
         Ok(Ok(inner)) => Ok(RuntimeExaConnection { inner }),
         Ok(Err(e)) => Err(e),
@@ -340,7 +261,7 @@ pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, Udf
                 .copied()
                 .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("unknown panic payload");
-            cb_log(&format!("[cb] panic caught: {msg}"));
+            tracing::debug!(msg, "connect-back: open_connection panic");
             Err(UdfError::ConnectBack(format!("panic: {msg}")))
         }
     }

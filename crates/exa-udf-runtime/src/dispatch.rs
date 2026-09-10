@@ -7,41 +7,47 @@ use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use std::cell::{Cell, RefCell};
 
-/// Drive the run phase: process each input group and flush the UDF's output
-/// until the DB signals no more groups.
-///
-/// The DB binds a REP socket, so every wire exchange is strictly
-/// client-send-then-receive. The client opens each group with `MT_RUN`; the DB
-/// answers `MT_RUN` to open a group or `MT_CLEANUP` when none remains. Within a
-/// group the client pulls input batches with `MT_NEXT` until the DB answers
-/// `MT_DONE`, then sends its own `MT_DONE`.
-///
-/// The per-group body branches on the input iteration axis (see [`run_group`]):
-/// `ExactlyOnce` (SCALAR) invokes `run()` once per input row; `Multiple` (SET)
-/// invokes `run()` once per group and lets `ctx.next()` span the group's
-/// batches. The emit buffer is scoped to the whole group: it flushes a mid-group
-/// `MT_EMIT` each time it crosses 4,000,000 bytes and a single tail `MT_EMIT`
-/// before the group's `MT_DONE`.
 pub fn run_udf(
     transport: &ZmqTransport,
     proto: &mut Protocol,
     udf: &LoadedUdf,
     meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
+    let mut emit_buf = EmitBuffer::new();
+    let exit: Cell<Option<GroupExit>> = Cell::new(None);
+    let proto_cell = RefCell::new(proto);
+    let wire = SessionWire {
+        transport,
+        proto_cell: &proto_cell,
+        exit: &exit,
+    };
+
     loop {
-        match request(transport, proto, proto.run_request())? {
+        let event = {
+            let mut p = wire.proto_cell.borrow_mut();
+            let req = p.run_request();
+            request(transport, &mut p, req)?
+        };
+        match event {
             HostEvent::Run => {}
-            // The DB ends the session by answering MT_RUN with MT_CLEANUP.
             HostEvent::Cleanup => break,
             HostEvent::Close(msg) => return close_error(msg),
             _ => {}
         }
 
-        if let Some(early) = run_group(transport, proto, udf, meta)? {
+        emit_buf.group_reset();
+        wire.exit.set(None);
+
+        if let Some(early) = run_group(&wire, &mut emit_buf, udf, meta)? {
             return early;
         }
 
-        match request(transport, proto, proto.done_request())? {
+        let event = {
+            let mut p = wire.proto_cell.borrow_mut();
+            let req = p.done_request();
+            request(transport, &mut p, req)?
+        };
+        match event {
             HostEvent::Done => {}
             HostEvent::Cleanup => break,
             HostEvent::Close(msg) => return close_error(msg),
@@ -49,8 +55,11 @@ pub fn run_udf(
         }
     }
 
-    // Client-initiated teardown: MT_FINISHED, then the DB echoes it.
-    request(transport, proto, proto.finished_reply())?;
+    {
+        let mut p = wire.proto_cell.borrow_mut();
+        let req = p.finished_reply();
+        request(transport, &mut p, req)?;
+    }
     Ok(())
 }
 
@@ -62,47 +71,34 @@ enum GroupExit {
     Closed(Option<String>),
 }
 
-/// Process one input group: fetch its `MT_NEXT` batches, drive the UDF by input
-/// iteration axis, and tail-flush the group's emit buffer before returning.
-///
-/// Returns `Ok(None)` on a normal group boundary so the caller can send its
-/// `MT_DONE`; `Ok(Some(result))` if the DB closed or cleaned up mid-input so the
-/// caller short-circuits `run_udf`.
-///
-/// `transport` and `proto` are shared via a single `RefCell` among the batch
-/// fetcher, the emit flusher, the tail flush and the credential fetcher. The
-/// borrows never overlap: UDF execution is single-threaded and each closure
-/// holds the cell for one send/recv exchange only.
-fn run_group(
-    transport: &ZmqTransport,
-    proto: &mut Protocol,
+/// The session's wire plumbing, bundled since every group-scoped helper needs
+/// all three together.
+struct SessionWire<'s> {
+    transport: &'s ZmqTransport,
+    proto_cell: &'s RefCell<&'s mut Protocol>,
+    exit: &'s Cell<Option<GroupExit>>,
+}
+
+fn run_group<'s>(
+    wire: &SessionWire<'s>,
+    emit_buf: &mut EmitBuffer,
     udf: &LoadedUdf,
-    meta: &UdfMeta,
+    meta: &'s UdfMeta,
 ) -> Result<Option<Result<(), RuntimeError>>, RuntimeError> {
-    let mut emit_buf = EmitBuffer::new();
-    // Set by the batch fetcher when the DB ends input abnormally (mid-group
-    // MT_CLEANUP / MT_CLOSE); read after the run driving completes. `Option` so
-    // `Cell::take` works without a `Copy` bound.
-    let exit: Cell<Option<GroupExit>> = Cell::new(None);
-
-    let proto_cell = RefCell::new(proto);
-    let cell_ref = &proto_cell;
-
-    let mut fetch = batch_fetcher(transport, cell_ref, &exit);
+    let mut fetch = batch_fetcher(wire);
     let mut run_err: Option<RuntimeError> = None;
 
-    // The bridge's borrow of `emit_buf` ends with this block, freeing it for
-    // the tail flush.
     if let Some(mut input) = first_nonempty_input(&mut fetch, &meta.input_columns)? {
+        emit_buf.reserve_rows(input.rows_in_group());
         let mut bridge = HostContextBridge::new(
             &mut input,
-            &mut emit_buf,
+            emit_buf,
             &meta.input_columns,
             &meta.output_columns,
-            emit_flusher(transport, cell_ref),
+            emit_flusher(wire),
             crate::rowset::HandshakeMeta::from(meta),
             #[cfg(feature = "connect-back")]
-            crate::wire::conn_requester(transport, cell_ref),
+            crate::wire::conn_requester(wire.transport, wire.proto_cell),
         );
         bridge.configure_group_input(meta.input_iter(), meta.output_iter(), fetch);
         run_err = drive_group_rows(&mut bridge, udf, meta.input_iter());
@@ -111,22 +107,21 @@ fn run_group(
     if let Some(e) = run_err {
         return Err(e);
     }
-    match exit.take() {
+    match wire.exit.take() {
         Some(GroupExit::Session) => return Ok(Some(Ok(()))),
         Some(GroupExit::Closed(msg)) => return Ok(Some(close_error(msg))),
         None => {}
     }
 
-    tail_flush(&mut emit_buf, meta, transport, cell_ref)?;
+    tail_flush(emit_buf, meta, wire)?;
     Ok(None)
 }
 
 /// Send one pre-built proto table as `MT_EMIT`. A zero-row table is a no-op, so
 /// no zero-row `MT_EMIT` ever reaches the wire.
-fn emit_flusher<'a>(
-    transport: &'a ZmqTransport,
-    proto_cell: &'a RefCell<&'a mut Protocol>,
-) -> EmitFlusher<'a> {
+fn emit_flusher<'a>(wire: &SessionWire<'a>) -> EmitFlusher<'a> {
+    let transport = wire.transport;
+    let proto_cell = wire.proto_cell;
     Box::new(
         move |table: exa_proto::ExascriptTableData| -> Result<(), UdfError> {
             if table.rows == 0 {
@@ -148,11 +143,10 @@ fn emit_flusher<'a>(
 /// reports the group as ended — the fetcher runs inside `run()` via
 /// `ctx.next()` and cannot unwind the session itself. `run_group` reads `exit`
 /// once the UDF returns.
-fn batch_fetcher<'a>(
-    transport: &'a ZmqTransport,
-    proto_cell: &'a RefCell<&'a mut Protocol>,
-    exit: &'a Cell<Option<GroupExit>>,
-) -> BatchFetcher<'a> {
+fn batch_fetcher<'a>(wire: &SessionWire<'a>) -> BatchFetcher<'a> {
+    let transport = wire.transport;
+    let proto_cell = wire.proto_cell;
+    let exit = wire.exit;
     Box::new(
         move || -> Result<Option<exa_proto::ExascriptTableData>, UdfError> {
             loop {
@@ -187,7 +181,7 @@ fn first_nonempty_input(
     input_cols: &[ColumnMeta],
 ) -> Result<Option<InputRowSet>, RuntimeError> {
     while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
-        let rows = InputRowSet::from_proto(&table, input_cols);
+        let rows = InputRowSet::from_proto(table, input_cols);
         if !rows.is_empty() {
             return Ok(Some(rows));
         }
@@ -225,17 +219,16 @@ fn drive_group_rows(
 fn tail_flush(
     emit_buf: &mut EmitBuffer,
     meta: &UdfMeta,
-    transport: &ZmqTransport,
-    proto_cell: &RefCell<&mut Protocol>,
+    wire: &SessionWire,
 ) -> Result<(), RuntimeError> {
     if emit_buf.is_empty() {
         return Ok(());
     }
     emit_buf.record_flush_telemetry();
     let table = emit_buf.to_proto(&meta.output_columns);
-    let mut proto = proto_cell.borrow_mut();
+    let mut proto = wire.proto_cell.borrow_mut();
     let req = proto.emit_request(table);
-    request(transport, &mut proto, req)?;
+    request(wire.transport, &mut proto, req)?;
     emit_buf.clear();
     Ok(())
 }

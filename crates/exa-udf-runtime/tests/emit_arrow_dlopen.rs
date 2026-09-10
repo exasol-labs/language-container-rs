@@ -37,7 +37,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
         rows: 0,
         ..Default::default()
     };
-    let mut input = InputRowSet::from_proto(&empty, &input_cols);
+    let mut input = InputRowSet::from_proto(empty, &input_cols);
     let mut emit_buf = EmitBuffer::new();
     // EMITS (id BIGINT, label VARCHAR(1)) -> BIGINT arrives as Numeric.
     let output_meta = vec![
@@ -75,7 +75,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
 
     let table = emit_buf.to_proto(&output_meta);
     assert_eq!(table.rows, 3, "expected 3 emitted rows");
-    let rs = InputRowSet::from_proto(&table, &output_meta);
-    assert_eq!(rs.row(0).unwrap()[1], Value::String("a".into()));
-    assert_eq!(rs.row(2).unwrap()[1], Value::String("c".into()));
+    let mut rs = InputRowSet::from_proto(table, &output_meta);
+    assert_eq!(rs.seek_row(0).unwrap()[1], Value::String("a".into()));
+    assert_eq!(rs.seek_row(2).unwrap()[1], Value::String("c".into()));
 }

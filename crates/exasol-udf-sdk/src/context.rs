@@ -11,6 +11,12 @@ pub trait UdfContext {
     /// invocation); the host bans it in RETURNS output, where the returned value
     /// crosses via `set_return` instead.
     fn emit(&mut self, values: &[Value]) -> Result<(), UdfError>;
+    /// Emit one output row, moving each `Value` into the host buffer. The
+    /// default forwards to `emit`, so existing implementations keep compiling.
+    fn emit_owned(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
+        self.emit(&values)
+    }
+
     /// Advance to the next input row of a SET group, spanning input batches;
     /// returns false at the group boundary. Valid only for SET (Multiple) input:
     /// the host bans it in scalar (ExactlyOnce) input, where the framework drives

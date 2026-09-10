@@ -10,7 +10,7 @@ use exasol_udf_sdk::value::Value;
 pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let k = ctx.get_i64(0)?.unwrap_or(0);
     for i in 0..k {
-        ctx.emit(&[Value::Int64(i)])?;
+        ctx.emit_owned(vec![Value::Int64(i)])?;
     }
     Ok(())
 }

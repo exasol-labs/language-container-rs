@@ -167,7 +167,7 @@ pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 }
 ```
 
-Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`. `i32`/`i64` validate only against a column whose wire type is genuinely `Int32`/`Int64`; standard Exasol integer types (`BIGINT`, `INT`, `INTEGER`) are all `DECIMAL` and therefore `Decimal`.
+Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`. `INT`/`INTEGER` is `DECIMAL(18,0)` and arrives as `Value::Int64`, so annotate it `i64`. `BIGINT` is `DECIMAL(36,0)` and arrives as `Value::Numeric`, so annotate it `Decimal`. `i32`/`i64` validate only against a column whose wire type is genuinely `Int32`/`Int64`.
 
 ## 3. The `UdfContext` interface
 
@@ -214,7 +214,7 @@ Each returns `UdfError::Type` if the column holds a different variant. Exception
 | `Value::Timestamp(NaiveDateTime)` | `chrono::NaiveDateTime` | `TIMESTAMP` |
 | `Value::Null` | — | SQL `NULL` |
 
-> **BIGINT arrives as `Value::Numeric`**, not `Value::Int64`. Exasol sends BIGINT over the wire as `PB_NUMERIC`, a scale-0 decimal. Use `get_i64()` for BIGINT input columns — it accepts both `Int64` and a scale-0 `Numeric`. When emitting a BIGINT output column, use `Value::Numeric(Decimal::from(n))`, not `Value::Int64`.
+> **`BIGINT` (`DECIMAL(36,0)`) arrives as `Value::Numeric`**, not `Value::Int64`. Exasol sends `BIGINT` over the wire as `PB_NUMERIC`, a scale-0 decimal. `INT`/`INTEGER` (`DECIMAL(18,0)`) arrives as `Value::Int64` directly. Use `get_i64()` for either — it accepts both `Int64` and a scale-0 `Numeric`. When emitting a `BIGINT` output column, use `Value::Numeric(Decimal::from(n))`, not `Value::Int64`.
 
 ## 5. SDK type reference
 
@@ -781,3 +781,13 @@ mod tests {
 ```
 
 For connect-back UDFs, stub `cluster_ip`, `connection`, and `connect_back` with test implementations that return canned data, or use the integration tests in `crates/it` against a real Docker container.
+
+## 15. Performance
+
+Column type choices affect wire size and per-cell decoding cost:
+
+- Prefer `DECIMAL(18,0)`/`INTEGER` over `BIGINT` for values under 19 digits. `INTEGER` arrives as `Value::Int64`, a native fixed-width type; `BIGINT` arrives as `Value::Numeric`, a variable-length decimal that costs more to decode and re-encode.
+- Prefer `DOUBLE` over a scaled `DECIMAL` where the precision loss of floating point is acceptable. `DOUBLE` is a native fixed-width type; scaled `DECIMAL` is `Value::Numeric`.
+- Prefer `VARCHAR` over `CHAR(n)`. `CHAR(n)` is blank-padded to its declared length on every row, inflating the wire payload regardless of the actual string length.
+- Never emit an empty string as a column value — the engine stores it as `NULL`, not `""`. Treat "no value" as `Value::Null`.
+- Input `TIMESTAMP` columns always arrive at microsecond precision, regardless of the column's declared fractional-second precision. Nanosecond precision is available only on emit/output.

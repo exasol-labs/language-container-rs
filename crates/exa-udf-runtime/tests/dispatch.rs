@@ -1242,3 +1242,101 @@ fn advance_row_wire_error_ends_group_as_run_error() {
         "a mid-group wire protocol error must surface as a run error"
     );
 }
+
+#[test]
+fn session_scoped_emit_buffer_is_reused_across_groups() {
+    let endpoint = format!(
+        "ipc:///tmp/exa-mockdb-multigroup-{}-{}.ipc",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let so = common::fixture_cdylib_path("emit_k");
+    let source = format!("%udf_object {}", so.display());
+    let meta = int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple);
+
+    let groups: Vec<Vec<ExascriptTableData>> =
+        vec![vec![int64_batch(&[Some(2)])], vec![int64_batch(&[Some(3)])]];
+
+    let ep = endpoint.clone();
+    let client = std::thread::spawn(move || {
+        exa_udf_runtime::Runtime::new(ep, "test-client".into()).run(|_| {})
+    });
+
+    let mut group_idx = 0usize;
+    let mut batch_cursor = 0usize;
+    let mut group_emits: Vec<Vec<ExascriptTableData>> = vec![vec![], vec![]];
+
+    loop {
+        let req = recv_req(&server);
+        let mt = req.r#type;
+        if mt == MessageType::MtClient as i32 {
+            let mut info = response(MessageType::MtInfo, MOCK_CONN_ID);
+            info.info = Some(exa_proto::ExascriptInfo {
+                source_code: source.clone(),
+                script_name: "EMIT_K".into(),
+                ..Default::default()
+            });
+            send_resp(&server, &info);
+        } else if mt == MessageType::MtMeta as i32 {
+            let mut m = response(MessageType::MtMeta, MOCK_CONN_ID);
+            m.meta = Some(meta.clone());
+            send_resp(&server, &m);
+        } else if mt == MessageType::MtRun as i32 {
+            if group_idx < groups.len() {
+                batch_cursor = 0;
+                send_resp(&server, &response(MessageType::MtRun, MOCK_CONN_ID));
+            } else {
+                send_resp(&server, &response(MessageType::MtCleanup, MOCK_CONN_ID));
+            }
+        } else if mt == MessageType::MtNext as i32 {
+            if batch_cursor < groups[group_idx].len() {
+                let mut next = response(MessageType::MtNext, MOCK_CONN_ID);
+                next.next = Some(exa_proto::ExascriptNextDataRep {
+                    table: groups[group_idx][batch_cursor].clone(),
+                });
+                batch_cursor += 1;
+                send_resp(&server, &next);
+            } else {
+                send_resp(&server, &response(MessageType::MtDone, MOCK_CONN_ID));
+            }
+        } else if mt == MessageType::MtEmit as i32 {
+            group_emits[group_idx].push(req.emit.expect("emit payload").table);
+            send_resp(&server, &response(MessageType::MtEmit, MOCK_CONN_ID));
+        } else if mt == MessageType::MtDone as i32 {
+            group_idx += 1;
+            send_resp(&server, &response(MessageType::MtDone, MOCK_CONN_ID));
+        } else if mt == MessageType::MtFinished as i32 {
+            send_resp(&server, &response(MessageType::MtFinished, MOCK_CONN_ID));
+            break;
+        } else if mt == MessageType::MtClose as i32 {
+            panic!(
+                "session closed unexpectedly: {:?}",
+                req.close.and_then(|c| c.exception_message)
+            );
+        } else {
+            panic!("unexpected request type from client: {mt}");
+        }
+    }
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "session must succeed");
+
+    let (vals1, rows1) = collect_int64_emits(&group_emits[0]);
+    assert_eq!(rows1, 2, "group 0: emit_k(2) emits 2 rows");
+    assert_eq!(vals1, vec![0, 1]);
+
+    let (vals2, rows2) = collect_int64_emits(&group_emits[1]);
+    assert_eq!(rows2, 3, "group 1: emit_k(3) emits 3 rows");
+    assert_eq!(
+        vals2,
+        vec![0, 1, 2],
+        "group 1 must not contain stale rows from group 0"
+    );
+}

@@ -56,7 +56,7 @@ fn empty_rowset(meta: &[ColumnMeta]) -> InputRowSet {
         rows: 0,
         ..Default::default()
     };
-    InputRowSet::from_proto(&table, meta)
+    InputRowSet::from_proto(table, meta)
 }
 
 fn make_bridge<'a>(
@@ -471,5 +471,53 @@ fn udf_log_macro_writes_to_stderr_when_permitted() {
     assert!(
         tracing::Level::DEBUG > tracing::Level::INFO,
         "DEBUG must be suppressed at INFO context level"
+    );
+}
+
+/// Connect-back diagnostics use `tracing::debug!` and never create a
+/// diagnostic file. Events are gated by the subscriber's max level.
+///
+/// Scenario: `connect_back_diagnostics_are_gated_and_write_no_file`
+#[test]
+fn connect_back_diagnostics_are_gated_and_write_no_file() {
+    let _guard = GLOBAL_LEVEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let diag_path = std::path::Path::new("/tmp/cb_debug.txt");
+    let _ = std::fs::remove_file(diag_path);
+
+    let run_at_level = |level: tracing::Level| -> String {
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_writer(LockedWriter(Arc::clone(&buf)))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            tracing::debug!(address = "10.0.0.1:8563", "connect-back: connecting");
+            tracing::debug!(sql = "SELECT 1", "connect-back: query_for_each");
+            tracing::debug!("connect-back: shutdown done");
+        });
+        let g = buf.lock().unwrap();
+        String::from_utf8_lossy(&g).into_owned()
+    };
+
+    let debug_out = run_at_level(tracing::Level::DEBUG);
+    let info_out = run_at_level(tracing::Level::INFO);
+
+    assert!(
+        debug_out.contains("connect-back: connecting"),
+        "DEBUG must capture connect-back events, got: {debug_out:?}"
+    );
+    assert!(
+        debug_out.contains("connect-back: query_for_each"),
+        "DEBUG must capture connect-back query events, got: {debug_out:?}"
+    );
+    assert!(
+        !info_out.contains("connect-back"),
+        "INFO must not capture connect-back debug events, got: {info_out:?}"
+    );
+    assert!(
+        !diag_path.exists(),
+        "/tmp/cb_debug.txt must not be created by connect-back diagnostics"
     );
 }

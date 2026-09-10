@@ -12,115 +12,108 @@ fn null_index(row: usize, col: usize, n_cols: usize) -> usize {
     row * n_cols + col
 }
 
-/// Materialised input rows from one proto `ExascriptTableData` batch.
-///
-/// Stored as a dense `rows[row][col]` matrix of `Value` for simplicity and
-/// correctness; the per-type proto blocks are decoded once on construction.
 pub struct InputRowSet {
-    rows: Vec<Vec<Value>>,
+    col_blocks: Vec<u8>,
+    col_types: Vec<ExaType>,
+    data_string: std::vec::IntoIter<String>,
+    data_bool: Vec<bool>,
+    data_int32: Vec<i32>,
+    data_int64: Vec<i64>,
+    data_double: Vec<f64>,
+    data_nulls: Vec<bool>,
+    bool_cursor: usize,
+    int32_cursor: usize,
+    int64_cursor: usize,
+    double_cursor: usize,
+    n_rows: usize,
+    n_cols: usize,
     current_row: usize,
+    rows_in_group: u64,
+    row_number: Vec<u64>,
+    scratch: Vec<Value>,
 }
 
 impl InputRowSet {
-    /// Decode a proto batch into a row-major matrix of `Value`s.
-    ///
-    /// The proto packs each cell type into its own array, column by column,
-    /// with one slot per row (including NULL cells). The NULL bitmap is
-    /// row-major across all columns.
-    pub fn from_proto(table: &ExascriptTableData, meta: &[ColumnMeta]) -> Self {
+    const BLK_STRING: u8 = 0;
+    const BLK_BOOL: u8 = 1;
+    const BLK_INT32: u8 = 2;
+    const BLK_INT64: u8 = 3;
+    const BLK_DOUBLE: u8 = 4;
+    const BLK_UNSUPPORTED: u8 = 5;
+
+    pub fn from_proto(table: ExascriptTableData, meta: &[ColumnMeta]) -> Self {
         let n_rows = table.rows as usize;
         let n_cols = meta.len();
 
-        // Row-major within each type block: cells appear in (row, column) order,
-        // so a column's value for row `r` is the `r`-th time that column's type
-        // block is consumed while walking rows then columns. Per-type running
-        // cursors advance only when a non-null cell of that type is read, mirroring
-        // how `to_proto` packs (and how Exasol lays out emitted/input batches).
-        let mut string_idx = 0usize;
-        let mut bool_idx = 0usize;
-        let mut int32_idx = 0usize;
-        let mut int64_idx = 0usize;
-        let mut double_idx = 0usize;
+        let col_blocks: Vec<u8> = meta
+            .iter()
+            .map(|c| match &c.typ {
+                ExaType::Numeric { .. }
+                | ExaType::Date
+                | ExaType::Timestamp
+                | ExaType::TimestampTz
+                | ExaType::String { .. }
+                | ExaType::Char { .. }
+                | ExaType::Geometry
+                | ExaType::HashType
+                | ExaType::IntervalYearToMonth
+                | ExaType::IntervalDayToSecond => Self::BLK_STRING,
+                ExaType::Boolean => Self::BLK_BOOL,
+                ExaType::Int32 => Self::BLK_INT32,
+                ExaType::Int64 => Self::BLK_INT64,
+                ExaType::Double => Self::BLK_DOUBLE,
+                ExaType::Unsupported => Self::BLK_UNSUPPORTED,
+            })
+            .collect();
 
-        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(n_rows);
-        for r in 0..n_rows {
-            let mut row: Vec<Value> = Vec::with_capacity(n_cols);
-            for (c, col) in meta.iter().enumerate() {
-                let is_null = table
-                    .data_nulls
-                    .get(null_index(r, c, n_cols))
-                    .copied()
-                    .unwrap_or(false);
-                if is_null {
-                    // A NULL cell occupies no slot in its type block; do not
-                    // advance the per-type cursor (see `to_proto`).
-                    row.push(Value::Null);
-                    continue;
-                }
-                let v = match &col.typ {
-                    ExaType::Numeric { .. }
-                    | ExaType::Date
-                    | ExaType::Timestamp
-                    | ExaType::TimestampTz
-                    | ExaType::String { .. }
-                    | ExaType::Char { .. }
-                    | ExaType::Geometry
-                    | ExaType::HashType
-                    | ExaType::IntervalYearToMonth
-                    | ExaType::IntervalDayToSecond => {
-                        let s = table
-                            .data_string
-                            .get(string_idx)
-                            .cloned()
-                            .unwrap_or_default();
-                        string_idx += 1;
-                        decode_string_block(&col.typ, s)
-                    }
-                    ExaType::Boolean => {
-                        let b = table.data_bool.get(bool_idx).copied().unwrap_or(false);
-                        bool_idx += 1;
-                        Value::Bool(b)
-                    }
-                    ExaType::Int32 => {
-                        let i = table.data_int32.get(int32_idx).copied().unwrap_or(0);
-                        int32_idx += 1;
-                        Value::Int32(i)
-                    }
-                    ExaType::Int64 => {
-                        let i = table.data_int64.get(int64_idx).copied().unwrap_or(0);
-                        int64_idx += 1;
-                        Value::Int64(i)
-                    }
-                    ExaType::Double => {
-                        let f = table.data_double.get(double_idx).copied().unwrap_or(0.0);
-                        double_idx += 1;
-                        Value::Double(f)
-                    }
-                    ExaType::Unsupported => Value::Null,
-                };
-                row.push(v);
-            }
-            rows.push(row);
-        }
+        let row_number = if table.row_number.len() == n_rows {
+            table.row_number
+        } else {
+            vec![]
+        };
 
-        InputRowSet {
-            rows,
+        let col_types: Vec<ExaType> = meta.iter().map(|c| c.typ.clone()).collect();
+
+        let mut rs = InputRowSet {
+            col_blocks,
+            col_types,
+            data_string: table.data_string.into_iter(),
+            data_bool: table.data_bool,
+            data_int32: table.data_int32,
+            data_int64: table.data_int64,
+            data_double: table.data_double,
+            data_nulls: table.data_nulls,
+            bool_cursor: 0,
+            int32_cursor: 0,
+            int64_cursor: 0,
+            double_cursor: 0,
+            n_rows,
+            n_cols,
             current_row: 0,
+            rows_in_group: table.rows_in_group,
+            row_number,
+            scratch: Vec::with_capacity(n_cols),
+        };
+
+        if n_rows > 0 {
+            rs.materialise_row(0);
         }
+
+        rs
     }
 
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.n_rows
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.n_rows == 0
     }
 
-    /// Advance to the next row. Returns false when already on the last row.
     pub fn advance(&mut self) -> bool {
-        if self.current_row + 1 < self.rows.len() {
+        if self.current_row + 1 < self.n_rows {
             self.current_row += 1;
+            self.materialise_row(self.current_row);
             true
         } else {
             false
@@ -128,11 +121,77 @@ impl InputRowSet {
     }
 
     pub fn current_row(&self) -> &[Value] {
-        &self.rows[self.current_row]
+        &self.scratch
     }
 
-    pub fn row(&self, idx: usize) -> Option<&[Value]> {
-        self.rows.get(idx).map(|r| r.as_slice())
+    pub fn current_row_number(&self) -> Option<u64> {
+        self.row_number.get(self.current_row).copied()
+    }
+
+    pub fn rows_in_group(&self) -> u64 {
+        self.rows_in_group
+    }
+
+    pub fn seek_row(&mut self, idx: usize) -> Option<&[Value]> {
+        if idx >= self.n_rows || idx < self.current_row {
+            return None;
+        }
+        while self.current_row < idx {
+            self.current_row += 1;
+            self.materialise_row(self.current_row);
+        }
+        Some(&self.scratch)
+    }
+
+    fn materialise_row(&mut self, row: usize) {
+        self.scratch.clear();
+        for c in 0..self.n_cols {
+            let is_null = self
+                .data_nulls
+                .get(null_index(row, c, self.n_cols))
+                .copied()
+                .unwrap_or(false);
+            if is_null {
+                self.scratch.push(Value::Null);
+                continue;
+            }
+            let v = match self.col_blocks[c] {
+                Self::BLK_STRING => {
+                    let s = self.data_string.next().unwrap_or_default();
+                    decode_string_block(&self.col_types[c], s)
+                }
+                Self::BLK_BOOL => {
+                    let b = self
+                        .data_bool
+                        .get(self.bool_cursor)
+                        .copied()
+                        .unwrap_or(false);
+                    self.bool_cursor += 1;
+                    Value::Bool(b)
+                }
+                Self::BLK_INT32 => {
+                    let i = self.data_int32.get(self.int32_cursor).copied().unwrap_or(0);
+                    self.int32_cursor += 1;
+                    Value::Int32(i)
+                }
+                Self::BLK_INT64 => {
+                    let i = self.data_int64.get(self.int64_cursor).copied().unwrap_or(0);
+                    self.int64_cursor += 1;
+                    Value::Int64(i)
+                }
+                Self::BLK_DOUBLE => {
+                    let f = self
+                        .data_double
+                        .get(self.double_cursor)
+                        .copied()
+                        .unwrap_or(0.0);
+                    self.double_cursor += 1;
+                    Value::Double(f)
+                }
+                _ => Value::Null,
+            };
+            self.scratch.push(v);
+        }
     }
 }
 
@@ -149,16 +208,6 @@ const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
 const BYTES_DATE: usize = 10;
 const BYTES_TIMESTAMP: usize = 29;
-/// Fixed portion of a NUMERIC cell's cost; callers add `scale` digits on top.
-/// O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign, which also
-/// dominates the scale-padded form. Over-counts → flushes early.
-const NUMERIC_COST_BASE: usize = 40;
-
-/// Conservative O(1) byte cost for one cell, approximating the width its
-/// non-null value occupies in `to_proto`'s type block. NULL cells cost 0
-/// because they take no type-block slot; the estimate slightly over-counts
-/// (fixed widths for Numeric/Date/Timestamp) so the buffer flushes early rather
-/// than late.
 fn value_byte_cost(v: &Value) -> usize {
     match v {
         Value::Null => 0,
@@ -167,7 +216,22 @@ fn value_byte_cost(v: &Value) -> usize {
         Value::Int64(_) => BYTES_INT64,
         Value::Double(_) => BYTES_DOUBLE,
         Value::String(s) => s.len(),
-        Value::Numeric(d) => NUMERIC_COST_BASE + d.scale as usize,
+        Value::Numeric(d) => {
+            let neg = usize::from(d.unscaled < 0);
+            let digits = d
+                .unscaled
+                .unsigned_abs()
+                .checked_ilog10()
+                .map_or(1, |l| l as usize + 1);
+            let s = d.scale as usize;
+            if s == 0 {
+                neg + digits
+            } else if digits > s {
+                neg + digits + 1
+            } else {
+                neg + 2 + s
+            }
+        }
         Value::Date(_) => BYTES_DATE,
         Value::Timestamp(_) => BYTES_TIMESTAMP,
     }
@@ -207,18 +271,13 @@ fn current_debug_level() -> tracing::Level {
         .unwrap_or(tracing::Level::INFO)
 }
 
-/// Accumulates emitted output rows, serialising to a proto batch on flush.
 #[derive(Default)]
 pub struct EmitBuffer {
     rows: Vec<Vec<Value>>,
-    /// Running approximate serialised size of the buffered rows. Incremented in
-    /// `push`, reset in `clear`; read by `should_flush`.
+    row_numbers: Vec<u64>,
     byte_estimate: usize,
-    /// Total bytes emitted across all flushes (running sum, never reset).
     cumulative_bytes: usize,
-    /// Total rows emitted across all flushes (running sum, never reset).
     cumulative_rows: u64,
-    /// Number of `MT_EMIT` flushes performed.
     flush_count: u64,
 }
 
@@ -256,27 +315,24 @@ impl EmitBuffer {
         self.rows.push(values);
     }
 
+    pub fn push_stamped(&mut self, values: Vec<Value>, row_number: Option<u64>) {
+        if let Some(n) = row_number {
+            self.row_numbers.push(n);
+        }
+        self.push(values);
+    }
+
     /// Whether the buffered rows have reached the byte threshold and should be
     /// flushed to the DB. A single oversized row trips this on its own push.
     pub fn should_flush(&self) -> bool {
         self.byte_estimate >= EMIT_BUFFER_LIMIT_BYTES
     }
 
-    /// Serialise accumulated rows into an `ExascriptTableData`.
-    ///
-    /// Mirrors `InputRowSet::from_proto`: each type block is column-major and
-    /// dense (one slot per row, including a placeholder for NULL cells) so the
-    /// `block_base + row` indexing stays valid. The NULL bitmap is row-major.
-    pub fn to_proto(&self, meta: &[ColumnMeta]) -> ExascriptTableData {
-        let n_rows = self.rows.len();
+    pub fn to_proto(&mut self, meta: &[ColumnMeta]) -> ExascriptTableData {
+        let rows = std::mem::take(&mut self.rows);
+        let n_rows = rows.len();
         let n_cols = meta.len();
 
-        // Pre-size each type block to its exact upper bound (its column count ×
-        // n_rows) instead of growing via `Vec::new()` + `push`, which
-        // reallocates through the standard doubling growth curve. NULL cells
-        // occupy no slot (see the loop below), so the true final length can be
-        // at most this bound — `with_capacity` at the bound is therefore always
-        // sufficient and never wasteful beyond the NULL count.
         let mut string_cols = 0usize;
         let mut bool_cols = 0usize;
         let mut int32_cols = 0usize;
@@ -309,25 +365,11 @@ impl EmitBuffer {
         let mut data_double: Vec<f64> = Vec::with_capacity(double_cols * n_rows);
         let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
 
-        // Row-major within each type block: iterate rows, then columns, so a
-        // column's cells appear in the block interleaved with the other columns
-        // of the same type. This matches the layout Exasol's emit handler reads
-        // (and that `from_proto` decodes); a column-major layout silently lands
-        // later rows' values in the wrong column.
-        //
-        // Each value is packed into the block dictated by the declared column
-        // type, not the runtime `Value` variant: a connect-back SELECT may
-        // return a DECIMAL column as `Value::Int64`, but the EMITS column is
-        // `ExaType::Numeric` (string block).
-        for (r, row) in self.rows.iter().enumerate() {
+        for (r, row) in rows.into_iter().enumerate() {
+            let mut col_iter = row.into_iter();
             for (c, col) in meta.iter().enumerate() {
-                let v = row.get(c).unwrap_or(&Value::Null);
+                let v = col_iter.next().unwrap_or(Value::Null);
                 if matches!(v, Value::Null) {
-                    // A NULL cell is recorded only in the bitmap; it does NOT
-                    // occupy a slot in its type block. Exasol's reader consumes
-                    // type-block entries only for non-null cells and consults the
-                    // bitmap for nullness — a placeholder would shift every later
-                    // cell of that type into the wrong column.
                     data_nulls[null_index(r, c, n_cols)] = true;
                     continue;
                 }
@@ -342,16 +384,22 @@ impl EmitBuffer {
                     | ExaType::HashType
                     | ExaType::IntervalYearToMonth
                     | ExaType::IntervalDayToSecond => {
-                        data_string.push(value_to_block_string(v));
+                        data_string.push(value_into_block_string(v));
                     }
-                    ExaType::Boolean => data_bool.push(value_to_bool(v)),
-                    ExaType::Int32 => data_int32.push(value_to_i64(v) as i32),
-                    ExaType::Int64 => data_int64.push(value_to_i64(v)),
-                    ExaType::Double => data_double.push(value_to_f64(v)),
+                    ExaType::Boolean => data_bool.push(value_to_bool(&v)),
+                    ExaType::Int32 => data_int32.push(value_to_i64(&v) as i32),
+                    ExaType::Int64 => data_int64.push(value_to_i64(&v)),
+                    ExaType::Double => data_double.push(value_to_f64(&v)),
                     ExaType::Unsupported => {}
                 }
             }
         }
+
+        let row_number = if self.row_numbers.len() == n_rows {
+            std::mem::take(&mut self.row_numbers)
+        } else {
+            vec![]
+        };
 
         ExascriptTableData {
             rows: n_rows as u64,
@@ -362,14 +410,30 @@ impl EmitBuffer {
             data_int32,
             data_int64,
             data_double,
-            row_number: vec![],
+            row_number,
         }
     }
 
     pub fn clear(&mut self) {
         self.flush_count += 1;
         self.rows.clear();
+        self.row_numbers.clear();
         self.byte_estimate = 0;
+    }
+
+    const MAX_RESERVE_ROWS: usize = 65_536;
+
+    pub fn group_reset(&mut self) {
+        self.rows.clear();
+        self.row_numbers.clear();
+        self.byte_estimate = 0;
+    }
+
+    pub fn reserve_rows(&mut self, rows_in_group: u64) {
+        let cap = (rows_in_group as usize).min(Self::MAX_RESERVE_ROWS);
+        if self.rows.capacity() < cap {
+            self.rows.reserve(cap - self.rows.len());
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -424,6 +488,7 @@ impl EmitBuffer {
         &mut self,
         batch: &arrow::record_batch::RecordBatch,
         meta: &[ColumnMeta],
+        stamp_row_number: Option<u64>,
         flush: &mut dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError>,
     ) -> Result<(), UdfError> {
         // Step 1: flush any pending Value rows so we start from an empty buffer.
@@ -457,7 +522,7 @@ impl EmitBuffer {
                 // Flush [slice_start, r+1).
                 let slice_len = r + 1 - slice_start;
                 let slice = batch.slice(slice_start, slice_len);
-                let table = encode_slice(&slice, meta)?;
+                let table = encode_slice(&slice, meta, stamp_row_number)?;
                 flush(table)?;
                 slice_start = r + 1;
                 running = 0;
@@ -471,7 +536,7 @@ impl EmitBuffer {
             // Convert the tail to Value rows and push into the buffer.
             let tail_rows = arrow_batch_to_value_rows(&tail, meta)?;
             for row in tail_rows {
-                self.push(row);
+                self.push_stamped(row, stamp_row_number);
             }
         }
 
@@ -713,7 +778,7 @@ fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
         DataType::Float64 => Some(BYTES_DOUBLE),
         DataType::Date32 => Some(BYTES_DATE),
         DataType::Timestamp(_, _) => Some(BYTES_TIMESTAMP),
-        DataType::Decimal128(_, scale) => Some(NUMERIC_COST_BASE + *scale as usize),
+        DataType::Decimal128(precision, _) => Some(*precision as usize + 2),
         _ => None,
     }
 }
@@ -792,6 +857,7 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
 fn encode_slice(
     batch: &arrow::record_batch::RecordBatch,
     meta: &[ColumnMeta],
+    stamp_row_number: Option<u64>,
 ) -> Result<exa_proto::ExascriptTableData, UdfError> {
     use arrow::array::Array;
 
@@ -874,6 +940,11 @@ fn encode_slice(
         }
     }
 
+    let row_number = match stamp_row_number {
+        Some(n) => vec![n; n_rows],
+        None => vec![],
+    };
+
     Ok(exa_proto::ExascriptTableData {
         rows: n_rows as u64,
         rows_in_group: 0,
@@ -883,7 +954,7 @@ fn encode_slice(
         data_int32,
         data_int64,
         data_double,
-        row_number: vec![],
+        row_number,
     })
 }
 
@@ -1228,7 +1299,6 @@ fn value_to_block_string(v: &Value) -> String {
 
 /// `value_to_block_string` for a `Value` the caller owns, so a `Value::String`
 /// moves into the block instead of being cloned. Same bytes for every variant.
-#[cfg(feature = "emit-arrow")]
 fn value_into_block_string(v: Value) -> String {
     match v {
         Value::String(s) => s,
@@ -1528,7 +1598,7 @@ impl<'a> HostContextBridge<'a> {
         loop {
             match (self.fetcher)()? {
                 Some(table) => {
-                    *self.input = InputRowSet::from_proto(&table, self.input_cols);
+                    *self.input = InputRowSet::from_proto(table, self.input_cols);
                     if !self.input.is_empty() {
                         return Ok(true);
                     }
@@ -1538,13 +1608,13 @@ impl<'a> HostContextBridge<'a> {
         }
     }
 
-    /// Append one output row to the group-scoped buffer, flushing an `MT_EMIT`
-    /// when the running byte estimate crosses the threshold. Shared by `emit`
-    /// (EMITS output) and `set_return` (RETURNS output) so both honour the same
-    /// buffering and flush contract; the trailing rows are flushed by the
-    /// dispatcher before the group's `MT_DONE`.
     fn push_output_row(&mut self, row: Vec<Value>) -> Result<(), UdfError> {
-        self.emit_buf.push(row);
+        let stamp = if self.input_iter == IterType::ExactlyOnce {
+            self.input.current_row_number()
+        } else {
+            None
+        };
+        self.emit_buf.push_stamped(row, stamp);
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
             let table = self.emit_buf.to_proto(self.output_meta);
@@ -1752,6 +1822,15 @@ impl UdfContext for HostContextBridge<'_> {
         self.push_output_row(values.to_vec())
     }
 
+    fn emit_owned(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
+        if self.output_iter == IterType::ExactlyOnce {
+            return Err(UdfError::User(
+                "emit() is not allowed in RETURNS output context; return the value instead".into(),
+            ));
+        }
+        self.push_output_row(values)
+    }
+
     fn set_return(&mut self, value: Option<Value>) -> Result<(), UdfError> {
         self.push_output_row(vec![value.unwrap_or(Value::Null)])
     }
@@ -1765,16 +1844,19 @@ impl UdfContext for HostContextBridge<'_> {
         }
         // Resolve the disjoint borrow: take references to fields we need
         // separately so the borrow checker sees them as independent borrows.
+        let stamp = if self.input_iter == IterType::ExactlyOnce {
+            self.input.current_row_number()
+        } else {
+            None
+        };
         let emit_buf = &mut *self.emit_buf;
         let flusher = &mut self.flusher;
         let meta = self.output_meta;
-        // Deserialise into a host-owned RecordBatch (single arrow copy on this
-        // side of the .so boundary), then replay the existing push_batch path.
         let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None)
             .map_err(|e| UdfError::Type(format!("emit_batch: IPC reader init: {e}")))?;
         for batch in reader {
             let batch = batch.map_err(|e| UdfError::Type(format!("emit_batch: IPC read: {e}")))?;
-            emit_buf.push_batch(&batch, meta, &mut |table| (flusher)(table))?;
+            emit_buf.push_batch(&batch, meta, stamp, &mut |table| (flusher)(table))?;
         }
         // After push_batch returns, at most one <4 MB tail is buffered.
         // Apply the same should_flush check as emit() so a tail that itself

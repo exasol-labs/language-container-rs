@@ -27,7 +27,7 @@ fn empty_bridge_parts() -> (InputRowSet, EmitBuffer, Vec<ColumnMeta>) {
         rows: 0,
         ..Default::default()
     };
-    let input = InputRowSet::from_proto(&table, &cols);
+    let input = InputRowSet::from_proto(table, &cols);
     (input, EmitBuffer::new(), cols)
 }
 
