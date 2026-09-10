@@ -4,7 +4,9 @@ Opens the ZMQ REQ transport to the database's REP socket and drives the `MT_CLIE
 
 ## Background
 
-The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a `REQ` socket to `ipc://<socket_path>`. Each protobuf message is a single ZMQ frame; the `REQ` socket manages the request/reply delimiter automatically, so the client neither writes nor strips an empty delimiter frame. A transient ZMQ `EAGAIN` on `send`/`recv` MUST be retried rather than treated as fatal, bounded by a 120 s backstop (`MAX_TOTAL_WAIT`), preserving the REQ/REP lock-step exchange.
+The database acts as a ZMQ `REP` socket; the client (`exa-zmq-protocol`) opens a `REQ` socket to `ipc://<socket_path>`. Each protobuf message is a single ZMQ frame; the `REQ` socket manages the request/reply delimiter automatically, so the client neither writes nor strips an empty delimiter frame. A transient ZMQ `EAGAIN` on `send`/`recv` MUST be retried indefinitely, with no wall-clock cap. Session termination is the database watchdog's responsibility.
+
+The transport hands each outbound frame to libzmq as an owned `zmq::Message` and decodes each inbound frame from the received message's slice.
 
 The handshake exchange surfaces `exascript_info` metadata on `UdfMeta` (session/node/vm identity, the memory limit, and DB/script/user fields), and surfaces the `ExascriptConnectionInformationRep` credentials from the handshake info response. Connect-back credentials, by contrast, are resolved on demand per CONNECTION name via the live `MT_IMPORT` exchange and are NOT buffered onto `UdfMeta`.
 
@@ -26,6 +28,9 @@ The database-side semantics of the `exascript_info` identity fields (`current_us
 * *WHEN* the client sends an `ExascriptRequest` and the peer replies with one `ExascriptResponse` frame
 * *THEN* `send` MUST serialize the request to a single prost-encoded ZMQ frame and MUST NOT prepend an empty delimiter frame, because the `REQ` socket inserts the request/reply delimiter automatically
 * *AND* `recv` MUST decode exactly one frame into an `ExascriptResponse` without discarding any delimiter frame, because the `REQ` socket strips the delimiter automatically before delivering the payload
+* *AND* `send` MUST pass the encoded frame to libzmq as a `zmq::Message` built from the owned encoding buffer
+* *AND* a transient `EAGAIN` retry MUST re-encode the request for the next attempt, since `Socket::send` consumes the message
+* *AND* `recv` MUST decode directly from the received `zmq::Message`'s byte slice, not from an intermediate `Vec<u8>` copy
 
 ### Scenario: Handshake exchange produces Info then Meta events
 
@@ -50,14 +55,14 @@ The database-side semantics of the `exascript_info` identity fields (`current_us
 * *AND* the value MUST be interpreted as the per-UDF-instance resident-memory limit in bytes that the database enforces, and MUST NOT be rescaled into any other unit
 * *AND* because the proto field is `required`, an `Info` response that omits it MUST yield `UdfMeta::maximal_memory_limit` of `0` (the proto default, denoting "no limit reported") rather than a protocol error
 
-### Scenario: Transient EAGAIN on recv/send is retried until the 120 s backstop
+### Scenario: Transient EAGAIN on recv/send is retried without a wall-clock cap
 
 * *GIVEN* a connected `ZmqTransport` whose `RCVTIMEO`/`SNDTIMEO` is set to 1 s (a poll interval, not a deadline)
-* *WHEN* `recv` or `send` returns a ZMQ `EAGAIN` error because the 1 s poll interval elapsed before a frame arrived or was queued
-* *THEN* the transport MUST retry the operation rather than propagating the `EAGAIN` as a fatal error, preserving the REQ/REP lock-step exchange
-* *AND* retries MUST continue as long as the total elapsed time since the call began is less than 120 s (`MAX_TOTAL_WAIT`)
-* *AND* once 120 s of continuous `EAGAIN` responses have elapsed, the transport MUST return a timeout `ProtocolError` to the caller
-* *AND* any non-`EAGAIN` socket error (genuine failure) MUST propagate immediately without waiting for the backstop
+* *WHEN* `recv` or `send` returns a ZMQ `EAGAIN` error repeatedly because the database has not yet replied or queued the frame
+* *THEN* the transport MUST keep retrying for as long as `EAGAIN` continues, with no total-elapsed-time limit, preserving the REQ/REP lock-step exchange
+* *AND* the `MAX_TOTAL_WAIT` constant and the timeout `ProtocolError` MUST be removed
+* *AND* any non-`EAGAIN` socket error MUST still propagate immediately without retry
+* *AND* the retry loop MUST keep emitting its per-poll `debug!` progress event carrying the elapsed wait, so a long wait stays observable at `%udf_debug_level` debug
 
 ### Scenario: Handshake metadata carries no buffered connect-back credentials
 

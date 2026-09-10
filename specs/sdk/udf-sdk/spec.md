@@ -37,6 +37,9 @@ A UDF author needs a `UdfContext` to unit-test a UDF function without a live hos
 * *AND* it MUST provide typed accessors `get_value`, `get_i64`, `get_f64`, `get_string`, `get_bool`, `get_decimal`, `get_date`, and `get_timestamp`, each returning `Result<Option<T>, UdfError>` where a SQL NULL maps to `Ok(None)` and a matching cell maps to `Ok(Some(…))`
 * *AND* `get_i64` MUST additionally accept an integral `Numeric` cell (because Exasol delivers `BIGINT` as `PB_NUMERIC`), returning `Err(UdfError::Type)` only when the decimal has a non-zero fractional part
 * *AND* a typed accessor invoked on a column whose `Value` variant does not match the requested type (and is not the documented `Numeric`→`i64` case) MUST return `Err(UdfError::Type)` rather than silently coercing
+* *AND* the trait MUST additionally provide `emit_owned(&mut self, values: Vec<Value>) -> Result<(), UdfError>`, whose default implementation forwards to `emit(&values)`, so every existing `impl UdfContext` keeps compiling
+* *AND* `emit_owned` MUST move each `Value` into the host's emit buffer, whereas `emit` clones
+* *AND* both methods MUST enforce the same RETURNS ban: a call in `output_iter = ExactlyOnce` context MUST return `Err(UdfError)`
 
 ### Scenario: UdfRun default single-call hooks return Unimplemented
 

@@ -80,3 +80,11 @@ A UDF author developing a Rust UDF CAN watch the SLC's runtime diagnostics live 
 * *WHEN* the runtime buffers rows and flushes an `MT_EMIT` message
 * *THEN* it MUST emit tracing events around the emit-buffer push and the flush recording bytes buffered, bytes flushed, and the flush outcome
 * *AND* these events MUST originate host-side without crossing the `.so` boundary
+
+### Scenario: Connect-back diagnostics use the gated tracing channel and write no file
+
+* *GIVEN* a runtime built with the `connect-back` feature at any resolved debug level
+* *WHEN* a UDF calls `query`, `query_for_each`, `execute` or `execute_batch`, or a connect-back session is dropped
+* *THEN* every connect-back diagnostic line MUST be emitted through `tracing::debug!`, so the resolved `%udf_debug_level` gates it and it reaches the database's stderr redirect like every other runtime line
+* *AND* the runtime MUST NOT create, open or append to any file for diagnostics: the unconditional `/tmp/cb_debug.txt` append MUST be removed, because a per-row lookup UDF paid an open, write and close syscall triple on every call and the staged container guarantees no writable diagnostic path
+* *AND* the SQL text MUST be carried as a structured tracing field rather than a pre-formatted string, so a session at the default level performs no per-call formatting work

@@ -85,3 +85,11 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `ExaUdfVTable` MUST carry an output-shape marker (RETURNS versus EMITS) that the loader/runtime validates against `meta.output_iter`
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `6 → 7` because both the `dyn UdfContext` layout and the `ExaUdfVTable` fields changed, so a `.so` built against ABI 6 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching
 * *AND* the `run` vtable function-pointer signature MUST remain `(ctx: *mut c_void, error_out: *mut *mut c_char)` — the returned value crosses through the existing trait-object `set_return` slot, not a new `run` parameter
+
+### Scenario: Owned-row emit widens the UdfContext vtable and bumps the ABI version
+
+* *GIVEN* the `UdfContext` trait-object vtable, whose slot order follows method declaration order
+* *WHEN* `emit_owned` is added to the trait
+* *THEN* `EXA_UDF_ABI_VERSION` MUST be incremented (7 → 8), so a `.so` built against the previous layout fails the loader's version check with a clear `AbiMismatch` error instead of dispatching through a shifted slot
+* *AND* `emit_owned` MUST be declared unconditionally, with no `#[cfg(feature = ...)]` gate, preserving the feature-independent vtable layout
+* *AND* the `#[repr(C)] ExaUdfVTable` field order MUST remain unchanged, because the bump alone signals the `dyn UdfContext` layout change

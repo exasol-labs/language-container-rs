@@ -31,6 +31,8 @@ Because an Arrow `RecordBatch` cannot cross the `.so` boundary (two independentl
 * *WHEN* one `EmitBuffer` is filled via `push_batch` and another via row-based `push`, and both are serialised with `to_proto`
 * *THEN* the two `ExascriptTableData` results MUST be byte-identical, proving the columnar and row paths converge on the same wire encoding
 * *AND* decoding the `push_batch` result via `InputRowSet::from_proto` with the same `meta` MUST reproduce the batch's values
+* *AND* when the input axis is `ExactlyOnce`, `encode_slice` MUST fill the `row_number` array with the current input row's number, one entry per encoded row, so a batch emitted from a scalar UDF resolves pass-through output columns exactly as the row path does
+* *AND* when the input axis is `Multiple` the `row_number` array MUST stay empty, matching the row path
 
 ### Scenario: Bridge deserialises emit_batch IPC bytes, carries the output metadata, and flushes on the same threshold
 
