@@ -256,10 +256,10 @@ impl UdfContext for TestContext {
         })
     }
 
-    fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
         match &self.emit_policy {
             EmitPolicy::Record => {
-                self.emitted.push(values.to_vec());
+                self.emitted.push(values);
                 Ok(())
             }
             EmitPolicy::Reject(error) => Err(error.clone()),
@@ -383,7 +383,7 @@ impl UdfContext for DefaultsCtx {
         )))
     }
 
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
         Ok(())
     }
 

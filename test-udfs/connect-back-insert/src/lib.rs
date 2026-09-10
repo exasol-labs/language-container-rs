@@ -55,7 +55,7 @@ pub fn connect_back_insert(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // data in the int64 block while the DB reads the (empty) string block for a
     // NUMERIC column, segfaulting its emit handler.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric(Decimal {
+        ctx.emit(vec![Value::Numeric(Decimal {
             unscaled: 1,
             scale: 0,
         })])?;

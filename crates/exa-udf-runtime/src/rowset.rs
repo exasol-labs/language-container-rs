@@ -1813,16 +1813,7 @@ impl UdfContext for HostContextBridge<'_> {
             .ok_or_else(|| UdfError::Type(format!("column {col} out of range")))
     }
 
-    fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-        if self.output_iter == IterType::ExactlyOnce {
-            return Err(UdfError::User(
-                "emit() is not allowed in RETURNS output context; return the value instead".into(),
-            ));
-        }
-        self.push_output_row(values.to_vec())
-    }
-
-    fn emit_owned(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
+    fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
         if self.output_iter == IterType::ExactlyOnce {
             return Err(UdfError::User(
                 "emit() is not allowed in RETURNS output context; return the value instead".into(),
@@ -1964,7 +1955,7 @@ impl UdfContext for SingleCallContext<'_> {
         ))
     }
 
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
         Err(UdfError::Unimplemented(
             "single-call mode does not emit rows".into(),
         ))

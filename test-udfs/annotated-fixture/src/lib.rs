@@ -15,7 +15,7 @@ pub fn annotated(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         Value::Int64(n) => Value::Int64(*n),
         other => other.clone(),
     };
-    ctx.emit(&[v])
+    ctx.emit(vec![v])
 }
 
 #[exasol_udf(input(x: i64), emits(y: i64))]
@@ -24,5 +24,5 @@ pub fn annotated_double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         Value::Int64(n) => Value::Int64(n * 2),
         other => other.clone(),
     };
-    ctx.emit(&[v])
+    ctx.emit(vec![v])
 }

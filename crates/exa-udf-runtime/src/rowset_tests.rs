@@ -162,7 +162,7 @@ fn returns_output_bans_emit() {
         IterType::ExactlyOnce,
         Box::new(|| Ok(None)),
     );
-    match bridge.emit(&[Value::Int64(9)]) {
+    match bridge.emit(vec![Value::Int64(9)]) {
         Err(UdfError::User(msg)) => assert!(
             msg.contains("emit()") && msg.contains("RETURNS"),
             "unexpected emit-ban message: {msg}"
@@ -761,7 +761,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
         );
 
         for _ in 0..(rows_to_limit - 1) {
-            bridge.emit(&[row_value()]).unwrap();
+            bridge.emit(vec![row_value()]).unwrap();
         }
         assert_eq!(
             flush_count.get(),
@@ -769,7 +769,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
             "no flush expected while under the limit"
         );
 
-        bridge.emit(&[row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
         assert_eq!(
             flush_count.get(),
             1,
@@ -778,8 +778,8 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
 
         // Rows pushed after the mid-run flush stay buffered for the eventual
         // tail flush; they must not trigger a second flush on their own.
-        bridge.emit(&[row_value()]).unwrap();
-        bridge.emit(&[row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
         assert_eq!(
             flush_count.get(),
             1,
@@ -1501,7 +1501,7 @@ fn single_call_context_get_is_unimplemented() {
 /// `Unimplemented`.
 #[test]
 fn single_call_context_emit_is_unimplemented() {
-    match single_call_ctx().emit(&[Value::Int64(1)]) {
+    match single_call_ctx().emit(vec![Value::Int64(1)]) {
         Err(UdfError::Unimplemented(msg)) => assert!(msg.contains("emit")),
         other => panic!("expected Unimplemented, got {other:?}"),
     }
@@ -2929,7 +2929,7 @@ mod arrow_tests {
         {
             let mut bridge = make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
             // Row-based emit: 1 row
-            bridge.emit(&[Value::Int64(1)]).unwrap();
+            bridge.emit(vec![Value::Int64(1)]).unwrap();
             // Batch-based emit: 2 rows. push_batch flushes the pending row
             // first (decision-log [7] step 1) to preserve FIFO order, then
             // the 2 batch rows land in the tail as they're under threshold.

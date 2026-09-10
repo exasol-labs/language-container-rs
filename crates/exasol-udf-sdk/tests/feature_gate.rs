@@ -18,7 +18,7 @@ impl UdfContext for Ctx {
     fn get(&self, _col: usize) -> Result<&Value, UdfError> {
         Err(UdfError::Type("none".into()))
     }
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
         Ok(())
     }
     fn next(&mut self) -> Result<bool, UdfError> {

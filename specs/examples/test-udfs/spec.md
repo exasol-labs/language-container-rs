@@ -64,11 +64,10 @@ A fixture's unit tests build their `UdfContext` double from the `exasol-udf-sdk`
 
 ### Scenario: emit-k emits a variable number of rows per input row
 
-* *GIVEN* the `emit-k` crate with a `#[exasol_udf]` function whose return type is `Result<(), UdfError>`, whose `run` reads the first `i64` column `k` of the current row and calls `ctx.emit_owned()` `k` times
+* *GIVEN* the `emit-k` crate with a `#[exasol_udf]` function whose return type is `Result<(), UdfError>`, whose `run` reads the first `i64` column `k` of the current row and calls `ctx.emit()` `k` times
 * *WHEN* the crate is registered as `RUST SCALAR SCRIPT ... EMITS (v BIGINT)` and invoked over rows with `k = 0`, `k = 1`, and `k = N > 1`
 * *THEN* the crate MUST compile to a cdylib exporting `__exa_udf_entry_EMIT_K` with the EMITS output-shape marker
 * *AND* each input row MUST produce exactly `k` output rows, proving a SCALAR EMITS UDF supports zero, one, and many emits per input row
-* *AND* the fixture MUST call the owned-row entry point `emit_owned`, so the integration suite dispatches that vtable slot across a real `dlopen` boundary and a slot-order defect in the widened `UdfContext` vtable cannot hide
 
 ### Scenario: current-user-meta reports the session identity fields as one string
 

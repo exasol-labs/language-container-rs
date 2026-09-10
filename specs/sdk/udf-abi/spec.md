@@ -65,7 +65,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *THEN* the optional `arrow` dependency MUST NOT be compiled and the `EmitBatch` extension trait (`emit_batch(&RecordBatch)`, which serialises to Arrow IPC bytes in the caller crate) MUST NOT be present, because it is the only API that names an `arrow` type
 * *AND* the `UdfContext::emit_record_batch_ipc(&[u8])` trait method MUST still be present (it names no `arrow` type), so the vtable is unchanged whether or not `emit-arrow` is enabled
 * *AND* with `emit-arrow` enabled, `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `emit_record_batch_ipc(&[u8])`; an Arrow `RecordBatch` MUST NOT cross the `.so` boundary, only `&[u8]`
-* *AND* the row-based `emit(&mut self, values: &[Value])` MUST remain a required trait method, so a UDF MAY mix `emit` and `emit_batch` within one `run`
+* *AND* the row-based `emit(&mut self, values: Vec<Value>)` MUST remain a required trait method, so a UDF MAY mix `emit` and `emit_batch` within one `run`
 
 ### Scenario: emit_batch serialises to Arrow IPC bytes so Arrow never crosses the .so boundary
 
@@ -75,7 +75,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `self.emit_record_batch_ipc(&[u8])` — an Arrow `RecordBatch` MUST NOT be passed across the `.so` boundary, because two independently linked static `arrow` copies disagree on `Arc<dyn Array>` vtables and `TypeId` (a hard memory fault, the same hazard documented for connect-back `query_arrow`); only `&[u8]` crosses
 * *AND* `UdfContext` MUST expose a defaulted `emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError>` gated `#[cfg(feature = "emit-arrow")]` whose default returns `Err(UdfError::Unimplemented("emit_record_batch_ipc"))`, so existing `UdfContext` implementations that do not override it keep compiling unchanged
 * *AND* neither `emit_record_batch_ipc` nor `EmitBatch` MUST be present when the crate is built without the `emit-arrow` feature, and the trait MUST compile in that configuration with no reference to any `arrow` type
-* *AND* the row-based `emit(&mut self, values: &[Value])` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
+* *AND* the row-based `emit(&mut self, values: Vec<Value>)` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
 
 ### Scenario: Return channel adds set_return and an output-shape marker, bumping the ABI version
 
@@ -86,10 +86,9 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `6 → 7` because both the `dyn UdfContext` layout and the `ExaUdfVTable` fields changed, so a `.so` built against ABI 6 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching
 * *AND* the `run` vtable function-pointer signature MUST remain `(ctx: *mut c_void, error_out: *mut *mut c_char)` — the returned value crosses through the existing trait-object `set_return` slot, not a new `run` parameter
 
-### Scenario: Owned-row emit widens the UdfContext vtable and bumps the ABI version
+### Scenario: Owned-row emit changes the emit signature and bumps the ABI version
 
 * *GIVEN* the `UdfContext` trait-object vtable, whose slot order follows method declaration order
-* *WHEN* `emit_owned` is added to the trait
+* *WHEN* `emit` changes from `&[Value]` to `Vec<Value>`
 * *THEN* `EXA_UDF_ABI_VERSION` MUST be incremented (7 → 8), so a `.so` built against the previous layout fails the loader's version check with a clear `AbiMismatch` error instead of dispatching through a shifted slot
-* *AND* `emit_owned` MUST be declared unconditionally, with no `#[cfg(feature = ...)]` gate, preserving the feature-independent vtable layout
 * *AND* the `#[repr(C)] ExaUdfVTable` field order MUST remain unchanged, because the bump alone signals the `dyn UdfContext` layout change
