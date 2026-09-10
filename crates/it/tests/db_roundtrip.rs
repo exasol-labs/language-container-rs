@@ -2110,7 +2110,7 @@ async fn scalar_emits_passthrough_column_resolves_source_row(
     // source input on every emitted row.
     let mismatch = query_single_string(
         conn,
-        "SELECT COUNT(*) FROM (SELECT k, emit_k(k) FROM it_rust.emit_k_src) WHERE k IS NULL",
+        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT k, emit_k(k) FROM it_rust.emit_k_src) WHERE k IS NULL",
     )
     .await?
     .unwrap_or_default();
@@ -2126,7 +2126,7 @@ async fn scalar_emits_passthrough_column_resolves_source_row(
     let big_mismatch = query_single_string(
         conn,
         &format!(
-            "SELECT COUNT(*) FROM (\
+            "SELECT TO_CHAR(COUNT(*)) FROM (\
                 SELECT ord, emit_k(1) FROM ({ORDINAL_100K})\
              ) WHERE ord IS NULL"
         ),
