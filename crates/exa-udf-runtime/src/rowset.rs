@@ -200,22 +200,46 @@ impl InputRowSet {
 /// amortising the per-flush round-trip across many rows.
 const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
 
-/// Fixed per-cell byte-cost widths shared by `value_byte_cost` (the `Value`
-/// axis) and `fixed_cell_cost` (the Arrow `DataType` axis).
+/// Fixed per-cell payload widths shared by `value_byte_cost` (the `Value`
+/// axis) and `fixed_cell_cost` (the Arrow `DataType` axis). These are the
+/// payload bytes only; `value_byte_cost` adds protobuf framing on top.
 const BYTES_BOOL: usize = 1;
 const BYTES_INT32: usize = 4;
 const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
 const BYTES_DATE: usize = 10;
 const BYTES_TIMESTAMP: usize = 29;
+
+/// One byte per cell in the packed `data_nulls` bitmap.
+const BYTES_NULL_BITMAP: usize = 1;
+
+/// Protobuf varint-encoded length prefix size for a given payload length.
+fn varint_len(n: usize) -> usize {
+    match n {
+        0..128 => 1,
+        128..16384 => 2,
+        16384..2097152 => 3,
+        _ => 4,
+    }
+}
+
+/// Protobuf framing overhead for one string-block element: field tag (1 byte)
+/// plus a varint length prefix.
+fn string_block_framing(payload_len: usize) -> usize {
+    1 + varint_len(payload_len)
+}
+
 fn value_byte_cost(v: &Value) -> usize {
-    match v {
-        Value::Null => 0,
+    let payload = match v {
+        Value::Null => return BYTES_NULL_BITMAP,
         Value::Bool(_) => BYTES_BOOL,
         Value::Int32(_) => BYTES_INT32,
         Value::Int64(_) => BYTES_INT64,
         Value::Double(_) => BYTES_DOUBLE,
-        Value::String(s) => s.len(),
+        Value::String(s) => {
+            let len = s.len();
+            return BYTES_NULL_BITMAP + string_block_framing(len) + len;
+        }
         Value::Numeric(d) => {
             let neg = usize::from(d.unscaled < 0);
             let digits = d
@@ -224,17 +248,23 @@ fn value_byte_cost(v: &Value) -> usize {
                 .checked_ilog10()
                 .map_or(1, |l| l as usize + 1);
             let s = d.scale as usize;
-            if s == 0 {
+            let len = if s == 0 {
                 neg + digits
             } else if digits > s {
                 neg + digits + 1
             } else {
                 neg + 2 + s
-            }
+            };
+            return BYTES_NULL_BITMAP + string_block_framing(len) + len;
         }
-        Value::Date(_) => BYTES_DATE,
-        Value::Timestamp(_) => BYTES_TIMESTAMP,
-    }
+        Value::Date(_) => {
+            return BYTES_NULL_BITMAP + string_block_framing(BYTES_DATE) + BYTES_DATE;
+        }
+        Value::Timestamp(_) => {
+            return BYTES_NULL_BITMAP + string_block_framing(BYTES_TIMESTAMP) + BYTES_TIMESTAMP;
+        }
+    };
+    BYTES_NULL_BITMAP + payload
 }
 
 /// Read process RSS (resident set size) from `/proc/self/statm` field 2.
@@ -772,19 +802,26 @@ fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
 fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
     use arrow::datatypes::DataType;
     match dt {
-        DataType::Boolean => Some(BYTES_BOOL),
-        DataType::Int32 => Some(BYTES_INT32),
-        DataType::Int64 => Some(BYTES_INT64),
-        DataType::Float64 => Some(BYTES_DOUBLE),
-        DataType::Date32 => Some(BYTES_DATE),
-        DataType::Timestamp(_, _) => Some(BYTES_TIMESTAMP),
-        DataType::Decimal128(precision, _) => Some(*precision as usize + 2),
+        DataType::Boolean => Some(BYTES_NULL_BITMAP + BYTES_BOOL),
+        DataType::Int32 => Some(BYTES_NULL_BITMAP + BYTES_INT32),
+        DataType::Int64 => Some(BYTES_NULL_BITMAP + BYTES_INT64),
+        DataType::Float64 => Some(BYTES_NULL_BITMAP + BYTES_DOUBLE),
+        DataType::Date32 => {
+            Some(BYTES_NULL_BITMAP + string_block_framing(BYTES_DATE) + BYTES_DATE)
+        }
+        DataType::Timestamp(_, _) => {
+            Some(BYTES_NULL_BITMAP + string_block_framing(BYTES_TIMESTAMP) + BYTES_TIMESTAMP)
+        }
+        DataType::Decimal128(precision, _) => {
+            let payload = *precision as usize + 2;
+            Some(BYTES_NULL_BITMAP + string_block_framing(payload) + payload)
+        }
         _ => None,
     }
 }
 
-/// Add `cell_cost(row)` to `costs[row]` for every non-NULL row — a NULL cell
-/// occupies no type-block slot, matching `value_byte_cost`.
+/// Add `cell_cost(row)` to `costs[row]` for every row. Non-NULL rows pay
+/// the full cell cost; NULL rows pay only the null-bitmap byte.
 #[cfg(feature = "emit-arrow")]
 fn accumulate_costs(
     costs: &mut [usize],
@@ -792,7 +829,9 @@ fn accumulate_costs(
     cell_cost: impl Fn(usize) -> usize,
 ) {
     for (r, cost) in costs.iter_mut().enumerate() {
-        if !nulls.is_some_and(|nb| nb.is_null(r)) {
+        if nulls.is_some_and(|nb| nb.is_null(r)) {
+            *cost += BYTES_NULL_BITMAP;
+        } else {
             *cost += cell_cost(r);
         }
     }
@@ -822,12 +861,18 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
         match dt {
             DataType::Utf8 => {
                 if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    accumulate_costs(&mut costs, null_buf, |r| arr.value(r).len());
+                    accumulate_costs(&mut costs, null_buf, |r| {
+                        let len = arr.value(r).len();
+                        BYTES_NULL_BITMAP + string_block_framing(len) + len
+                    });
                 }
             }
             DataType::LargeUtf8 => {
                 if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
-                    accumulate_costs(&mut costs, null_buf, |r| arr.value(r).len());
+                    accumulate_costs(&mut costs, null_buf, |r| {
+                        let len = arr.value(r).len();
+                        BYTES_NULL_BITMAP + string_block_framing(len) + len
+                    });
                 }
             }
             _ => {

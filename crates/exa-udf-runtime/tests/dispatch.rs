@@ -1051,16 +1051,12 @@ fn wildcard_after_done_request_continues_loop() {
 #[test]
 fn emit_buffer_flushes_mid_group_before_tail_flush() {
     // emit_flusher's mid-group MT_EMIT: pushing enough small emitted rows to
-    // cross the 4,000,000-byte threshold mid-group forces a flush through
-    // emit_flusher's closure body (the zero-row no-op check, the cell borrow,
-    // building and sending the MT_EMIT request, and mapping the result) before
-    // the group's own tail flush ever runs. Each scalar-double output row
-    // costs exactly 8 bytes (one int64 cell), so 500_000 rows cross
-    // EMIT_BUFFER_LIMIT_BYTES (4_000_000) exactly on push #500_000; two extra
-    // rows continue past it to prove the buffer keeps accumulating for a
-    // genuine tail flush afterward, rather than the mid-group flush being
-    // mistaken for the group's only flush.
-    const MID_GROUP_ROWS: usize = 500_000;
+    // cross the 4,000,000-byte threshold mid-group forces a flush. Each
+    // scalar-double output row is one Int64 cell, costing 9 bytes (8 payload
+    // + 1 null-bitmap). Compute the exact row count that first reaches the
+    // limit so the test stays correct if the per-cell overhead changes.
+    const ROW_COST: usize = 9; // BYTES_NULL_BITMAP + BYTES_INT64
+    const MID_GROUP_ROWS: usize = (4_000_000 + ROW_COST - 1) / ROW_COST;
     const TAIL_ROWS: usize = 2;
     let vals: Vec<Option<i64>> = (0..(MID_GROUP_ROWS + TAIL_ROWS) as i64).map(Some).collect();
 

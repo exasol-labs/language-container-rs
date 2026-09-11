@@ -109,5 +109,3 @@ goblin = { version = "0.9", default-features = false, features = ["std", "elf32"
 [profile.release]
 strip = "symbols"
 opt-level = 3
-lto = "fat"
-codegen-units = 1

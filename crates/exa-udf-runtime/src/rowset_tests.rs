@@ -539,14 +539,11 @@ fn corrupt_string_block_value_decodes_to_null() {
 
 #[test]
 fn emit_buffer_byte_estimate_and_should_flush() {
-    // Each row carries a 1000-byte string; the estimate grows by ~1000 per
-    // push. Pushing rows until just below the 4 MB limit must keep
-    // should_flush() false; one more push crosses it and flips it true.
     let row = || vec![Value::String("x".repeat(1000))];
+    let row_cost: usize = row().iter().map(value_byte_cost).sum();
     let mut emit = EmitBuffer::new();
 
-    // Rows needed to first reach or exceed the limit.
-    let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000);
+    let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(row_cost);
 
     for _ in 0..(rows_to_limit - 1) {
         emit.push(row());
@@ -587,6 +584,59 @@ fn emit_buffer_limit_is_exactly_4_000_000() {
     // The other tests use EMIT_BUFFER_LIMIT_BYTES symbolically, so a silent
     // change to 4 MiB would pass them. The wire limit is 4,000,000 bytes.
     assert_eq!(EMIT_BUFFER_LIMIT_BYTES, 4_000_000);
+}
+
+#[test]
+fn to_proto_encoded_size_stays_within_wire_limit() {
+    use exasol_udf_sdk::value::Decimal;
+    use prost::Message;
+
+    let meta = vec![
+        col("id", ExaType::Int64),
+        col("amount", ExaType::Numeric { precision: Some(18), scale: Some(2) }),
+        col("event_date", ExaType::Date),
+        col("event_ts", ExaType::Timestamp),
+        col("label", ExaType::String { size: Some(100) }),
+    ];
+
+    let label = "x".repeat(50);
+    let make_row = |i: i64| {
+        vec![
+            Value::Int64(i),
+            Value::Numeric(Decimal { unscaled: i as i128 * 137 + 4200, scale: 2 }),
+            Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+            Value::Timestamp(
+                chrono::NaiveDate::from_ymd_opt(2024, 6, 15)
+                    .unwrap()
+                    .and_hms_nano_opt(12, 30, 45, 123_456_789)
+                    .unwrap(),
+            ),
+            Value::String(label.clone()),
+        ]
+    };
+
+    let mut emit = EmitBuffer::new();
+    let mut i = 0i64;
+    while !emit.should_flush() {
+        emit.push(make_row(i));
+        i += 1;
+    }
+
+    let one_row_cost: usize = make_row(i - 1).iter().map(value_byte_cost).sum();
+    let table = emit.to_proto(&meta);
+    let req = exa_proto::ExascriptRequest {
+        r#type: exa_proto::MessageType::MtEmit as i32,
+        emit: Some(exa_proto::ExascriptEmitDataReq { table }),
+        ..Default::default()
+    };
+    let encoded_len = req.encoded_len();
+
+    assert!(
+        encoded_len <= EMIT_BUFFER_LIMIT_BYTES + one_row_cost,
+        "to_proto encoded size {encoded_len} exceeds limit {EMIT_BUFFER_LIMIT_BYTES} + \
+         one_row_cost {one_row_cost} = {}",
+        EMIT_BUFFER_LIMIT_BYTES + one_row_cost,
+    );
 }
 
 #[test]
@@ -656,12 +706,13 @@ fn numeric_byte_cost_equals_rendered_decimal_length() {
     ];
     for d in &cases {
         let rendered = fast_decimal_to_string(d);
+        let payload_len = rendered.len();
+        let expected = BYTES_NULL_BITMAP + string_block_framing(payload_len) + payload_len;
         let cost = value_byte_cost(&Value::Numeric(d.clone()));
         assert_eq!(
-            cost,
-            rendered.len(),
-            "cost mismatch for {d:?}: rendered={rendered:?} len={} cost={cost}",
-            rendered.len()
+            cost, expected,
+            "cost mismatch for {d:?}: rendered={rendered:?} payload_len={payload_len} \
+             expected={expected} cost={cost}",
         );
     }
 }
@@ -748,7 +799,8 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
     let flush_count = std::cell::Cell::new(0usize);
     let flush_count_ref = &flush_count;
     let row_value = || Value::String("x".repeat(1000));
-    let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000);
+    let row_cost = value_byte_cost(&row_value());
+    let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(row_cost);
 
     {
         let mut bridge = HostContextBridge::new(
@@ -3045,8 +3097,8 @@ mod arrow_tests {
         );
     }
 
-    /// `compute_row_costs`'s `Decimal128` arm charges `precision + 2`,
-    /// the exact ceiling that type can produce (sign + digits + point).
+    /// `compute_row_costs`'s `Decimal128` arm charges bitmap + framing +
+    /// payload, where payload = `precision + 2` (sign + digits + point).
     #[test]
     fn compute_row_costs_decimal128_scale_term_matches_value_byte_cost() {
         use arrow::array::Decimal128Array;
@@ -3071,8 +3123,10 @@ mod arrow_tests {
                 },
             )];
 
+            let payload = precision as usize + 2;
+            let expected = BYTES_NULL_BITMAP + string_block_framing(payload) + payload;
             let cost = compute_row_costs(&batch, &meta)[0];
-            assert_eq!(cost, precision as usize + 2, "p={precision} s={scale}");
+            assert_eq!(cost, expected, "p={precision} s={scale}");
         }
     }
 
@@ -3111,11 +3165,10 @@ mod arrow_tests {
         );
     }
 
-    /// A NULL cell contributes 0 regardless of column type (mirrors
-    /// `value_byte_cost`'s `Value::Null => 0`), and a row's total cost is the
-    /// sum of its non-null cells across every column — both properties
-    /// exercised together across three rows spanning "no NULLs", "one NULL
-    /// column", and "every column NULL".
+    /// A NULL cell contributes only its null-bitmap byte (no type-block
+    /// slot), and a row's total cost is the sum across every column — both
+    /// properties exercised together across three rows spanning "no NULLs",
+    /// "one NULL column", and "every column NULL".
     #[test]
     fn compute_row_costs_null_cells_cost_zero_and_multi_column_rows_sum() {
         use arrow::array::Int32Array;
@@ -3149,10 +3202,16 @@ mod arrow_tests {
         );
         assert_eq!(
             costs[1],
-            value_byte_cost(&Value::String("xy".into())) + value_byte_cost(&Value::Bool(false)),
-            "row 1: NULL Int32 contributes 0, only the other two columns count"
+            BYTES_NULL_BITMAP
+                + value_byte_cost(&Value::String("xy".into()))
+                + value_byte_cost(&Value::Bool(false)),
+            "row 1: NULL Int32 contributes only its bitmap byte"
         );
-        assert_eq!(costs[2], 0, "row 2: every column NULL, total cost 0");
+        assert_eq!(
+            costs[2],
+            3 * BYTES_NULL_BITMAP,
+            "row 2: every column NULL, only bitmap bytes"
+        );
     }
 
     /// `accessor_value`'s four `Timestamp` arms each divide by a different
