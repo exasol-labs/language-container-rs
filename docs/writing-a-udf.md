@@ -696,7 +696,7 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+        fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
             Err(UdfError::Unimplemented("emit is banned in RETURNS output".into()))
         }
 
@@ -753,8 +753,8 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
+        fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
+            self.emitted.push(values);
             Ok(())
         }
 

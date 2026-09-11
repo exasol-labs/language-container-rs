@@ -223,6 +223,11 @@ fn varint_len(n: usize) -> usize {
     }
 }
 
+/// Packed varint width of one `row_number` entry (u64).
+fn u64_varint_len(n: u64) -> usize {
+    (64 - n.leading_zeros() as usize).max(1).div_ceil(7)
+}
+
 /// Protobuf framing overhead for one string-block element: field tag (1 byte)
 /// plus a varint length prefix.
 fn string_block_framing(payload_len: usize) -> usize {
@@ -348,6 +353,7 @@ impl EmitBuffer {
     pub fn push_stamped(&mut self, values: Vec<Value>, row_number: Option<u64>) {
         if let Some(n) = row_number {
             self.row_numbers.push(n);
+            self.byte_estimate += u64_varint_len(n);
         }
         self.push(values);
     }
@@ -540,7 +546,7 @@ impl EmitBuffer {
 
         // Step 3: compute cumulative per-row byte costs using the Arrow offset
         // buffers for variable-width types (no per-cell work for bulk).
-        let row_costs = compute_row_costs(batch, meta);
+        let row_costs = compute_row_costs(batch, meta, stamp_row_number);
 
         // Step 4: split into ≤4 MB slices and flush each directly.
         let mut running: usize = 0;
@@ -839,12 +845,17 @@ fn accumulate_costs(
 /// layout for efficiency (no per-cell work for fixed-width types; offset-buffer
 /// prefix-sum for variable-width; same fixed estimates as `value_byte_cost`).
 #[cfg(feature = "emit-arrow")]
-fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMeta]) -> Vec<usize> {
+fn compute_row_costs(
+    batch: &arrow::record_batch::RecordBatch,
+    meta: &[ColumnMeta],
+    stamp_row_number: Option<u64>,
+) -> Vec<usize> {
     use arrow::array::{Array, LargeStringArray, StringArray};
     use arrow::datatypes::DataType;
 
     let n_rows = batch.num_rows();
-    let mut costs = vec![0usize; n_rows];
+    let stamp_cost = stamp_row_number.map_or(0, u64_varint_len);
+    let mut costs = vec![stamp_cost; n_rows];
 
     for (c, _col_meta) in meta.iter().enumerate() {
         let col = batch.column(c);
@@ -1261,21 +1272,23 @@ fn push_ndigit(out: &mut String, v: u32, width: u32) {
 /// actually reach the wire. Returns `None` for out-of-range years so the
 /// caller falls back to `NaiveDate::format`, preserving byte-identical output
 /// for every representable date.
-fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
+fn push_date(out: &mut String, d: &NaiveDate) -> bool {
     use chrono::Datelike;
-
     let year = d.year();
     if !(0..=9999).contains(&year) {
-        return None;
+        return false;
     }
+    push_ndigit(out, year as u32, 4);
+    out.push('-');
+    push_2digit(out, d.month());
+    out.push('-');
+    push_2digit(out, d.day());
+    true
+}
 
+fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
     let mut out = String::with_capacity(10);
-    push_ndigit(&mut out, year as u32, 4);
-    out.push('-');
-    push_2digit(&mut out, d.month());
-    out.push('-');
-    push_2digit(&mut out, d.day());
-    Some(out)
+    push_date(&mut out, d).then_some(out)
 }
 
 /// Fast `YYYY-MM-DD HH:MM:SS.fffffffff` formatter for `NaiveDateTime`,
@@ -1293,14 +1306,15 @@ fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
 fn fast_timestamp_to_string(ts: &NaiveDateTime) -> Option<String> {
     use chrono::Timelike;
 
-    let date_part = fast_date_to_string(&ts.date())?;
     let nanos = ts.nanosecond();
     if nanos >= 1_000_000_000 {
         return None;
     }
 
     let mut out = String::with_capacity(29);
-    out.push_str(&date_part);
+    if !push_date(&mut out, &ts.date()) {
+        return None;
+    }
     out.push(' ');
     push_2digit(&mut out, ts.hour());
     out.push(':');

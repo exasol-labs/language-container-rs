@@ -788,6 +788,53 @@ fn group_reset_retains_capacity_and_leaves_flush_count() {
 }
 
 #[test]
+fn push_stamped_accounts_for_row_number_varint_in_byte_estimate() {
+    let meta = vec![col("a", ExaType::Int64)];
+    let row = || vec![Value::Int64(42)];
+    let n = 100;
+    let stamp: u64 = 500;
+
+    let mut unstamped = EmitBuffer::new();
+    let mut stamped = EmitBuffer::new();
+    for _ in 0..n {
+        unstamped.push(row());
+        stamped.push_stamped(row(), Some(stamp));
+    }
+
+    let expected_diff = n * u64_varint_len(stamp);
+    assert_eq!(
+        stamped.byte_estimate - unstamped.byte_estimate,
+        expected_diff,
+        "stamped estimate must exceed unstamped by rows * varint_len(stamp)"
+    );
+
+    // Verify the proto round-trip stays within the wire limit: a stamped tail
+    // that just crosses the threshold must encode within a few bytes of 4 MB.
+    let row_cost = value_byte_cost(&Value::Int64(0)) + u64_varint_len(stamp);
+    let rows_to_fill = EMIT_BUFFER_LIMIT_BYTES / row_cost;
+    let mut buf = EmitBuffer::new();
+    for i in 0..rows_to_fill {
+        buf.push_stamped(vec![Value::Int64(i as i64)], Some(stamp));
+    }
+    assert!(
+        !buf.should_flush(),
+        "buffer should not yet be at threshold with {rows_to_fill} rows"
+    );
+    buf.push_stamped(vec![Value::Int64(0)], Some(stamp));
+    assert!(
+        buf.should_flush(),
+        "one more stamped row should cross the threshold"
+    );
+    use prost::Message;
+    let table = buf.to_proto(&meta);
+    let encoded_len = table.encoded_len();
+    assert!(
+        encoded_len <= EMIT_BUFFER_LIMIT_BYTES + row_cost,
+        "encoded stamped proto ({encoded_len}) should land near {EMIT_BUFFER_LIMIT_BYTES}"
+    );
+}
+
+#[test]
 fn reserve_rows_caps_at_max_reserve_rows() {
     let mut emit = EmitBuffer::new();
     emit.reserve_rows(100_000_000);
@@ -3047,7 +3094,7 @@ mod arrow_tests {
             let schema = Arc::new(Schema::new(vec![Field::new("v", dt, false)]));
             let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
             let meta = vec![col("v", typ)];
-            compute_row_costs(&batch, &meta)[0]
+            compute_row_costs(&batch, &meta, None)[0]
         }
 
         assert_eq!(
@@ -3134,7 +3181,7 @@ mod arrow_tests {
 
             let payload = precision as usize + 2;
             let expected = BYTES_NULL_BITMAP + string_block_framing(payload) + payload;
-            let cost = compute_row_costs(&batch, &meta)[0];
+            let cost = compute_row_costs(&batch, &meta, None)[0];
             assert_eq!(cost, expected, "p={precision} s={scale}");
         }
     }
@@ -3152,7 +3199,7 @@ mod arrow_tests {
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
         let meta = vec![col("s", ExaType::String { size: None })];
         assert_eq!(
-            compute_row_costs(&batch, &meta)[0],
+            compute_row_costs(&batch, &meta, None)[0],
             value_byte_cost(&Value::String("hello world".to_string())),
             "Utf8"
         );
@@ -3168,7 +3215,7 @@ mod arrow_tests {
         let batch2 = RecordBatch::try_new(schema2, vec![arr2]).unwrap();
         let meta2 = vec![col("ls", ExaType::String { size: None })];
         assert_eq!(
-            compute_row_costs(&batch2, &meta2)[0],
+            compute_row_costs(&batch2, &meta2, None)[0],
             value_byte_cost(&Value::String("héllo".to_string())),
             "LargeUtf8"
         );
@@ -3200,7 +3247,7 @@ mod arrow_tests {
             col("b", ExaType::Boolean),
         ];
 
-        let costs = compute_row_costs(&batch, &meta);
+        let costs = compute_row_costs(&batch, &meta, None);
 
         assert_eq!(
             costs[0],
@@ -3478,7 +3525,7 @@ mod arrow_tests {
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
         let meta = vec![col("u", ExaType::Unsupported)];
 
-        assert_eq!(compute_row_costs(&batch, &meta), vec![0]);
+        assert_eq!(compute_row_costs(&batch, &meta, None), vec![0]);
     }
 
     /// A zero-row `RecordBatch` is a no-op: `push_batch` returns `Ok(())`

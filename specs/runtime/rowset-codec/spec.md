@@ -64,7 +64,7 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *AND* `clear` MUST reset both the row vector and the `byte_estimate` to zero so a flushed buffer starts a fresh accounting cycle
 * *AND* the byte estimate MUST be a monotonic non-negative running total computed without re-serializing the whole buffer on every `push`, so emit cost stays linear in the number of rows
 * *AND* a NUMERIC cell's cost MUST equal the exact byte length of the decimal string `to_proto` writes for it, computed in O(1) from the digit count `d` of the unscaled magnitude (`checked_ilog10` plus one, and one for a zero magnitude), the scale `s`, and a sign charge `n` of one for a negative value: `n + d` when `s` is zero, `n + d + 1` when `d` exceeds `s`, and `n + 2 + s` otherwise
-* *AND* the fixed `NUMERIC_COST_BASE` MUST be removed; the Arrow batch path's `fixed_cell_cost` MUST charge a `Decimal128(precision, scale)` cell `precision + 2` bytes
+* *AND* the Arrow batch path's `fixed_cell_cost` MUST charge a `Decimal128(precision, scale)` cell `precision + 2` bytes
 * *AND* a group-boundary reset MUST clear the rows and the byte estimate while retaining the row vector's allocated capacity, and MUST NOT increment `flush_count`
 
 ### Scenario: EmitBuffer emits timestamps at full nanosecond precision
@@ -73,7 +73,6 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *WHEN* `EmitBuffer::to_proto` serialises the row into the string block
 * *THEN* the emitted timestamp string MUST contain exactly 9 fractional-second digits (chrono `%.9f`), reproducing the full nanosecond component of the `NaiveDateTime`
 * *AND* the emitted string MUST round-trip losslessly: decoding it via `InputRowSet::from_proto` MUST reproduce the original nanosecond-resolution `NaiveDateTime`
-* *AND* the previous hardcoded 6-digit emit format (`%.6f`) MUST NOT be used, since it capped output at microseconds and lost precision for `TIMESTAMP(7)`, `TIMESTAMP(8)`, and `TIMESTAMP(9)` columns
 * *AND* the encoder MUST NOT consult the output `ColumnMeta` precision: the Exasol engine truncates the emitted value to the column's declared precision on receipt, so emitting all 9 digits is correct for every declared precision (a plain `TIMESTAMP`, which defaults to precision 3, is truncated 9→3 by the engine exactly as it was truncated 6→3 before)
 
 ### Scenario: A promoted emit fast-path encoder stays byte-identical to the row path

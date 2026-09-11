@@ -60,7 +60,6 @@ The database-side semantics of the `exascript_info` identity fields (`current_us
 * *GIVEN* a connected `ZmqTransport` whose `RCVTIMEO`/`SNDTIMEO` is set to 1 s (a poll interval, not a deadline)
 * *WHEN* `recv` or `send` returns a ZMQ `EAGAIN` error repeatedly because the database has not yet replied or queued the frame
 * *THEN* the transport MUST keep retrying for as long as `EAGAIN` continues, with no total-elapsed-time limit, preserving the REQ/REP lock-step exchange
-* *AND* the `MAX_TOTAL_WAIT` constant and the timeout `ProtocolError` MUST be removed
 * *AND* any non-`EAGAIN` socket error MUST still propagate immediately without retry
 * *AND* the retry loop MUST keep emitting its per-poll `debug!` progress event carrying the elapsed wait, so a long wait stays observable at `%udf_debug_level` debug
 
