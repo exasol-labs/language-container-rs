@@ -2977,6 +2977,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "scalar-emit-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "exarrow-rs",
+ "it",
+ "tokio",
+]
+
+[[package]]
+name = "scalar-emit-bench-udf"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
+
+[[package]]
 name = "scalar-next-illegal"
 version = "0.1.0"
 dependencies = [

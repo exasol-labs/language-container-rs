@@ -36,6 +36,8 @@ members = [
     "test-udfs/returns-with-emit",
     "benches/emit-bench",
     "benches/emit-bench-udf",
+    "benches/scalar-emit-bench",
+    "benches/scalar-emit-bench-udf",
 ]
 # `it` requires a live Exasol container; build/test it explicitly:
 # `cargo test -p it --features integration`

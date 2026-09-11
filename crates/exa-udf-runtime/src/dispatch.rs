@@ -14,6 +14,7 @@ pub fn run_udf(
     meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
     let mut emit_buf = EmitBuffer::new();
+    let handshake_meta = crate::rowset::HandshakeMeta::from(meta);
     let exit: Cell<Option<GroupExit>> = Cell::new(None);
     let proto_cell = RefCell::new(proto);
     let wire = SessionWire {
@@ -38,7 +39,7 @@ pub fn run_udf(
         emit_buf.group_reset();
         wire.exit.set(None);
 
-        if let Some(early) = run_group(&wire, &mut emit_buf, udf, meta)? {
+        if let Some(early) = run_group(&wire, &mut emit_buf, udf, meta, &handshake_meta)? {
             return early;
         }
 
@@ -84,6 +85,7 @@ fn run_group<'s>(
     emit_buf: &mut EmitBuffer,
     udf: &LoadedUdf,
     meta: &'s UdfMeta,
+    handshake_meta: &crate::rowset::HandshakeMeta,
 ) -> Result<Option<Result<(), RuntimeError>>, RuntimeError> {
     let mut fetch = batch_fetcher(wire);
     let mut run_err: Option<RuntimeError> = None;
@@ -96,7 +98,7 @@ fn run_group<'s>(
             &meta.input_columns,
             &meta.output_columns,
             emit_flusher(wire),
-            crate::rowset::HandshakeMeta::from(meta),
+            handshake_meta.clone(),
             #[cfg(feature = "connect-back")]
             crate::wire::conn_requester(wire.transport, wire.proto_cell),
         );

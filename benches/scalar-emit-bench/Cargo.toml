@@ -1,0 +1,16 @@
+[package]
+name = "scalar-emit-bench"
+publish = false
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[[bin]]
+name = "scalar-emit-bench"
+path = "src/main.rs"
+
+[dependencies]
+it = { path = "../../crates/it", features = ["integration"] }
+exarrow-rs = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

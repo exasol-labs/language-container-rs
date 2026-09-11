@@ -132,6 +132,7 @@ impl InputRowSet {
         self.rows_in_group
     }
 
+    #[cfg(test)]
     pub fn seek_row(&mut self, idx: usize) -> Option<&[Value]> {
         if idx >= self.n_rows || idx < self.current_row {
             return None;
@@ -234,6 +235,11 @@ fn string_block_framing(payload_len: usize) -> usize {
     1 + varint_len(payload_len)
 }
 
+// TODO(follow-up): costs by Value variant, not by declared output ExaType.
+// An Int64 emitted into a BIGINT (Numeric) column is string-block-encoded
+// (~22 bytes) but charged as native Int64 (9 bytes), so the buffer flushes
+// late and MT_EMIT can overshoot 4,000,000 bytes. Fix: resolve the wire
+// block type per column once per group and cost accordingly.
 fn value_byte_cost(v: &Value) -> usize {
     let payload = match v {
         Value::Null => return BYTES_NULL_BITMAP,

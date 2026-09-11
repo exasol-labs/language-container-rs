@@ -6,7 +6,7 @@
 # stay covered when they are genuinely shipped (verified: `cargo tree -p
 # exaudfclient -i <crate>` finds none of them).
 [graph]
-exclude = ["it", "emit-bench", "emit-bench-udf"]
+exclude = ["it", "emit-bench", "emit-bench-udf", "scalar-emit-bench", "scalar-emit-bench-udf"]
 
 [advisories]
 ignore = [
