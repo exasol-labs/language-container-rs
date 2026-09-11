@@ -806,9 +806,7 @@ fn fixed_cell_cost(dt: &arrow::datatypes::DataType) -> Option<usize> {
         DataType::Int32 => Some(BYTES_NULL_BITMAP + BYTES_INT32),
         DataType::Int64 => Some(BYTES_NULL_BITMAP + BYTES_INT64),
         DataType::Float64 => Some(BYTES_NULL_BITMAP + BYTES_DOUBLE),
-        DataType::Date32 => {
-            Some(BYTES_NULL_BITMAP + string_block_framing(BYTES_DATE) + BYTES_DATE)
-        }
+        DataType::Date32 => Some(BYTES_NULL_BITMAP + string_block_framing(BYTES_DATE) + BYTES_DATE),
         DataType::Timestamp(_, _) => {
             Some(BYTES_NULL_BITMAP + string_block_framing(BYTES_TIMESTAMP) + BYTES_TIMESTAMP)
         }

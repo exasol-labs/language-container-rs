@@ -593,7 +593,13 @@ fn to_proto_encoded_size_stays_within_wire_limit() {
 
     let meta = vec![
         col("id", ExaType::Int64),
-        col("amount", ExaType::Numeric { precision: Some(18), scale: Some(2) }),
+        col(
+            "amount",
+            ExaType::Numeric {
+                precision: Some(18),
+                scale: Some(2),
+            },
+        ),
         col("event_date", ExaType::Date),
         col("event_ts", ExaType::Timestamp),
         col("label", ExaType::String { size: Some(100) }),
@@ -603,7 +609,10 @@ fn to_proto_encoded_size_stays_within_wire_limit() {
     let make_row = |i: i64| {
         vec![
             Value::Int64(i),
-            Value::Numeric(Decimal { unscaled: i as i128 * 137 + 4200, scale: 2 }),
+            Value::Numeric(Decimal {
+                unscaled: i as i128 * 137 + 4200,
+                scale: 2,
+            }),
             Value::Date(chrono::NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
             Value::Timestamp(
                 chrono::NaiveDate::from_ymd_opt(2024, 6, 15)
