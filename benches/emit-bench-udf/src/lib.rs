@@ -87,7 +87,7 @@ pub fn emit_mixed_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let (n, do_emit) = read_params(ctx)?;
     if do_emit {
         for i in 0..n {
-            ctx.emit(&mixed_row(i))?;
+            ctx.emit(mixed_row(i).into())?;
         }
     } else {
         // Generate every row (construction cost) but transfer nothing; black_box
@@ -96,7 +96,7 @@ pub fn emit_mixed_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         for i in 0..n {
             std::hint::black_box(mixed_row(i));
         }
-        ctx.emit(&mixed_row(0))?;
+        ctx.emit(mixed_row(0).into())?;
     }
     Ok(())
 }
@@ -205,13 +205,13 @@ pub fn emit_wide_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let (n, do_emit) = read_params(ctx)?;
     if do_emit {
         for i in 0..n {
-            ctx.emit(&wide_row(i))?;
+            ctx.emit(wide_row(i).into())?;
         }
     } else {
         for i in 0..n {
             std::hint::black_box(wide_row(i));
         }
-        ctx.emit(&wide_row(0))?;
+        ctx.emit(wide_row(0).into())?;
     }
     Ok(())
 }
@@ -289,7 +289,7 @@ pub fn sink_mixed(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         std::hint::black_box(ctx.get(2)?);
         count += 1;
     }
-    ctx.emit(&[Value::Int64(count)])?;
+    ctx.emit(vec![Value::Int64(count)])?;
     Ok(())
 }
 
@@ -305,7 +305,7 @@ pub fn sink_wide(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         }
         count += 1;
     }
-    ctx.emit(&[Value::Int64(count)])?;
+    ctx.emit(vec![Value::Int64(count)])?;
     Ok(())
 }
 
@@ -323,13 +323,13 @@ pub fn emit_native_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let (n, do_emit) = read_params(ctx)?;
     if do_emit {
         for i in 0..n {
-            ctx.emit(&native_row(i))?;
+            ctx.emit(native_row(i).into())?;
         }
     } else {
         for i in 0..n {
             std::hint::black_box(native_row(i));
         }
-        ctx.emit(&native_row(0))?;
+        ctx.emit(native_row(0).into())?;
     }
     Ok(())
 }
@@ -384,7 +384,7 @@ pub fn sink_native(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         std::hint::black_box(ctx.get(1)?);
         count += 1;
     }
-    ctx.emit(&[Value::Int64(count)])?;
+    ctx.emit(vec![Value::Int64(count)])?;
     Ok(())
 }
 
