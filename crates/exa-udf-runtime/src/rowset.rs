@@ -238,8 +238,34 @@ fn string_block_framing(payload_len: usize) -> usize {
     1 + varint_len(payload_len)
 }
 
-// TODO(follow-up): cost by declared output ExaType so an Int64 emitted into a
-// BIGINT (Numeric) column is charged at string-block width, not native varint.
+fn value_byte_cost_for_block(v: &Value, block: u8) -> usize {
+    if matches!(v, Value::Null) {
+        return BYTES_NULL_BITMAP;
+    }
+    if block == EmitBuffer::BLK_STRING {
+        return match v {
+            Value::Null => BYTES_NULL_BITMAP,
+            Value::Int32(n) => {
+                let len = int_string_len(*n as i64);
+                BYTES_NULL_BITMAP + string_block_framing(len) + len
+            }
+            Value::Int64(n) => {
+                let len = int_string_len(*n);
+                BYTES_NULL_BITMAP + string_block_framing(len) + len
+            }
+            _ => value_byte_cost(v),
+        };
+    }
+    value_byte_cost(v)
+}
+
+fn int_string_len(n: i64) -> usize {
+    let neg = usize::from(n < 0);
+    let abs = n.unsigned_abs();
+    let digits = abs.checked_ilog10().map_or(1, |l| l as usize + 1);
+    neg + digits
+}
+
 fn value_byte_cost(v: &Value) -> usize {
     let payload = match v {
         Value::Null => return BYTES_NULL_BITMAP,
@@ -320,11 +346,41 @@ pub struct EmitBuffer {
     cumulative_bytes: usize,
     cumulative_rows: u64,
     flush_count: u64,
+    col_blocks: Vec<u8>,
 }
 
 impl EmitBuffer {
     pub fn new() -> Self {
         EmitBuffer::default()
+    }
+
+    const BLK_STRING: u8 = 0;
+    const BLK_BOOL: u8 = 1;
+    const BLK_INT32: u8 = 2;
+    const BLK_INT64: u8 = 3;
+    const BLK_DOUBLE: u8 = 4;
+
+    pub fn set_output_meta(&mut self, meta: &[ColumnMeta]) {
+        self.col_blocks = meta
+            .iter()
+            .map(|c| match &c.typ {
+                ExaType::Numeric { .. }
+                | ExaType::Date
+                | ExaType::Timestamp
+                | ExaType::TimestampTz
+                | ExaType::String { .. }
+                | ExaType::Char { .. }
+                | ExaType::Geometry
+                | ExaType::HashType
+                | ExaType::IntervalYearToMonth
+                | ExaType::IntervalDayToSecond => Self::BLK_STRING,
+                ExaType::Boolean => Self::BLK_BOOL,
+                ExaType::Int32 => Self::BLK_INT32,
+                ExaType::Int64 => Self::BLK_INT64,
+                ExaType::Double => Self::BLK_DOUBLE,
+                ExaType::Unsupported => Self::BLK_STRING,
+            })
+            .collect();
     }
 
     /// Emit a periodic RSS + full-state checkpoint every this many cumulative rows.
@@ -333,7 +389,15 @@ impl EmitBuffer {
     const TELEMETRY_ROW_CHECKPOINT: u64 = 10_000;
 
     pub fn push(&mut self, values: Vec<Value>) {
-        let row_cost = values.iter().map(value_byte_cost).sum::<usize>();
+        let row_cost: usize = if self.col_blocks.is_empty() {
+            values.iter().map(value_byte_cost).sum()
+        } else {
+            values
+                .iter()
+                .zip(self.col_blocks.iter())
+                .map(|(v, blk)| value_byte_cost_for_block(v, *blk))
+                .sum()
+        };
         self.byte_estimate += row_cost;
         self.cumulative_bytes += row_cost;
         self.cumulative_rows += 1;

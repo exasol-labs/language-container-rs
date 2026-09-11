@@ -14,6 +14,7 @@ pub fn run_udf(
     meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
     let mut emit_buf = EmitBuffer::new();
+    emit_buf.set_output_meta(&meta.output_columns);
     let handshake_meta = crate::rowset::HandshakeMeta::from(meta);
     let exit: Cell<Option<GroupExit>> = Cell::new(None);
     let proto_cell = RefCell::new(proto);
