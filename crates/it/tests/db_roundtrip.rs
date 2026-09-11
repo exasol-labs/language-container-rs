@@ -2106,37 +2106,52 @@ async fn scalar_emits_passthrough_column_resolves_source_row(
     conn.execute("INSERT INTO it_rust.emit_k_src VALUES (1),(2),(3)")
         .await?;
 
-    // Each source row emits k rows. The pass-through column k must equal the
-    // source input on every emitted row.
-    let mismatch = query_single_string(
+    // Each source row with value k emits k rows. The pass-through column k
+    // must pair every emitted idx with the k that produced it.
+    // (1) every emitted idx must be < the k that produced it
+    let bad_idx = query_single_string(
         conn,
-        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT k, emit_k(k) FROM it_rust.emit_k_src) WHERE k IS NULL",
+        "SELECT TO_CHAR(COUNT(*)) FROM (\
+            SELECT k, emit_k(k) FROM it_rust.emit_k_src\
+         ) WHERE idx >= k",
     )
     .await?
     .unwrap_or_default();
-    if mismatch != "0" {
-        bail!(
-            "pass-through column k had {mismatch} NULL values; expected 0 (row_number not stamped)"
-        );
+    if bad_idx != "0" {
+        bail!("pass-through column k: {bad_idx} rows had idx >= k (wrong source-row pairing)");
+    }
+    // (2) each k must produce exactly k rows
+    let bad_count = query_single_string(
+        conn,
+        "SELECT TO_CHAR(COUNT(*)) FROM (\
+            SELECT k, TO_NUMBER(COUNT(*)) AS c FROM (\
+                SELECT k, emit_k(k) FROM it_rust.emit_k_src\
+            ) GROUP BY k\
+         ) WHERE c <> k",
+    )
+    .await?
+    .unwrap_or_default();
+    if bad_count != "0" {
+        bail!("pass-through column k: {bad_count} groups had wrong row count");
     }
 
     // Repeat over ORDINAL_100K to cross batch boundaries. Every row emits 1
     // row (emit_k(1) = one row with idx=0), so the pass-through `ord` must
-    // never be NULL.
-    let big_mismatch = query_single_string(
+    // be distinct per row (no NULL, no duplicates).
+    let distinct_ord = query_single_string(
         conn,
         &format!(
-            "SELECT TO_CHAR(COUNT(*)) FROM (\
+            "SELECT TO_CHAR(COUNT(DISTINCT ord)) FROM (\
                 SELECT ord, emit_k(1) FROM ({ORDINAL_100K})\
-             ) WHERE ord IS NULL"
+             )"
         ),
     )
     .await?
     .unwrap_or_default();
-    if big_mismatch != "0" {
+    if distinct_ord != "100000" {
         bail!(
-            "pass-through column ord had {big_mismatch} NULL values over 100K rows; \
-             row_number not stamped across batch boundaries"
+            "pass-through column ord: expected 100000 distinct values, got {distinct_ord}; \
+             row_number not stamped correctly across batch boundaries"
         );
     }
 

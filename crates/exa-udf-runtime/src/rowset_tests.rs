@@ -692,25 +692,36 @@ fn group_reset_retains_capacity_and_leaves_flush_count() {
     for i in 0..100 {
         emit.push(vec![Value::Int64(i)]);
     }
+    let cap_before = emit.rows.capacity();
+    assert!(cap_before >= 100);
+
     let table = emit.to_proto(&meta);
     assert_eq!(table.rows, 100);
+    // drain(..) must preserve capacity; mem::take would zero it.
+    assert!(
+        emit.rows.capacity() >= cap_before,
+        "to_proto must preserve rows capacity: had {cap_before}, now {}",
+        emit.rows.capacity()
+    );
     emit.clear(); // flush_count becomes 1
 
     // Push more to grow capacity.
     for i in 0..50 {
         emit.push(vec![Value::Int64(i)]);
     }
+    let cap_before_reset = emit.rows.capacity();
 
     emit.group_reset();
     assert!(emit.is_empty());
     assert!(!emit.should_flush());
+    assert!(
+        emit.rows.capacity() >= cap_before_reset,
+        "group_reset must preserve rows capacity: had {cap_before_reset}, now {}",
+        emit.rows.capacity()
+    );
 
     // Verify flush_count was NOT incremented by group_reset.
-    // Push one row and call to_proto to inspect the table.
     emit.push(vec![Value::Int64(999)]);
-    // flush_count should still be 1 (from the single clear() above).
-    // We can indirectly verify by checking the telemetry via the struct.
-    // Just verify the buffer works correctly after reset.
     let table = emit.to_proto(&meta);
     assert_eq!(table.rows, 1);
     assert_eq!(table.data_int64, vec![999]);

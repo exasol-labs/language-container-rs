@@ -329,8 +329,7 @@ impl EmitBuffer {
     }
 
     pub fn to_proto(&mut self, meta: &[ColumnMeta]) -> ExascriptTableData {
-        let rows = std::mem::take(&mut self.rows);
-        let n_rows = rows.len();
+        let n_rows = self.rows.len();
         let n_cols = meta.len();
 
         let mut string_cols = 0usize;
@@ -365,7 +364,7 @@ impl EmitBuffer {
         let mut data_double: Vec<f64> = Vec::with_capacity(double_cols * n_rows);
         let mut data_nulls: Vec<bool> = vec![false; n_rows * n_cols];
 
-        for (r, row) in rows.into_iter().enumerate() {
+        for (r, row) in self.rows.drain(..).enumerate() {
             let mut col_iter = row.into_iter();
             for (c, col) in meta.iter().enumerate() {
                 let v = col_iter.next().unwrap_or(Value::Null);
@@ -396,8 +395,9 @@ impl EmitBuffer {
         }
 
         let row_number = if self.row_numbers.len() == n_rows {
-            std::mem::take(&mut self.row_numbers)
+            self.row_numbers.drain(..).collect()
         } else {
+            self.row_numbers.clear();
             vec![]
         };
 

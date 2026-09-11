@@ -1,6 +1,6 @@
 # Feature: connect-back-query
 
-Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` parses the originating node IP from the ZMQ endpoint without a network call; `connection` retrieves named-connection credentials via an on-demand `MT_IMPORT` exchange; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` streams the result set one Arrow batch at a time so peak memory is bounded by one batch; `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
+Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` parses the originating node IP from the ZMQ endpoint without a network call; `connection` retrieves named-connection credentials via an on-demand `MT_IMPORT` exchange; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` fetches all Arrow batches then converts and delivers rows one batch at a time (collect-all; true per-batch streaming awaits an upstream `exarrow-rs` API — see issue #97); `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
 
 ## Background
 
@@ -12,8 +12,8 @@ Connect-back opens a connection from inside the UDF sandbox back to Exasol (or a
 
 * *GIVEN* a `RuntimeExaConnection` returned by `connect_back`, wrapping an exarrow-rs `Connection`
 * *WHEN* the UDF calls `query_for_each(sql, f)` with a SELECT statement that returns more rows than fit in one exarrow-rs fetch batch
-* *THEN* the host MUST drive the whole fetch inside one `block_on` of the dedicated connect-back tokio runtime, awaiting each `RecordBatch` in turn, and MUST NOT call `fetch_all` or `Connection::query`, both of which materialise the entire result set in memory before any row reaches the caller
-* *AND* it MUST convert each awaited batch with `record_batch_to_rows`, invoke `f` once per row from inside that async block, then drop the batch before awaiting the next
+* *THEN* the host MUST drive the query inside one `block_on` of the dedicated connect-back tokio runtime, fetching batches via `fetch_all` and converting each `RecordBatch` with `record_batch_to_rows`, invoking `f` once per row, then dropping the batch before processing the next
+* *AND* this is a collect-all implementation: all `RecordBatch`es are materialised before row conversion begins; true per-batch streaming is blocked on an upstream `exarrow-rs` API gap (see issue #97)
 * *AND* `RecordBatch` MUST NOT cross the `.so` boundary; conversion MUST run in the runtime crate
 * *AND* `query` MUST collect the rows this method yields rather than carrying a second conversion implementation
 * *AND* if `f` returns an error, `query_for_each` MUST stop awaiting further batches and return that error
