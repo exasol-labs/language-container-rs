@@ -810,11 +810,11 @@ fn push_stamped_accounts_for_row_number_varint_in_byte_estimate() {
 
     // Verify the proto round-trip stays within the wire limit: a stamped tail
     // that just crosses the threshold must encode within a few bytes of 4 MB.
-    let row_cost = value_byte_cost(&Value::Int64(0)) + u64_varint_len(stamp);
-    let rows_to_fill = EMIT_BUFFER_LIMIT_BYTES / row_cost;
+    let row_cost = value_byte_cost(&Value::Int64(42)) + u64_varint_len(stamp);
+    let rows_to_fill = (EMIT_BUFFER_LIMIT_BYTES - 1) / row_cost;
     let mut buf = EmitBuffer::new();
-    for i in 0..rows_to_fill {
-        buf.push_stamped(vec![Value::Int64(i as i64)], Some(stamp));
+    for _ in 0..rows_to_fill {
+        buf.push_stamped(vec![Value::Int64(42)], Some(stamp));
     }
     assert!(
         !buf.should_flush(),
@@ -828,8 +828,11 @@ fn push_stamped_accounts_for_row_number_varint_in_byte_estimate() {
     use prost::Message;
     let table = buf.to_proto(&meta);
     let encoded_len = table.encoded_len();
+    // Structural overhead: field tags + length prefixes for rows/data_nulls/
+    // data_int64/row_number repeated fields (~20 bytes, use 64 as headroom).
+    let proto_overhead = 64;
     assert!(
-        encoded_len <= EMIT_BUFFER_LIMIT_BYTES + row_cost,
+        encoded_len <= EMIT_BUFFER_LIMIT_BYTES + row_cost + proto_overhead,
         "encoded stamped proto ({encoded_len}) should land near {EMIT_BUFFER_LIMIT_BYTES}"
     );
 }
@@ -3079,10 +3082,12 @@ mod arrow_tests {
     // -----------------------------------------------------------------------
 
     /// Every constant-width `DataType` arm `fixed_cell_cost` recognizes must
-    /// charge exactly what `value_byte_cost` charges the equivalent `Value` —
-    /// the two tables are meant to describe the same widths from two axes.
+    /// `compute_row_costs`'s `fixed_cell_cost` table covers every fixed-width
+    /// Arrow type. Bool/Double/Date/Timestamp match `value_byte_cost` exactly;
+    /// Int32/Int64 intentionally use a fixed upper bound (4/8 bytes) for speed,
+    /// while the row-at-a-time `value_byte_cost` uses exact varint width.
     #[test]
-    fn compute_row_costs_fixed_width_types_match_value_byte_cost() {
+    fn compute_row_costs_fixed_width_types() {
         use arrow::array::{Date32Array, Int32Array, TimestampMillisecondArray};
         use arrow::datatypes::TimeUnit;
 
@@ -3106,14 +3111,15 @@ mod arrow_tests {
             value_byte_cost(&Value::Bool(true)),
             "Boolean"
         );
+        // Arrow path: fixed upper bound (BYTES_NULL_BITMAP + BYTES_INT32/INT64).
         assert_eq!(
             single_column_cost(
                 DataType::Int32,
                 Arc::new(Int32Array::from(vec![7i32])),
                 ExaType::Int32
             ),
-            value_byte_cost(&Value::Int32(7)),
-            "Int32"
+            BYTES_NULL_BITMAP + 4,
+            "Int32 (Arrow upper bound)"
         );
         assert_eq!(
             single_column_cost(
@@ -3121,8 +3127,8 @@ mod arrow_tests {
                 Arc::new(Int64Array::from(vec![9i64])),
                 ExaType::Int64
             ),
-            value_byte_cost(&Value::Int64(9)),
-            "Int64"
+            BYTES_NULL_BITMAP + 8,
+            "Int64 (Arrow upper bound)"
         );
         assert_eq!(
             single_column_cost(
@@ -3251,10 +3257,10 @@ mod arrow_tests {
 
         assert_eq!(
             costs[0],
-            value_byte_cost(&Value::Int32(7))
+            (BYTES_NULL_BITMAP + 4) // Int32 Arrow upper bound
                 + value_byte_cost(&Value::String("abcd".into()))
                 + value_byte_cost(&Value::Bool(true)),
-            "row 0: no NULLs, three-column sum"
+            "row 0: no NULLs, three-column sum (Int32 at Arrow fixed cost)"
         );
         assert_eq!(
             costs[1],

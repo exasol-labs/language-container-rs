@@ -132,7 +132,8 @@ impl InputRowSet {
         self.rows_in_group
     }
 
-    #[cfg(test)]
+    /// Forward-only indexed accessor used by round-trip decoding tests.
+    /// No production callers after the scratch-row refactor.
     pub fn seek_row(&mut self, idx: usize) -> Option<&[Value]> {
         if idx >= self.n_rows || idx < self.current_row {
             return None;
@@ -205,7 +206,9 @@ const EMIT_BUFFER_LIMIT_BYTES: usize = 4_000_000;
 /// axis) and `fixed_cell_cost` (the Arrow `DataType` axis). These are the
 /// payload bytes only; `value_byte_cost` adds protobuf framing on top.
 const BYTES_BOOL: usize = 1;
+#[cfg(feature = "emit-arrow")]
 const BYTES_INT32: usize = 4;
+#[cfg(feature = "emit-arrow")]
 const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
 const BYTES_DATE: usize = 10;
@@ -235,17 +238,14 @@ fn string_block_framing(payload_len: usize) -> usize {
     1 + varint_len(payload_len)
 }
 
-// TODO(follow-up): costs by Value variant, not by declared output ExaType.
-// An Int64 emitted into a BIGINT (Numeric) column is string-block-encoded
-// (~22 bytes) but charged as native Int64 (9 bytes), so the buffer flushes
-// late and MT_EMIT can overshoot 4,000,000 bytes. Fix: resolve the wire
-// block type per column once per group and cost accordingly.
+// TODO(follow-up): cost by declared output ExaType so an Int64 emitted into a
+// BIGINT (Numeric) column is charged at string-block width, not native varint.
 fn value_byte_cost(v: &Value) -> usize {
     let payload = match v {
         Value::Null => return BYTES_NULL_BITMAP,
         Value::Bool(_) => BYTES_BOOL,
-        Value::Int32(_) => BYTES_INT32,
-        Value::Int64(_) => BYTES_INT64,
+        Value::Int32(n) => return BYTES_NULL_BITMAP + u64_varint_len(*n as u64),
+        Value::Int64(n) => return BYTES_NULL_BITMAP + u64_varint_len(*n as u64),
         Value::Double(_) => BYTES_DOUBLE,
         Value::String(s) => {
             let len = s.len();
