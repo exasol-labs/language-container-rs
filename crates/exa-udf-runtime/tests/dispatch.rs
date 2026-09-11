@@ -1056,7 +1056,7 @@ fn emit_buffer_flushes_mid_group_before_tail_flush() {
     // + 1 null-bitmap). Compute the exact row count that first reaches the
     // limit so the test stays correct if the per-cell overhead changes.
     const ROW_COST: usize = 9; // BYTES_NULL_BITMAP + BYTES_INT64
-    const MID_GROUP_ROWS: usize = (4_000_000 + ROW_COST - 1) / ROW_COST;
+    const MID_GROUP_ROWS: usize = 4_000_000_usize.div_ceil(ROW_COST);
     const TAIL_ROWS: usize = 2;
     let vals: Vec<Option<i64>> = (0..(MID_GROUP_ROWS + TAIL_ROWS) as i64).map(Some).collect();
 
