@@ -17,7 +17,7 @@ ABI and dlopen-platform validation of a built `.so` — checking it against `EXA
 * *THEN* the CLI MUST create a `Cargo.toml` with `crate-type = ["cdylib"]` and dependencies on `exasol-udf-sdk` and `exasol-udf-macros` whose version pins track the current SDK major.minor line
 * *AND* it MUST create a `src/lib.rs` containing a `#[exasol_udf]` entry point that models the scalar RETURNS channel, returning `Result<Option<i64>, UdfError>` with a placeholder `Ok(None)` body
 * *AND* the generated crate MUST compile as written against that SDK, the macro deriving the RETURNS output shape from the `Option<i64>` return type
-* *AND* the generated `[profile.release]` MUST set `lto = "fat"` and `codegen-units = 1` alongside `strip = true`, so a scaffolded UDF inlines across the SDK crate boundary by default instead of paying a cross-crate call per cell in the hot emit loop
+* *AND* the generated `[profile.release]` MUST set `strip = true`
 * *AND* it MUST NOT set `panic = "abort"`, because the macro-generated run shim converts a UDF panic into an error code through `catch_unwind` and needs unwinding
 
 ### Scenario: new rejects an existing non-empty target

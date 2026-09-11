@@ -51,8 +51,6 @@ exasol-udf-macros = {{ version = "{sdk_version}" }}
 
 [profile.release]
 strip = true
-lto = "fat"
-codegen-units = 1
 "#
     );
     let cargo_path = target.join("Cargo.toml");

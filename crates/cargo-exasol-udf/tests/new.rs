@@ -47,12 +47,8 @@ fn new_scaffolds_crate_files() {
         "Cargo.toml must depend on exasol-udf-sdk"
     );
     assert!(
-        contents.contains("lto = \"fat\""),
-        "Cargo.toml release profile must set lto = \"fat\""
-    );
-    assert!(
-        contents.contains("codegen-units = 1"),
-        "Cargo.toml release profile must set codegen-units = 1"
+        !contents.contains("lto"),
+        "Cargo.toml release profile must not set lto (no-LTO outperforms fat LTO)"
     );
     assert!(
         !contents.contains("panic"),
