@@ -86,11 +86,7 @@ impl ExaConnection for RuntimeExaConnection {
         match result {
             Ok(r) => r,
             Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
+                let msg = panic_message(&payload);
                 tracing::debug!(msg, "connect-back: query_for_each panic");
                 Err(UdfError::ConnectBack(format!(
                     "panic in query_for_each: {msg}"
@@ -123,11 +119,7 @@ impl ExaConnection for RuntimeExaConnection {
         match result {
             Ok(r) => r,
             Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
+                let msg = panic_message(&payload);
                 tracing::debug!(msg, "connect-back: execute panic");
                 Err(UdfError::ConnectBack(format!("panic in execute: {msg}")))
             }
@@ -176,11 +168,7 @@ impl ExaConnection for RuntimeExaConnection {
         match result {
             Ok(r) => r,
             Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
+                let msg = panic_message(&payload);
                 tracing::debug!(msg, "connect-back: execute_batch panic");
                 Err(UdfError::ConnectBack(format!(
                     "panic in execute_batch: {msg}"
@@ -206,11 +194,7 @@ impl RuntimeExaConnection {
         match result {
             Ok(r) => r,
             Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("unknown panic payload");
+                let msg = panic_message(&payload);
                 tracing::debug!(op = name, msg, "connect-back: txn panic");
                 Err(UdfError::ConnectBack(format!("panic in {name}: {msg}")))
             }
@@ -225,6 +209,14 @@ impl RuntimeExaConnection {
 /// directly. Numeric/Date/Timestamp have no lossless wire mapping today and
 /// return [`UdfError::Unimplemented`] — callers that need them can format the
 /// value as a string literal and use `execute` instead.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic payload")
+}
+
 fn value_to_parameter(v: &Value) -> Result<Parameter, UdfError> {
     match v {
         Value::Null => Ok(Parameter::Null),
@@ -256,11 +248,7 @@ pub fn open_connection(conn_info: &ConnInfo) -> Result<RuntimeExaConnection, Udf
         Ok(Ok(inner)) => Ok(RuntimeExaConnection { inner }),
         Ok(Err(e)) => Err(e),
         Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic payload");
+            let msg = panic_message(&payload);
             tracing::debug!(msg, "connect-back: open_connection panic");
             Err(UdfError::ConnectBack(format!("panic: {msg}")))
         }

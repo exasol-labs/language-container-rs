@@ -219,3 +219,149 @@ fn ensure_rustls_provider_is_idempotent() {
     ensure_rustls_provider();
     ensure_rustls_provider();
 }
+
+// --- panic_message tests ---
+
+#[test]
+fn panic_message_extracts_static_str() {
+    let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+    assert_eq!(panic_message(&payload), "boom");
+}
+
+#[test]
+fn panic_message_extracts_owned_string() {
+    let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+    assert_eq!(panic_message(&payload), "kaboom");
+}
+
+#[test]
+fn panic_message_falls_back_for_non_string_payload() {
+    let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+    assert_eq!(panic_message(&payload), "unknown panic payload");
+}
+
+#[test]
+fn panic_message_from_real_catch_unwind_str() {
+    let result = std::panic::catch_unwind(|| panic!("test panic"));
+    let payload = result.unwrap_err();
+    assert_eq!(panic_message(&payload), "test panic");
+}
+
+#[test]
+fn panic_message_from_real_catch_unwind_format() {
+    let result = std::panic::catch_unwind(|| panic!("error: {}", 404));
+    let payload = result.unwrap_err();
+    assert_eq!(panic_message(&payload), "error: 404");
+}
+
+// --- ExaConnection trait behavior via mock ---
+
+struct MockConnection {
+    rows: Vec<Vec<Value>>,
+    fail_at_row: Option<usize>,
+}
+
+impl ExaConnection for MockConnection {
+    fn query_for_each(
+        &mut self,
+        _sql: &str,
+        f: &mut dyn FnMut(Vec<Value>) -> Result<(), UdfError>,
+    ) -> Result<(), UdfError> {
+        for (i, row) in self.rows.clone().into_iter().enumerate() {
+            if self.fail_at_row == Some(i) {
+                return Err(UdfError::ConnectBack("simulated fetch error".into()));
+            }
+            f(row)?;
+        }
+        Ok(())
+    }
+
+    fn execute(&mut self, _sql: &str) -> Result<u64, UdfError> {
+        Ok(self.rows.len() as u64)
+    }
+}
+
+#[test]
+fn query_collects_all_rows_from_query_for_each() {
+    let mut conn = MockConnection {
+        rows: vec![
+            vec![Value::Int64(1)],
+            vec![Value::Int64(2)],
+            vec![Value::Int64(3)],
+        ],
+        fail_at_row: None,
+    };
+    let result = conn.query("SELECT 1").unwrap();
+    assert_eq!(result.len(), 3);
+    assert!(matches!(result[0][0], Value::Int64(1)));
+    assert!(matches!(result[2][0], Value::Int64(3)));
+}
+
+#[test]
+fn query_returns_empty_vec_for_no_rows() {
+    let mut conn = MockConnection {
+        rows: vec![],
+        fail_at_row: None,
+    };
+    let result = conn.query("SELECT 1 WHERE FALSE").unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn query_propagates_query_for_each_error() {
+    let mut conn = MockConnection {
+        rows: vec![vec![Value::Int64(1)], vec![Value::Int64(2)]],
+        fail_at_row: Some(1),
+    };
+    let err = conn.query("SELECT 1").unwrap_err();
+    assert!(matches!(err, UdfError::ConnectBack(_)));
+}
+
+#[test]
+fn query_for_each_stops_on_callback_error() {
+    let mut conn = MockConnection {
+        rows: vec![
+            vec![Value::Int64(1)],
+            vec![Value::Int64(2)],
+            vec![Value::Int64(3)],
+        ],
+        fail_at_row: None,
+    };
+    let mut seen = Vec::new();
+    let err = conn
+        .query_for_each("SELECT 1", &mut |row| {
+            if let Value::Int64(n) = &row[0] {
+                if *n >= 2 {
+                    return Err(UdfError::User("stop".into()));
+                }
+                seen.push(*n);
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, UdfError::User(_)));
+    assert_eq!(seen, vec![1], "callback must stop after the first error");
+}
+
+#[test]
+fn trait_default_execute_batch_returns_unimplemented() {
+    let mut conn = MockConnection {
+        rows: vec![],
+        fail_at_row: None,
+    };
+    let err = conn
+        .execute_batch("INSERT INTO t VALUES (?)", &[vec![Value::Int64(1)]])
+        .unwrap_err();
+    assert!(matches!(err, UdfError::Unimplemented(_)));
+}
+
+#[test]
+fn trait_default_begin_commit_rollback_return_unimplemented() {
+    let mut conn = MockConnection {
+        rows: vec![],
+        fail_at_row: None,
+    };
+    assert!(matches!(conn.begin(), Err(UdfError::Unimplemented(_))));
+    assert!(matches!(conn.commit(), Err(UdfError::Unimplemented(_))));
+    assert!(matches!(conn.rollback(), Err(UdfError::Unimplemented(_))));
+}
