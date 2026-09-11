@@ -74,6 +74,14 @@ impl ZmqTransport {
     /// fatal — re-encoding the request on each retry, since `Socket::send`
     /// consumes the message. The frame is queued at most once: the first
     /// non-`EAGAIN` return (success or genuine error) ends the loop.
+    ///
+    /// Re-encoding on retry is deliberate: `Socket::send` consumes and frees
+    /// the `Message` on failure, and the zero-copy hand-off to libzmq is worth
+    /// more than a retained buffer. Send-side `EAGAIN` only occurs before the
+    /// peer has connected (the ~100-byte `MT_CLIENT` handshake) or after the
+    /// peer is gone; the REQ pipe's high-water mark counts messages and
+    /// lockstep keeps one in flight, so a large `MT_EMIT` never re-encodes in
+    /// practice.
     pub fn send(&self, req: &ExascriptRequest) -> Result<(), ProtocolError> {
         tracing::debug!(mt = req.r#type, len = req.encoded_len(), "send");
         retry_transient(

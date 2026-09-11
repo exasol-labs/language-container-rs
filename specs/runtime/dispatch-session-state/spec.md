@@ -4,7 +4,7 @@ Specifies the session-scoped state the dispatcher reuses across an input group: 
 
 ## Background
 
-A run phase spans one loaded UDF across many input groups. Reallocating the `EmitBuffer`, the shared `Protocol` cell, and the three boxed closures (emit flusher, batch fetcher) on every group boundary wastes an allocation for a SET/EMITS session that already pays at least four round trips per group. These constructs MUST instead be built once per session and reused, with the buffer reset (capacity retained) at each group boundary.
+A run phase spans one loaded UDF across many input groups. Reallocating the `EmitBuffer` and the shared `Protocol` cell on every group boundary wastes an allocation for a SET/EMITS session that already pays at least four round trips per group. These constructs MUST be built once per session and reused, with the buffer reset (capacity retained) at each group boundary.
 
 The `HostContextBridge` also threads handshake metadata (the `exascript_info` identity/origin fields, plus the memory limit) in at construction, once per session, so the bridge can override the SDK's defaulted accessors with live values for the whole session rather than re-deriving them per group.
 
@@ -14,7 +14,8 @@ The `HostContextBridge` also threads handshake metadata (the `exascript_info` id
 
 * *GIVEN* a run phase that processes more than one input group over one loaded UDF, where a SET/EMITS session of many small groups pays at least four round trips per group
 * *WHEN* the runtime opens each group
-* *THEN* the runtime MUST construct the `EmitBuffer`, the shared `Protocol` cell, the emit flusher closure and the batch fetcher closure once per session and reuse them across every group, instead of allocating a buffer, a cell and three boxed closures per group
+* *THEN* the runtime MUST construct the `EmitBuffer` and the shared `Protocol` cell once per session and reuse them across every group, instead of allocating a buffer and a cell per group
+* *AND* the emit flusher, batch fetcher, and connection requester closures MAY be rebuilt per group; they hold only references into the session-scoped wire state and cost a few small allocations each
 * *AND* at each group boundary it MUST reset the buffer through the capacity-retaining reset, so a session of many small groups pays the row-vector allocation once
 * *AND* on the first `MT_NEXT` of a SET group it MUST reserve emit-buffer row capacity from that batch's `rows_in_group`
 * *AND* it MUST cap that reservation at a constant row ceiling
