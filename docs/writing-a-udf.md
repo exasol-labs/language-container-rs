@@ -354,7 +354,7 @@ use exasol_udf_sdk::value::Value;
 pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let k = ctx.get_i64(0)?.unwrap_or(0);
     for i in 0..k {
-        ctx.emit(&[Value::Int64(i)])?;
+        ctx.emit(vec![Value::Int64(i)])?;
     }
     Ok(())
 }
@@ -389,13 +389,13 @@ use exasol_udf_sdk::value::{Decimal, Value};
 pub fn set_filter(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
         match ctx.get(0)? {
-            Value::Int64(n) if *n > 0 => ctx.emit(&[Value::Int64(*n)])?,
+            Value::Int64(n) if *n > 0 => ctx.emit(vec![Value::Int64(*n)])?,
             // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
             Value::Numeric(d) if d.scale == 0 => {
                 let n = i64::try_from(d.unscaled)
                     .map_err(|_| UdfError::Type(format!("cannot convert {} to i64", d)))?;
                 if n > 0 {
-                    ctx.emit(&[Value::Numeric(Decimal {
+                    ctx.emit(vec![Value::Numeric(Decimal {
                         unscaled: n as i128,
                         scale: 0,
                     })])?;
@@ -615,7 +615,7 @@ pub fn compute_and_store(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
     // BIGINT output column → emit as Numeric.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric(Decimal::from(1_i64))])?;
+        ctx.emit(vec![Value::Numeric(Decimal::from(1_i64))])?;
     }
     Ok(())
 }
