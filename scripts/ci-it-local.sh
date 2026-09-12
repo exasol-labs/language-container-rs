@@ -74,7 +74,7 @@ else
 fi
 export SLC_TARBALL="${SLC_TARBALL:-$SLC_DIR/lc-rs.tar.gz}"
 
-# 2. Build the UDF .so artifacts (release) — same set as the build job --------
+# 2. Build the UDF .so artifacts (release) — keep in step with the CI build job
 log "Build UDF .so artifacts (cargo build --release)"
 cargo build --release \
   -p scalar-double \
@@ -93,6 +93,10 @@ cargo build --release \
   -p timestamp-add-second \
   -p timestamp-now \
   -p timestamp-passthrough \
+  -p numeric-temporal-emit \
+  -p numeric-temporal-ingest \
+  -p handshake-meta \
+  -p current-user-meta \
   -p annotated-fixture \
   -p set-sum \
   -p emit-k \
