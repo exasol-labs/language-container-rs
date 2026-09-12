@@ -263,6 +263,8 @@ A UDF's dispatch shape is a product of two independent axes: how many input rows
 | **SCALAR** — `run()` once per input row | §7 `scalar_double` | §9 `emit_k` |
 | **SET** — `run()` once per input group; `ctx.next()` walks rows across batches | §8 `set_sum` | §10 `set_filter` |
 
+A script registered with dynamic output columns — a literal `EMITS (...)` in `CREATE SCRIPT` — must name them at the call site, as in `SELECT emit_k(k) EMITS (idx BIGINT) FROM t`. The macro publishes no default output columns, so the database rejects a call that omits the clause.
+
 `Ok(Some(v))` sets the RETURNS value for this invocation; `Ok(None)` maps to SQL `NULL`. Calling `ctx.emit` in RETURNS output returns `Err` — the return value is the only output channel. Calling `ctx.next()` in SCALAR input returns `Err` — the framework has already loaded the single row before `run()` starts.
 
 ## 7. Scalar RETURNS example

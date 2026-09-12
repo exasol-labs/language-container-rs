@@ -1234,12 +1234,13 @@ async fn single_call_default_output_columns_roundtrip(
 /// `MT_UNDEFINED_CALL` and must accept the DB's echo of it: the query then
 /// fails with the DB's own diagnostic instead of a container protocol error.
 /// The call with an explicit EMITS clause proves the script itself is sound.
+/// The DB's wording is not asserted — it varies across the version matrix.
 async fn dynamic_emits_without_columns_surfaces_db_error(
     conn: &mut Connection,
     udf_object: &str,
 ) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k_dyn(k BIGINT) EMITS (...) AS\n\
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -1247,16 +1248,16 @@ async fn dynamic_emits_without_columns_surfaces_db_error(
     let got = query_single_string(
         conn,
         "SELECT GROUP_CONCAT(TO_CHAR(idx) ORDER BY idx) \
-         FROM (SELECT emit_k_dyn(2) EMITS (idx BIGINT) FROM DUAL)",
+         FROM (SELECT emit_k(2) EMITS (idx BIGINT) FROM DUAL)",
     )
     .await?;
     if got.as_deref() != Some("0,1") {
-        bail!("emit_k_dyn with an explicit EMITS clause produced {got:?}, expected \"0,1\"");
+        bail!("emit_k with an explicit EMITS clause produced {got:?}, expected \"0,1\"");
     }
 
-    match conn.query("SELECT emit_k_dyn(2) FROM DUAL").await {
+    match conn.query("SELECT emit_k(2) FROM DUAL").await {
         Ok(_) => {
-            bail!("emit_k_dyn without an EMITS clause succeeded; expected the DB to reject it")
+            bail!("emit_k without an EMITS clause succeeded; expected the DB to reject it")
         }
         Err(e) => {
             let msg = e.to_string();
