@@ -408,7 +408,7 @@ fn emit_flush_path_instrumented() {
 
     tracing::subscriber::with_default(sub, || {
         let mut emit = EmitBuffer::new();
-        emit.push(vec![Value::Int64(1)]);
+        emit.push(vec![Value::Int64(1)], 0);
     });
 
     let output = {

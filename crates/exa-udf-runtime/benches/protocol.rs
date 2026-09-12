@@ -181,6 +181,10 @@ impl<'a> Group<'a> {
                         cell.counters.over_limit, 0,
                         "{name}: MT_EMIT messages over 4,000,000 bytes"
                     );
+                    assert_eq!(
+                        cell.counters.with_row_number, cell.counters.messages,
+                        "{name}: MT_EMIT messages without a row_number per row"
+                    );
                     report.retain(|(n, _, _)| n != name);
                     report.push((name.to_string(), cell.counters.clone(), iters));
                     total
@@ -189,26 +193,18 @@ impl<'a> Group<'a> {
         cell.close();
     }
 
-    fn finish(self) -> Vec<(String, EmitCounters, u64)> {
+    fn finish(self) {
         self.inner.finish();
         if !self.report.is_empty() {
             println!("\n[{}] MT_EMIT per iteration", self.name);
             println!(
-                "{:<38} {:>8} {:>10} {:>14} {:>10} {:>12} {:>12} {:>10} {:>10}",
-                "cell",
-                "msgs",
-                "rows",
-                "bytes",
-                "bytes/row",
-                "mean_bytes",
-                "max_bytes",
-                ">4000000",
-                "row_number"
+                "{:<38} {:>8} {:>10} {:>14} {:>10} {:>12} {:>12} {:>10}",
+                "cell", "msgs", "rows", "bytes", "bytes/row", "mean_bytes", "max_bytes", ">4000000"
             );
             for (name, c, iters) in &self.report {
                 let it = (*iters).max(1) as f64;
                 println!(
-                    "{:<38} {:>8.1} {:>10.0} {:>14.0} {:>10.1} {:>12.0} {:>12} {:>10.1} {:>10}",
+                    "{:<38} {:>8.1} {:>10.0} {:>14.0} {:>10.1} {:>12.0} {:>12} {:>10.1}",
                     name,
                     c.messages as f64 / it,
                     c.rows as f64 / it,
@@ -217,12 +213,10 @@ impl<'a> Group<'a> {
                     c.mean_bytes(),
                     c.max_bytes,
                     c.over_limit as f64 / it,
-                    if c.with_row_number > 0 { "yes" } else { "no" },
                 );
             }
             println!();
         }
-        self.report
     }
 }
 
@@ -326,13 +320,7 @@ fn scalar_emits_passthrough(c: &mut Criterion) {
         "native",
         Cell::open("PT_NATIVE", meta, input, expected, expected),
     );
-    let report = g.finish();
-    if report.iter().all(|(_, c, _)| c.with_row_number == 0) {
-        eprintln!(
-            "warning: pass-through MT_EMIT messages carry no row_number; the database \
-             cannot place emitted rows beside their input rows"
-        );
-    }
+    g.finish();
 }
 
 fn set_returns(c: &mut Criterion) {

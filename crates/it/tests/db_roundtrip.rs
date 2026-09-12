@@ -328,6 +328,8 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario set_sum_multi_group_by ok");
     emit_k_scalar_emits_zero_one_many(&mut conn, &emit_k_path).await?;
     eprintln!("[it] scenario emit_k_scalar_emits_zero_one_many ok");
+    emit_k_passthrough_pairs_emitted_rows_with_input(&mut conn, &emit_k_path).await?;
+    eprintln!("[it] scenario emit_k_passthrough_pairs_emitted_rows_with_input ok");
     scalar_next_illegal_fails_with_prefixed_error(&mut conn, &scalar_next_illegal_path).await?;
     eprintln!("[it] scenario scalar_next_illegal_fails_with_prefixed_error ok");
     returns_channel_value_null_and_emit_ban(&mut conn, &scalar_path, &returns_with_emit_path)
@@ -2081,6 +2083,40 @@ async fn emit_k_scalar_emits_zero_one_many(conn: &mut Connection, udf_object: &s
         bail!(
             "emit_k over inputs {{0,1,3}} produced {got:?}, expected \
              \"4:0,0,1,2\" (0 rows for k=0, 1 for k=1, 3 for k=3)"
+        );
+    }
+    Ok(())
+}
+
+/// Scenario 9.5b: a SCALAR EMITS UDF in a select list beside a pass-through
+/// column. The engine tunnels `id` through the UDF and re-attaches it to each
+/// emitted row using the `row_number` the client echoes in `MT_EMIT`, so this
+/// fails (wrong values or a closed session) if the echo is missing.
+async fn emit_k_passthrough_pairs_emitted_rows_with_input(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) EMITS (idx BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.emit_k_pt (id BIGINT, k BIGINT)")
+        .await?;
+    conn.execute("INSERT INTO it_rust.emit_k_pt VALUES (1,2),(2,0),(3,3)")
+        .await?;
+
+    let got = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(TO_CHAR(id) || ':' || TO_CHAR(idx) ORDER BY id, idx) \
+         FROM (SELECT id, emit_k(k) AS idx FROM it_rust.emit_k_pt)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("emit_k pass-through query returned NULL"))?;
+    if got != "1:0,1:1,3:0,3:1,3:2" {
+        bail!(
+            "emit_k pass-through produced {got:?}, expected \"1:0,1:1,3:0,3:1,3:2\" \
+             (each emitted row keeps the id of the input row it came from)"
         );
     }
     Ok(())

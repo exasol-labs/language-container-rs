@@ -6,6 +6,8 @@ Packs and unpacks UDF row values against the wire's row-major proto type blocks 
 
 The rowset codec (`InputRowSet`/`EmitBuffer`) packs output values by declared column `ExaType` rather than by runtime `Value` variant. The decode path parses TIMESTAMP via `%.f` (0..9 fractional digits, lossless), but the emit path historically hardcoded exactly 6 fractional digits (`%.6f`) — capping `TIMESTAMP(7/8/9)` columns at microseconds. The Exasol engine truncates an emitted timestamp to the output column's declared precision on receipt (`SWIGResultHandler::setTimestamp` parses `YYYY-MM-DD HH24:MI:SS.FF9` and applies `trunc_to_fractional_seconds_precision(value, m_types[col].prec)`, verified in `../db/Engine/src/exscript/pluggable/swigcontainers_int.h:1064-1082` and `zmqcontainer.cc:675`). Therefore emitting MORE fractional digits than the column declares is safe (the engine truncates); emitting FEWER loses precision. This delta makes the emit always carry the full available nanosecond precision (`%.9f`) so the engine's own truncation yields the exact declared precision — the SLC does not truncate client-side and does not need the output column metadata threaded into the encoder. This concerns the **emit/output** path only; it lets UDF-*generated* sub-microsecond values (wall-clock, connect-back data) reach an output column at up to nanosecond precision. It does NOT widen UDF *input*: the engine delivers every input column at microsecond precision (`SWIGTableData::getTimestamp` formats `...FF6`, `swigcontainers_int.h:779-781`), so an input→output round-trip through a UDF is capped at microseconds regardless of this emit format.
 
+`ExascriptTableData.row_number` ("Local row numbers", field 9) numbers the rows of a batch. The engine numbers every input row and pairs an emitted row with its input row by that number: a select-list column the query did not emit but tunnels through the UDF (`SELECT id, f(x) FROM t`) is filled from the input row the emitted row names. The reference C++ SLC therefore adds the current input row's number to every emitted row. Emitting with an empty `row_number` makes the engine read past the list: observed as wrong pass-through values or a closed SQL session. The codec carries the number through: `InputRowSet` keeps the batch's list and `EmitBuffer` records one entry per buffered row.
+
 The exact wire-format strings the Exasol engine parses are fixed contracts: `DATE_FORMAT = "%Y-%m-%d"`, `TIMESTAMP_EMIT = "%Y-%m-%d %H:%M:%S%.9f"` (full nanosecond precision, engine-truncated to the declared column precision), and fixed-point decimal via `Decimal`'s `Display`. Any performance optimisation of the formatting/parsing path — whether a hand-rolled fast formatter or a fast decimal/date parser — must leave those wire bytes and the `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`) flush semantics unchanged.
 
 ## Scenarios
@@ -25,6 +27,13 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *THEN* it MUST reconstruct the original row/column values by advancing per-type cursors only for non-null cells
 * *AND* the decoded rows MUST match the values that were emitted, preserving column types according to the declared metadata
 
+### Scenario: Emitted rows echo the row number of the input row they came from
+
+* *GIVEN* an `InputRowSet` decoded from an input batch whose `row_number` list numbers each row, and a UDF emitting zero, one, or several output rows per input row
+* *WHEN* the bridge buffers the emitted rows and `EmitBuffer::to_proto` serialises them
+* *THEN* the emitted table's `row_number` MUST hold one entry per emitted row, each naming the input row the cursor sat on when that row was emitted
+* *AND* an input batch that arrives without a `row_number` list MUST fall back to batch-local indices, so an emitted row always names an input row
+
 ### Scenario: A single emitted row larger than the flush threshold is sent on its own
 
 * *GIVEN* a loaded set UDF whose single emitted row carries a value whose serialized size alone exceeds `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000` bytes)
@@ -37,8 +46,8 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 
 * *GIVEN* a fresh `EmitBuffer`
 * *WHEN* rows are appended via `push`
-* *THEN* `push` MUST increase a `byte_estimate` field by an approximation of the wire size of the pushed values (summing per-value byte costs), and `should_flush` MUST return true exactly when `byte_estimate` is greater than or equal to `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`)
-* *AND* `clear` MUST reset both the row vector and the `byte_estimate` to zero so a flushed buffer starts a fresh accounting cycle
+* *THEN* `push` MUST increase a `byte_estimate` field by an approximation of the wire size of the pushed values (summing per-value byte costs plus the row's `row_number` entry), and `should_flush` MUST return true exactly when `byte_estimate` is greater than or equal to `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`)
+* *AND* `clear` MUST reset the row vector, the recorded row numbers and the `byte_estimate` so a flushed buffer starts a fresh accounting cycle
 * *AND* the byte estimate MUST be a monotonic non-negative running total computed without re-serializing the whole buffer on every `push`, so emit cost stays linear in the number of rows
 
 ### Scenario: EmitBuffer emits timestamps at full nanosecond precision

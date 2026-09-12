@@ -82,10 +82,10 @@ impl Class {
     // Tier 1's `bytes/row` counter column; update together with a generator or the encoder.
     fn wire_bytes_per_row(self) -> Option<f64> {
         Some(match self {
-            Class::Native => 12.9,
-            Class::Strblock => 60.6,
-            Class::Varchar => 56.9,
-            Class::Wide => 472.2,
+            Class::Native => 13.9,
+            Class::Strblock => 61.6,
+            Class::Varchar => 57.9,
+            Class::Wide => 473.2,
         })
     }
 }
@@ -376,8 +376,8 @@ pub fn cells(n: u64) -> Vec<CellSpec> {
             );
         }
     }
-    // Last: without row_number echo this query closes the SQL session; the reconnect must not
-    // disturb any other cell.
+    // Last: a missing row_number echo closes the SQL session on this query; the reconnect must
+    // not disturb any other cell.
     let per_row = (n / SMALL_ROWS).max(1);
     let mut pt = CellSpec::new(
         "scalar_emits_pt".into(),

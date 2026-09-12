@@ -16,8 +16,11 @@ fn null_index(row: usize, col: usize, n_cols: usize) -> usize {
 ///
 /// Stored as a dense `rows[row][col]` matrix of `Value` for simplicity and
 /// correctness; the per-type proto blocks are decoded once on construction.
+/// `row_numbers` holds the DB's local row number per row; emitted rows echo it
+/// so the engine can place them beside their input row.
 pub struct InputRowSet {
     rows: Vec<Vec<Value>>,
+    row_numbers: Vec<u64>,
     current_row: usize,
 }
 
@@ -103,8 +106,17 @@ impl InputRowSet {
             rows.push(row);
         }
 
+        // A batch that carries no (or a short) `row_number` list falls back to
+        // batch-local indices so the emit side always has a number to echo.
+        let row_numbers = if table.row_number.len() >= n_rows {
+            table.row_number[..n_rows].to_vec()
+        } else {
+            (0..n_rows as u64).collect()
+        };
+
         InputRowSet {
             rows,
+            row_numbers,
             current_row: 0,
         }
     }
@@ -131,6 +143,14 @@ impl InputRowSet {
         &self.rows[self.current_row]
     }
 
+    /// The DB's local row number for the row the cursor sits on.
+    pub fn current_row_number(&self) -> u64 {
+        self.row_numbers
+            .get(self.current_row)
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn row(&self, idx: usize) -> Option<&[Value]> {
         self.rows.get(idx).map(|r| r.as_slice())
     }
@@ -149,6 +169,9 @@ const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
 const BYTES_DATE: usize = 10;
 const BYTES_TIMESTAMP: usize = 29;
+/// Per-row cost of the `row_number` entry every emitted row carries (a packed
+/// uint64 varint, at most 10 bytes).
+const BYTES_ROW_NUMBER: usize = 10;
 /// Fixed portion of a NUMERIC cell's cost; callers add `scale` digits on top.
 /// O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign, which also
 /// dominates the scale-padded form. Over-counts → flushes early.
@@ -211,6 +234,8 @@ fn current_debug_level() -> tracing::Level {
 #[derive(Default)]
 pub struct EmitBuffer {
     rows: Vec<Vec<Value>>,
+    /// Local row number of the input row each buffered output row came from.
+    row_numbers: Vec<u64>,
     /// Running approximate serialised size of the buffered rows. Incremented in
     /// `push`, reset in `clear`; read by `should_flush`.
     byte_estimate: usize,
@@ -232,8 +257,8 @@ impl EmitBuffer {
     // checkpoint lines — noisy but bearable at debug level.
     const TELEMETRY_ROW_CHECKPOINT: u64 = 10_000;
 
-    pub fn push(&mut self, values: Vec<Value>) {
-        let row_cost = values.iter().map(value_byte_cost).sum::<usize>();
+    pub fn push(&mut self, values: Vec<Value>, row_number: u64) {
+        let row_cost = BYTES_ROW_NUMBER + values.iter().map(value_byte_cost).sum::<usize>();
         self.byte_estimate += row_cost;
         self.cumulative_bytes += row_cost;
         self.cumulative_rows += 1;
@@ -254,6 +279,7 @@ impl EmitBuffer {
             self.record_flush_telemetry();
         }
         self.rows.push(values);
+        self.row_numbers.push(row_number);
     }
 
     /// Whether the buffered rows have reached the byte threshold and should be
@@ -362,13 +388,14 @@ impl EmitBuffer {
             data_int32,
             data_int64,
             data_double,
-            row_number: vec![],
+            row_number: self.row_numbers.clone(),
         }
     }
 
     pub fn clear(&mut self) {
         self.flush_count += 1;
         self.rows.clear();
+        self.row_numbers.clear();
         self.byte_estimate = 0;
     }
 
@@ -419,11 +446,15 @@ impl EmitBuffer {
     ///    column) preserving the row-major-interleaved dense layout `to_proto`
     ///    produces, and call `flush`.
     /// 5. Materialise the trailing <4 MB remainder into `self` via `push()`.
+    ///
+    /// Every row of the batch belongs to the input row being processed, so all
+    /// of them carry `row_number`.
     #[cfg(feature = "emit-arrow")]
     pub fn push_batch(
         &mut self,
         batch: &arrow::record_batch::RecordBatch,
         meta: &[ColumnMeta],
+        row_number: u64,
         flush: &mut dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError>,
     ) -> Result<(), UdfError> {
         // Step 1: flush any pending Value rows so we start from an empty buffer.
@@ -452,12 +483,12 @@ impl EmitBuffer {
         let mut slice_start: usize = 0;
 
         for (r, &row_cost) in row_costs.iter().enumerate() {
-            running += row_cost;
+            running += row_cost + BYTES_ROW_NUMBER;
             if running >= EMIT_BUFFER_LIMIT_BYTES {
                 // Flush [slice_start, r+1).
                 let slice_len = r + 1 - slice_start;
                 let slice = batch.slice(slice_start, slice_len);
-                let table = encode_slice(&slice, meta)?;
+                let table = encode_slice(&slice, meta, row_number)?;
                 flush(table)?;
                 slice_start = r + 1;
                 running = 0;
@@ -471,7 +502,7 @@ impl EmitBuffer {
             // Convert the tail to Value rows and push into the buffer.
             let tail_rows = arrow_batch_to_value_rows(&tail, meta)?;
             for row in tail_rows {
-                self.push(row);
+                self.push(row, row_number);
             }
         }
 
@@ -792,6 +823,7 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
 fn encode_slice(
     batch: &arrow::record_batch::RecordBatch,
     meta: &[ColumnMeta],
+    row_number: u64,
 ) -> Result<exa_proto::ExascriptTableData, UdfError> {
     use arrow::array::Array;
 
@@ -883,7 +915,7 @@ fn encode_slice(
         data_int32,
         data_int64,
         data_double,
-        row_number: vec![],
+        row_number: vec![row_number; n_rows],
     })
 }
 
@@ -1544,7 +1576,7 @@ impl<'a> HostContextBridge<'a> {
     /// buffering and flush contract; the trailing rows are flushed by the
     /// dispatcher before the group's `MT_DONE`.
     fn push_output_row(&mut self, row: Vec<Value>) -> Result<(), UdfError> {
-        self.emit_buf.push(row);
+        self.emit_buf.push(row, self.input.current_row_number());
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
             let table = self.emit_buf.to_proto(self.output_meta);
@@ -1765,6 +1797,7 @@ impl UdfContext for HostContextBridge<'_> {
         }
         // Resolve the disjoint borrow: take references to fields we need
         // separately so the borrow checker sees them as independent borrows.
+        let row_number = self.input.current_row_number();
         let emit_buf = &mut *self.emit_buf;
         let flusher = &mut self.flusher;
         let meta = self.output_meta;
@@ -1774,7 +1807,7 @@ impl UdfContext for HostContextBridge<'_> {
             .map_err(|e| UdfError::Type(format!("emit_batch: IPC reader init: {e}")))?;
         for batch in reader {
             let batch = batch.map_err(|e| UdfError::Type(format!("emit_batch: IPC read: {e}")))?;
-            emit_buf.push_batch(&batch, meta, &mut |table| (flusher)(table))?;
+            emit_buf.push_batch(&batch, meta, row_number, &mut |table| (flusher)(table))?;
         }
         // After push_batch returns, at most one <4 MB tail is buffered.
         // Apply the same should_flush check as emit() so a tail that itself
