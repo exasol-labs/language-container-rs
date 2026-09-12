@@ -194,7 +194,7 @@ async fn time_cell(db: &mut Db, spec: &CellSpec, profile: Profile) -> Result<Cel
                     "incorrect",
                     format!(
                         "server closed the session during the pass-through query \
-                         (the client does not echo row_number): {e}"
+                         (no row_number echoed in MT_EMIT): {e}"
                     ),
                 );
                 return Ok(r);

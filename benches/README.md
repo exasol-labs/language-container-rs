@@ -9,7 +9,7 @@ Both use `benches/bench-udfs` (one cdylib, every entry point) and `benches/bench
 Column classes: `native` (`k DECIMAL(18,0), v DOUBLE`), `strblock` (`k, amount DECIMAL(18,2), d DATE, ts TIMESTAMP`),
 `varchar` (`k, label VARCHAR(100)`), `wide` (24 columns, 12 nullable, emit-only: a SCALAR EMITS UDF expanding one
 input row into millions of wide rows; its batch cells take rows per Arrow batch, 8192 or 65536, as third parameter).
-Wire bytes per row (Tier 1 `bytes/row`): 12.9, 60.6, 56.9, 472.2.
+Wire bytes per row (Tier 1 `bytes/row`): 13.9, 61.6, 57.9, 473.2.
 
 ## Tier 1
 
@@ -32,7 +32,7 @@ budget: native and varchar frames carry the same 2,000 rows at fourfold differen
 Groups: `scalar_returns`, `scalar_emits_gen` (incl. `wide_row`, `wide_batch8k`, `wide_batch64k`),
 `scalar_emits_passthrough`, `set_returns` and `set_emits` (1 and 1,000 groups). After each group a counter table
 prints `MT_EMIT` messages, rows, bytes, `bytes/row`, `max_bytes` and the count over 4,000,000 bytes, which must be 0
-and is asserted.
+and is asserted, as is one `row_number` per emitted row.
 
 ## Tier 2
 
@@ -56,8 +56,8 @@ Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`, `EXA_DB_MEM_SIZE`, defau
 
 Cells: `control_<class>`, `scalar_returns_<class>`, `scalar_emits_gen_<class>_<mode>[_noemit]`, `scalar_emits_pt`,
 `set_returns_<class>_g<G>`, `set_emits_<class>_<mode>_g<G>`, `set_gen_<class>_<mode>`. Every query returns one row and
-aggregates a UDF output column. `scalar_emits_pt` reports `incorrect` while emitted rows do not land beside their
-input rows. The DB feeds DATE/TIMESTAMP columns into a UDF at 3k to 7k rows/s on 2026.1.1 (builtin Python3 is
+aggregates a UDF output column. `scalar_emits_pt` reports `incorrect` if an emitted row does not land beside its
+input row. The DB feeds DATE/TIMESTAMP columns into a UDF at 3k to 7k rows/s on 2026.1.1 (builtin Python3 is
 equally slow), so the strblock table is `n / 100` rows and those cells' `x_ctrl` is not comparable to native.
 Wide cells emit `n / 4` rows; generator cells report `MB_per_s` from `WIRE_BYTES_PER_ROW` in `cells.rs`, which
 must follow the Tier 1 `bytes/row` when a generator or the encoder changes.

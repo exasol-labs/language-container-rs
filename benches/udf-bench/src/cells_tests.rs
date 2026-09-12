@@ -110,7 +110,7 @@ fn generator_cells_noemit_twins_and_wide_batch_rows() {
     let yes = by(&c, "scalar_emits_gen_native_batch");
     assert!(yes.sql.contains("bench.gen_native_batch(250000, 1)"));
     assert_eq!(yes.expect_count, Some(250_000));
-    assert_eq!(yes.wire_bytes_per_row, Some(12.9));
+    assert_eq!(yes.wire_bytes_per_row, Some(13.9));
 
     let wide: Vec<&CellSpec> = c.iter().filter(|x| x.class == Some("wide")).collect();
     assert_eq!(wide.len(), 7);

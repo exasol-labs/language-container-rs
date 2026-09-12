@@ -69,10 +69,19 @@ fn scalar_double_runs_one_emit_per_cycle() {
     assert_eq!(counters.messages, 2, "one tail MT_EMIT per non-empty cycle");
     assert_eq!(counters.rows, 6);
     assert_eq!(
-        counters.with_row_number, 0,
-        "the client does not echo row_number"
+        counters.with_row_number, 2,
+        "every MT_EMIT echoes one row_number per row"
     );
     assert_eq!(collector.int64_cells(), vec![20, 22, 24, 26, 28, 30]);
+    assert_eq!(
+        collector
+            .tables
+            .iter()
+            .flat_map(|t| t.row_number.iter().copied())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5],
+        "each output row carries the row number of the input row it came from"
+    );
 }
 
 #[test]

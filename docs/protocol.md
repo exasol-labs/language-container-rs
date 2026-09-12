@@ -81,6 +81,10 @@ client → MT_RUN
 A `MT_PING_PONG` may arrive at any point and is echoed transparently while the
 REQ socket stays in lock-step.
 
+Each emitted row carries, in `row_number`, the number of the input row it was
+emitted for. The engine uses it to re-attach the select-list columns it tunnels
+through the UDF instead of emitting, as in `SELECT id, f(x) FROM t`.
+
 **3. Cleanup.** When the DB answers an `MT_RUN` with `MT_CLEANUP`, the client
 replies `MT_FINISHED`; the DB echoes `MT_FINISHED` and the session ends. On a
 UDF error the client sends `MT_CLOSE` carrying an `F-UDF-CL-RUST-####` message.

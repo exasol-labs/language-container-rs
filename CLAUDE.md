@@ -43,6 +43,7 @@ Project mission in: @specs/mission.md
 ## Emit buffering and wire limits
 
 - `MT_EMIT` messages have a wire limit of **exactly 4,000,000 bytes** — `EMIT_BUFFER_LIMIT_BYTES = 4_000_000`, matching the reference C++ SLC's `SWIG_MAX_VAR_DATASIZE = 4_000_000`. This is 4 *million* bytes, NOT 4 MiB (4,194,304). The C++ launcher flushes after every row that crosses it.
+- Every emitted row carries the `row_number` of the input row it came from; the engine needs it to place pass-through select-list columns (`SELECT id, f(x) FROM t`). An `MT_EMIT` without it makes the DB read out of range and closes the session.
 - `ctx.emit` must **not** send a message per call. Buffer rows and flush to `MT_EMIT` only when the byte estimate reaches 4,000,000 bytes.
 - **Always flush at end of `run()`** — even if the threshold was not reached. The architect rule: "beim buffern ist auch wichtig, das man flushed, wenn die Run Methode durch ist".
 - A single row can be up to 2 GB — this limit cannot be avoided. A row that alone exceeds the 4,000,000-byte threshold must still be sent as a single-row `MT_EMIT` (no way to split it).
@@ -79,8 +80,8 @@ Project mission in: @specs/mission.md
 - Tier 1 A/B is Criterion `--save-baseline` / `--baseline`; Tier 2 A/B is `udf-bench compare` over alternating runs. Deltas inside the band (8 % full, 15 % quick) or with an interval crossing zero are no change.
 - A Tier 2 query returns one row and aggregates a UDF output column, so nothing streams to the client and the optimizer cannot skip the call.
 - `bench-udfs` is an optional dependency of `exa-udf-runtime` behind the `bench` feature, never a dev-dependency (it needs `emit-arrow`, which would unify into every test build).
-- CI runs only the Tier 1 smoke; it asserts row counts and zero `MT_EMIT` messages over 4,000,000 bytes.
-- `scalar_emits_pt` reports `incorrect` until emitted rows land beside their input rows; do not relax the gate.
+- CI runs only the Tier 1 smoke; it asserts row counts, a `row_number` per emitted row, and zero `MT_EMIT` messages over 4,000,000 bytes.
+- `scalar_emits_pt` gates that emitted rows land beside their input rows; do not relax it.
 - Describe engine behaviour observably; cite only the protobuf definition, the reference C++ SLC and measurements.
 
 ## Misc
