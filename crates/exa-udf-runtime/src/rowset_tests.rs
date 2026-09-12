@@ -256,7 +256,7 @@ fn bridge_materializes_input_rows() {
 /// allocator/growth strategy is explicitly unspecified), so asserting an
 /// exact `capacity()` here would be a flaky test rather than a real
 /// regression guard; the pre-sizing's throughput benefit is verified by
-/// `benches/emit-bench`, not by inspecting internal `Vec` capacity.
+/// the benchmark suite in `benches/`, not by inspecting internal `Vec` capacity.
 #[test]
 fn to_proto_presizes_string_block_capacity() {
     let meta = vec![col("a", ExaType::String { size: None })];
@@ -2031,7 +2031,7 @@ mod arrow_tests {
     /// contents are correct — `Vec::capacity()` is only guaranteed to be
     /// *at least* the requested value, so asserting an exact capacity here
     /// would be a flaky test rather than a real regression guard; the
-    /// pre-sizing's throughput benefit is verified by `benches/emit-bench`.
+    /// pre-sizing's throughput benefit is verified by the benchmark suite in `benches/`.
     #[test]
     fn encode_slice_presizes_string_block_capacity() {
         let meta = vec![col("b", ExaType::String { size: None })];

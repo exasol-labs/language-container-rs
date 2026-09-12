@@ -1,0 +1,9 @@
+[package]
+name = "bench-schema"
+publish = false
+version = "0.1.0"
+license.workspace = true
+edition = "2024"
+description = "Column schema shared by the benchmark UDF, the mock engine and the Tier 2 driver."
+
+[dependencies]

@@ -1,0 +1,24 @@
+[package]
+name = "udf-bench"
+publish = false
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Tier 2 end-to-end UDF shape benchmark driver: `run` against an Exasol database, `compare` two result sets."
+
+[[bin]]
+name = "udf-bench"
+path = "src/main.rs"
+
+[dependencies]
+bench-schema = { path = "../bench-schema" }
+it = { path = "../../crates/it", features = ["integration"] }
+exarrow-rs = { workspace = true }
+arrow = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }

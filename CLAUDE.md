@@ -13,7 +13,7 @@ Project mission in: @specs/mission.md
 
 - Pure Cargo workspace (no Bazel); shared deps centralized in `[workspace.dependencies]`.
 - `arrow` must stay pinned to the version `exarrow-rs` uses — one shared copy across the `.so` boundary.
-- Bump `[workspace.package].version` on every change (SemVer); the pinned `exasol-udf-sdk` entry in `[workspace.dependencies]` must track it, and commit the regenerated `Cargo.lock` in the same PR.
+- Bump `[workspace.package].version` (SemVer) only for changes observable by downstream users: runtime behaviour, SDK/macro/CLI API, the container image. Not for tooling, docs, benchmarks or test coverage. The version is part of the ABI fingerprint, so every bump forces downstream UDF rebuilds. The pinned `exasol-udf-sdk` entry in `[workspace.dependencies]` must track it; commit the regenerated `Cargo.lock` in the same PR.
 - A pushed `vX.Y.Z` git tag (matching `Cargo.toml`) triggers the crates.io release; CI publishes in dependency order `exasol-udf-sdk` → `exasol-udf-macros` → `cargo-exasol-udf`, skipping versions already on the index (re-runs are idempotent). The publish is the only irreversible step — review + green CI before tagging.
 
 ## Exasol / tooling
@@ -72,6 +72,21 @@ Project mission in: @specs/mission.md
 
 - `exa-udf-runtime`'s integration tests load `test-udfs/*` cdylibs declared as its `[dev-dependencies]`; that edge is what builds and rebuilds them, and `tests/common/mod.rs` resolves the path (cargo-driven host runs only). A new fixture needs a dev-dependency entry, plus the CI `-p` allowlist if an IT scenario also loads it.
 - `tests/emit_arrow_dlopen.rs` is behind the dev-only `emit-arrow-test` feature, so it runs only under `--features emit-arrow-test` or `--all-features` (what CI's coverage job uses). With any other flag set — including plain `--features emit-arrow` — it silently compiles out instead of failing.
+
+## Benchmarks
+
+- The benchmark suite lives in `benches/` (bench UDF, shared column schema, Tier 2 driver) and `crates/exa-mock-db` (Tier 1 mock engine); `benches/README.md` has the commands.
+- Tier 1 is `cargo bench -p exa-udf-runtime --features bench --bench protocol`; Tier 2 is `cargo run --release -p udf-bench -- run` against a live DB.
+- `quick` is the developer loop, `full` is the evidence; a performance PR quotes both tiers in the `full` profile.
+- Tier 1 A/B is Criterion `--save-baseline` on base and `--baseline` on change; Tier 2 A/B is `udf-bench compare` over alternating runs pooled per side.
+- A Tier 2 query must return at most one row; never stream a result set to the client inside a timed cell.
+- Every Tier 2 aggregate must reference a UDF output column so the optimizer cannot skip the call.
+- `bench-udfs` is an optional dependency of `exa-udf-runtime` behind the `bench` feature, never a plain dev-dependency: it needs `emit-arrow`, which would otherwise unify into every test build.
+- CI runs only the Tier 1 smoke (`BENCH_ROWS=10000 ... -- --test`); no performance gate.
+- Tier 1 must show zero `MT_EMIT` messages over 4,000,000 bytes in every emit cell; a non-zero count is a flush-estimate bug.
+- Treat Tier 2 deltas inside the practical band (8 % full, 15 % quick) or with an interval crossing zero as no change.
+- `scalar_emits_pt` reports `incorrect` until emitted rows land beside their input rows; do not "fix" the gate by relaxing it.
+- Describe engine behaviour observably and cite only the protobuf definition, the reference C++ SLC, and measurements.
 
 ## Misc
 

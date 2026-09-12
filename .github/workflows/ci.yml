@@ -210,6 +210,14 @@ jobs:
           cargo llvm-cov report \
             --lcov --output-path lcov-unit.info
 
+      # Tier 1 protocol benchmark, one iteration per cell against the mock
+      # engine (no database, no timing). Asserts emitted row counts; see
+      # benches/README.md. Real measurements are run on demand, not in CI.
+      - name: Protocol benchmark smoke
+        run: |
+          BENCH_ROWS=10000 cargo bench -p exa-udf-runtime \
+            --features bench --bench protocol -- --test
+
       - name: Upload unit coverage
         if: always()
         uses: actions/upload-artifact@v4

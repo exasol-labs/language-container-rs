@@ -1,0 +1,19 @@
+[package]
+name = "exa-mock-db"
+publish = false
+version.workspace = true
+license.workspace = true
+edition = "2024"
+description = "Mock Exasol engine for the wire protocol: a REP peer that drives a UDF client through handshake and run cycles, with pre-encoded input frames and MT_EMIT counters. Dev-only."
+
+[dependencies]
+bench-schema = { path = "../../benches/bench-schema" }
+exa-proto = { path = "../exa-proto" }
+prost = { workspace = true }
+zmq = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+exa-udf-runtime = { path = "../exa-udf-runtime" }
+scalar-double = { path = "../../test-udfs/scalar-double" }
+set-sum = { path = "../../test-udfs/set-sum" }
