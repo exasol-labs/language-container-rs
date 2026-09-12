@@ -1,24 +1,27 @@
-//! The Tier 2 matrix: column classes, `CREATE SCRIPT` statements, source
-//! tables and one SQL statement per cell. Every cell query returns at most one
-//! row, and every aggregate references a UDF output column so the optimizer
-//! cannot skip the call.
+//! The Tier 2 matrix: classes, scripts, source tables and one single-row query per cell;
+//! every aggregate references a UDF output column so the optimizer cannot skip the call.
 
 use bench_schema::{WIDE_BATCH_ROWS, wide_ddl};
 
-/// Column class as in `bench-udfs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
     Native,
     Strblock,
     Varchar,
-    /// 24 columns, emit-only: no source table, generator cells only.
     Wide,
 }
 
+pub const MODES: [&str; 2] = ["row", "batch"];
+pub const GROUPS: [u64; 2] = [1, 1_000];
+pub const SMALL_ROWS: u64 = 1_000;
+// DATE/TIMESTAMP input reaches a UDF at a few thousand rows/s on docker-db 2026.1.1; at the
+// full n the seven strblock input cells took 25 of a 26-minute quick run measuring the engine.
+pub const STRBLOCK_INPUT_DIVISOR: u64 = 100;
+// A wide row is ~25 native rows on the wire; n / 4 keeps the full run inside its time budget.
+pub const WIDE_GEN_DIVISOR: u64 = 4;
+
 impl Class {
-    /// Classes with a source table (RETURNS, SET and control cells).
     pub const ALL: [Class; 3] = [Class::Native, Class::Strblock, Class::Varchar];
-    /// Classes a generator can emit.
     pub const GEN: [Class; 4] = [Class::Native, Class::Strblock, Class::Varchar, Class::Wide];
 
     pub fn name(self) -> &'static str {
@@ -30,7 +33,6 @@ impl Class {
         }
     }
 
-    /// Column list with types, as it appears in `CREATE SCRIPT`.
     pub fn columns(self) -> String {
         match self {
             Class::Native => "k DECIMAL(18,0), v DOUBLE".into(),
@@ -40,50 +42,12 @@ impl Class {
         }
     }
 
-    /// Generator modes: `(cell suffix, batch_rows parameter)`. The wide batch
-    /// generator takes the rows per record batch as its third parameter.
-    pub fn gen_modes(self) -> Vec<(&'static str, Option<u64>)> {
-        match self {
-            Class::Wide => {
-                let mut v = vec![("row", None)];
-                v.extend(WIDE_BATCH_ROWS.iter().map(|(n, r)| (*n, Some(*r))));
-                v
-            }
-            _ => MODES.iter().map(|m| (*m, None)).collect(),
-        }
-    }
-
-    /// Rows a generator cell of this class emits for a profile of `n` rows.
-    /// A wide row is about 25 times a native row on the wire, so the wide cells
-    /// emit `n / WIDE_GEN_DIVISOR` to keep the run inside its time budget while
-    /// still moving more bytes than any other cell.
-    pub fn gen_rows(self, n: u64) -> u64 {
-        match self {
-            Class::Wide => (n / WIDE_GEN_DIVISOR).max(1),
-            _ => n,
-        }
-    }
-
-    /// Wire bytes per emitted row of this class, from Tier 1's `bytes/row`
-    /// counter column (`cargo bench ... -- scalar_emits_gen`), for the MB/s
-    /// figure of the generator cells. Update when a generator or the encoder
-    /// changes; `None` prints no MB/s.
-    pub fn wire_bytes_per_row(self) -> Option<f64> {
-        match self {
-            Class::Native => WIRE_BYTES_PER_ROW[0],
-            Class::Strblock => WIRE_BYTES_PER_ROW[1],
-            Class::Varchar => WIRE_BYTES_PER_ROW[2],
-            Class::Wide => WIRE_BYTES_PER_ROW[3],
-        }
-    }
-
-    /// Bare column names, for passing a source table's row into a script.
-    pub fn args(self) -> &'static str {
+    fn args(self) -> &'static str {
         match self {
             Class::Native => "k, v",
             Class::Strblock => "k, amount, d, ts",
             Class::Varchar => "k, label",
-            Class::Wide => unreachable!("the wide class has no source table"),
+            Class::Wide => unreachable!("wide has no source table"),
         }
     }
 
@@ -91,146 +55,119 @@ impl Class {
         format!("bench.src_{}", self.name())
     }
 
-    /// Rows in this class's source table for a profile of `n` rows. The
-    /// `strblock` table is `n / STRBLOCK_INPUT_DIVISOR` (never below the largest
-    /// group count, never above `n`): the database feeds DATE and TIMESTAMP
-    /// columns into a UDF at a few thousand rows per second, so the seven cells
-    /// reading that table would otherwise take 25 of a 26-minute `quick` run
-    /// while measuring the engine, not the client.
     pub fn input_rows(self, n: u64) -> u64 {
         match self {
-            Class::Strblock => (n / STRBLOCK_INPUT_DIVISOR)
-                .max(GROUPS.iter().copied().max().unwrap_or(1))
-                .min(n),
-            Class::Native | Class::Varchar | Class::Wide => n,
+            Class::Strblock => (n / STRBLOCK_INPUT_DIVISOR).max(GROUPS[1]).min(n),
+            _ => n,
         }
+    }
+
+    pub fn gen_rows(self, n: u64) -> u64 {
+        match self {
+            Class::Wide => (n / WIDE_GEN_DIVISOR).max(1),
+            _ => n,
+        }
+    }
+
+    /// `(cell suffix, batch_rows)`; the wide batch generator takes batch_rows as its third parameter.
+    fn gen_modes(self) -> Vec<(&'static str, Option<u64>)> {
+        match self {
+            Class::Wide => std::iter::once(("row", None))
+                .chain(WIDE_BATCH_ROWS.iter().map(|&(m, r)| (m, Some(r))))
+                .collect(),
+            _ => MODES.iter().map(|&m| (m, None)).collect(),
+        }
+    }
+
+    // Tier 1's `bytes/row` counter column; update together with a generator or the encoder.
+    fn wire_bytes_per_row(self) -> Option<f64> {
+        Some(match self {
+            Class::Native => 12.9,
+            Class::Strblock => 60.6,
+            Class::Varchar => 56.9,
+            Class::Wide => 472.2,
+        })
     }
 }
 
-pub const MODES: [&str; 2] = ["row", "batch"];
-pub const GROUPS: [u64; 2] = [1, 1_000];
-/// Divisor for the wide generator cells, see [`Class::gen_rows`].
-pub const WIDE_GEN_DIVISOR: u64 = 4;
-/// Measured wire bytes per row for native, strblock, varchar, wide; see
-/// [`Class::wire_bytes_per_row`].
-const WIRE_BYTES_PER_ROW: [Option<f64>; 4] = [Some(12.9), Some(60.6), Some(56.9), Some(472.2)];
-/// Divisor for the `strblock` source table, see [`Class::input_rows`].
-pub const STRBLOCK_INPUT_DIVISOR: u64 = 100;
-/// Rows in `bench.src_small`, the pass-through input.
-pub const SMALL_ROWS: u64 = 1_000;
-
-/// One `CREATE OR REPLACE RUST ... SCRIPT` statement per entry point. With
-/// `debug` the body also carries `%udf_debug_level debug`, for use together
-/// with `SET SESSION SCRIPT OUTPUT ADDRESS`.
 pub fn scripts(udf_object: &str, debug: bool) -> Vec<String> {
-    let mut out = Vec::new();
     let level = if debug {
         "\n%udf_debug_level debug;"
     } else {
         ""
     };
-    let mut push = |kind: &str, name: &str, params: &str, output: &str| {
-        out.push(format!(
+    let script = |kind: &str, name: &str, params: &str, output: &str| {
+        format!(
             "CREATE OR REPLACE RUST {kind} SCRIPT bench.{name}({params}) {output} AS\n\
              %udf_object {udf_object};{level}\n/"
-        ));
+        )
     };
-    let gen_params = "n DECIMAL(18,0), do_emit DECIMAL(18,0)";
+    let params = "n DECIMAL(18,0), do_emit DECIMAL(18,0)";
+    let params_batch = "n DECIMAL(18,0), do_emit DECIMAL(18,0), batch_rows DECIMAL(18,0)";
+    let (native, strblock, varchar) = (
+        Class::Native.columns(),
+        Class::Strblock.columns(),
+        Class::Varchar.columns(),
+    );
+    let wide = format!("EMITS ({})", Class::Wide.columns());
 
-    let gen_params_batch_rows = "n DECIMAL(18,0), do_emit DECIMAL(18,0), batch_rows DECIMAL(18,0)";
-
-    push(
-        "SCALAR",
-        "sr_native",
-        &Class::Native.columns(),
-        "RETURNS DECIMAL(18,0)",
-    );
-    push(
-        "SCALAR",
-        "sr_strblock",
-        &Class::Strblock.columns(),
-        "RETURNS DECIMAL(18,2)",
-    );
-    push(
-        "SCALAR",
-        "sr_varchar",
-        &Class::Varchar.columns(),
-        "RETURNS DECIMAL(18,0)",
-    );
+    let mut out = vec![
+        script("SCALAR", "sr_native", &native, "RETURNS DECIMAL(18,0)"),
+        script("SCALAR", "sr_strblock", &strblock, "RETURNS DECIMAL(18,2)"),
+        script("SCALAR", "sr_varchar", &varchar, "RETURNS DECIMAL(18,0)"),
+    ];
     for class in Class::ALL {
+        let c = class.name();
+        let emits = format!("EMITS ({})", class.columns());
         for mode in MODES {
-            let emits = format!("EMITS ({})", class.columns());
-            push(
-                "SCALAR",
-                &format!("gen_{}_{mode}", class.name()),
-                gen_params,
-                &emits,
-            );
-            push(
+            out.push(script("SCALAR", &format!("gen_{c}_{mode}"), params, &emits));
+            out.push(script("SET", &format!("setgen_{c}_{mode}"), params, &emits));
+            out.push(script(
                 "SET",
-                &format!("setgen_{}_{mode}", class.name()),
-                gen_params,
-                &emits,
-            );
-            push(
-                "SET",
-                &format!("set_emit_{}_{mode}", class.name()),
+                &format!("set_emit_{c}_{mode}"),
                 &class.columns(),
                 &emits,
-            );
+            ));
         }
     }
-    let wide_emits = format!("EMITS ({})", Class::Wide.columns());
-    push("SCALAR", "gen_wide_row", gen_params, &wide_emits);
-    push(
-        "SCALAR",
-        "gen_wide_batch",
-        gen_params_batch_rows,
-        &wide_emits,
-    );
-    push("SET", "setgen_wide_row", gen_params, &wide_emits);
-    push(
-        "SET",
-        "setgen_wide_batch",
-        gen_params_batch_rows,
-        &wide_emits,
-    );
-    push(
-        "SCALAR",
-        "pt_native",
-        "k DECIMAL(18,0), n DECIMAL(18,0)",
-        "EMITS (k_out DECIMAL(18,0))",
-    );
-    push(
-        "SET",
-        "set_sum_native",
-        &Class::Native.columns(),
-        "RETURNS DOUBLE",
-    );
-    push(
-        "SET",
-        "set_sum_strblock",
-        &Class::Strblock.columns(),
-        "RETURNS DECIMAL(36,2)",
-    );
+    out.extend([
+        script("SCALAR", "gen_wide_row", params, &wide),
+        script("SCALAR", "gen_wide_batch", params_batch, &wide),
+        script("SET", "setgen_wide_row", params, &wide),
+        script("SET", "setgen_wide_batch", params_batch, &wide),
+        script(
+            "SCALAR",
+            "pt_native",
+            "k DECIMAL(18,0), n DECIMAL(18,0)",
+            "EMITS (k_out DECIMAL(18,0))",
+        ),
+        script("SET", "set_sum_native", &native, "RETURNS DOUBLE"),
+        script(
+            "SET",
+            "set_sum_strblock",
+            &strblock,
+            "RETURNS DECIMAL(36,2)",
+        ),
+    ]);
     out
 }
 
-/// Entry-point suffix and argument list of a generator call.
 fn gen_call(
+    prefix: &str,
+    class: Class,
     mode: &str,
     rows: u64,
     do_emit: u64,
     batch_rows: Option<u64>,
-) -> (&'static str, String) {
-    match batch_rows {
-        Some(b) => ("batch", format!("{rows}, {do_emit}, {b}")),
-        None if mode == "row" => ("row", format!("{rows}, {do_emit}")),
-        None => ("batch", format!("{rows}, {do_emit}")),
-    }
+) -> String {
+    let entry = if mode == "row" { "row" } else { "batch" };
+    let extra = batch_rows.map(|b| format!(", {b}")).unwrap_or_default();
+    format!(
+        "bench.{prefix}_{}_{entry}({rows}, {do_emit}{extra})",
+        class.name()
+    )
 }
 
-/// Select list producing one row of `class` from an integer column `n`.
 fn row_expr(class: Class) -> &'static str {
     match class {
         Class::Native => "CAST(n AS DECIMAL(18,0)) AS k, CAST(n * 1.5 AS DOUBLE) AS v",
@@ -242,11 +179,10 @@ fn row_expr(class: Class) -> &'static str {
         Class::Varchar => {
             "CAST(n AS DECIMAL(18,0)) AS k, CAST(LPAD(TO_CHAR(n), 50, '0') AS VARCHAR(100)) AS label"
         }
-        Class::Wide => unreachable!("the wide class has no source table"),
+        Class::Wide => unreachable!("wide has no source table"),
     }
 }
 
-/// `CREATE TABLE ... AS SELECT` from a value range, no UDF involved.
 pub fn source_table_range(table: &str, class: Class, rows: u64) -> String {
     format!(
         "CREATE TABLE {table} AS SELECT {} FROM (VALUES BETWEEN 1 AND {rows}) AS t(n)",
@@ -254,8 +190,6 @@ pub fn source_table_range(table: &str, class: Class, rows: u64) -> String {
     )
 }
 
-/// Fallback when the database rejects the range form: create the table with
-/// the class's columns and fill it through the row generator UDF.
 pub fn source_table_fallback(table: &str, class: Class, rows: u64) -> [String; 2] {
     [
         format!("CREATE TABLE {table} ({})", class.columns()),
@@ -266,8 +200,7 @@ pub fn source_table_fallback(table: &str, class: Class, rows: u64) -> [String; 2
     ]
 }
 
-/// One benchmark cell.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CellSpec {
     pub name: String,
     pub shape: &'static str,
@@ -275,195 +208,190 @@ pub struct CellSpec {
     pub mode: Option<&'static str>,
     pub groups: Option<u64>,
     pub sql: String,
-    /// Rows the cell moves through the UDF, for rows per second.
     pub rows: u64,
-    /// Expected value of the first result column, when it is a row count.
+    /// Expected first result column, when it is a row count.
     pub expect_count: Option<u64>,
-    /// Name of the control cell this one is reported as a ratio of.
     pub control: Option<String>,
     /// Second result column counts pass-through mismatches; must be zero.
     pub passthrough: bool,
-    /// Wire bytes per emitted row, for generator cells with a measured figure.
     pub wire_bytes_per_row: Option<f64>,
 }
 
-/// The full matrix for `n` table rows (`scalar_emits_gen` and `set_gen` also
-/// emit `n`; cells reading the `strblock` table use [`Class::input_rows`]).
+impl CellSpec {
+    fn new(name: String, shape: &'static str, class: Class, rows: u64, sql: String) -> Self {
+        CellSpec {
+            name,
+            shape,
+            class: Some(class.name()),
+            rows,
+            sql,
+            ..Default::default()
+        }
+    }
+
+    fn expect(mut self, n: u64) -> Self {
+        self.expect_count = Some(n);
+        self
+    }
+
+    fn mode(mut self, m: &'static str) -> Self {
+        self.mode = Some(m);
+        self
+    }
+
+    fn groups(mut self, g: u64) -> Self {
+        self.groups = Some(g);
+        self
+    }
+
+    fn control(mut self, class: Class) -> Self {
+        self.control = Some(format!("control_{}", class.name()));
+        self
+    }
+
+    fn wire(mut self, bytes: Option<f64>) -> Self {
+        self.wire_bytes_per_row = bytes;
+        self
+    }
+}
+
 pub fn cells(n: u64) -> Vec<CellSpec> {
     let mut v = Vec::new();
-    let cell = |name: String, shape: &'static str, sql: String| CellSpec {
-        name,
-        shape,
-        class: None,
-        mode: None,
-        groups: None,
-        sql,
-        rows: n,
-        expect_count: None,
-        control: None,
-        passthrough: false,
-        wire_bytes_per_row: None,
-    };
-
     for class in Class::ALL {
-        let c = class.name();
-        v.push(CellSpec {
-            class: Some(c),
-            rows: class.input_rows(n),
-            ..cell(
-                format!("control_{c}"),
-                "control",
-                format!("SELECT SUM(k * 2) FROM {}", class.table()),
-            )
-        });
-    }
-
-    for class in Class::ALL {
-        let c = class.name();
-        let rows = class.input_rows(n);
-        v.push(CellSpec {
-            class: Some(c),
+        let (c, rows, t) = (class.name(), class.input_rows(n), class.table());
+        v.push(CellSpec::new(
+            format!("control_{c}"),
+            "control",
+            class,
             rows,
-            expect_count: Some(rows),
-            control: Some(format!("control_{c}")),
-            ..cell(
+            format!("SELECT SUM(k * 2) FROM {t}"),
+        ));
+    }
+    for class in Class::ALL {
+        let (c, rows, t, a) = (
+            class.name(),
+            class.input_rows(n),
+            class.table(),
+            class.args(),
+        );
+        v.push(
+            CellSpec::new(
                 format!("scalar_returns_{c}"),
                 "scalar_returns",
-                format!(
-                    "SELECT COUNT(y), SUM(y) FROM (SELECT bench.sr_{c}({}) AS y FROM {})",
-                    class.args(),
-                    class.table()
-                ),
+                class,
+                rows,
+                format!("SELECT COUNT(y), SUM(y) FROM (SELECT bench.sr_{c}({a}) AS y FROM {t})"),
             )
-        });
+            .expect(rows)
+            .control(class),
+        );
     }
-
     for class in Class::GEN {
-        let c = class.name();
-        let rows = class.gen_rows(n);
+        let (c, rows) = (class.name(), class.gen_rows(n));
         for (mode, batch_rows) in class.gen_modes() {
-            // The large wide batch has no generation-only twin: it builds the
-            // same rows as the small one.
+            // The large wide batch builds the same rows as the small one: no generation-only twin.
             let twins: &[(&str, u64, u64)] = if mode == "batch64k" {
                 &[("", 1, rows)]
             } else {
                 &[("", 1, rows), ("_noemit", 0, 1)]
             };
-            for (suffix, do_emit, expect) in twins {
-                let (entry, args) = gen_call(mode, rows, *do_emit, batch_rows);
-                v.push(CellSpec {
-                    class: Some(c),
-                    mode: Some(mode),
-                    rows,
-                    expect_count: Some(*expect),
-                    wire_bytes_per_row: if *do_emit == 1 {
-                        class.wire_bytes_per_row()
-                    } else {
-                        None
-                    },
-                    ..cell(
+            for &(suffix, do_emit, expect) in twins {
+                let call = gen_call("gen", class, mode, rows, do_emit, batch_rows);
+                v.push(
+                    CellSpec::new(
                         format!("scalar_emits_gen_{c}_{mode}{suffix}"),
                         "scalar_emits_gen",
-                        format!(
-                            "SELECT COUNT(*), MAX(k) FROM (SELECT bench.gen_{c}_{entry}({args}) FROM DUAL)"
-                        ),
+                        class,
+                        rows,
+                        format!("SELECT COUNT(*), MAX(k) FROM (SELECT {call} FROM DUAL)"),
                     )
-                });
+                    .mode(mode)
+                    .expect(expect)
+                    .wire((do_emit == 1).then(|| class.wire_bytes_per_row()).flatten()),
+                );
             }
         }
     }
-
     for class in [Class::Native, Class::Strblock] {
-        let c = class.name();
-        let rows = class.input_rows(n);
+        let (c, rows, t, a) = (
+            class.name(),
+            class.input_rows(n),
+            class.table(),
+            class.args(),
+        );
         for g in GROUPS {
-            v.push(CellSpec {
-                class: Some(c),
-                groups: Some(g),
-                rows,
-                expect_count: Some(g.min(rows)),
-                control: Some(format!("control_{c}")),
-                ..cell(
+            v.push(
+                CellSpec::new(
                     format!("set_returns_{c}_g{g}"),
                     "set_returns",
+                    class,
+                    rows,
                     format!(
-                        "SELECT COUNT(s), SUM(s) FROM (SELECT bench.set_sum_{c}({}) AS s FROM {} GROUP BY MOD(k, {g}))",
-                        class.args(),
-                        class.table()
+                        "SELECT COUNT(s), SUM(s) FROM (SELECT bench.set_sum_{c}({a}) AS s FROM {t} GROUP BY MOD(k, {g}))"
                     ),
                 )
-            });
+                .groups(g)
+                .expect(g.min(rows))
+                .control(class),
+            );
         }
-    }
-
-    for class in [Class::Native, Class::Strblock] {
-        let c = class.name();
-        let rows = class.input_rows(n);
         for mode in MODES {
             for g in GROUPS {
-                v.push(CellSpec {
-                    class: Some(c),
-                    mode: Some(mode),
-                    groups: Some(g),
-                    rows,
-                    expect_count: Some(rows),
-                    control: Some(format!("control_{c}")),
-                    ..cell(
+                v.push(
+                    CellSpec::new(
                         format!("set_emits_{c}_{mode}_g{g}"),
                         "set_emits",
+                        class,
+                        rows,
                         format!(
-                            "SELECT COUNT(*), MAX(k) FROM (SELECT bench.set_emit_{c}_{mode}({}) FROM {} GROUP BY MOD(k, {g}))",
-                            class.args(),
-                            class.table()
+                            "SELECT COUNT(*), MAX(k) FROM (SELECT bench.set_emit_{c}_{mode}({a}) FROM {t} GROUP BY MOD(k, {g}))"
                         ),
                     )
-                });
+                    .mode(mode)
+                    .groups(g)
+                    .expect(rows)
+                    .control(class),
+                );
             }
         }
     }
-
     for class in Class::GEN {
-        let c = class.name();
-        let rows = class.gen_rows(n);
+        let (c, rows) = (class.name(), class.gen_rows(n));
         for (mode, batch_rows) in class.gen_modes() {
             if mode == "batch64k" {
                 continue;
             }
-            let (entry, args) = gen_call(mode, rows, 1, batch_rows);
-            v.push(CellSpec {
-                class: Some(c),
-                mode: Some(mode),
-                rows,
-                expect_count: Some(rows),
-                wire_bytes_per_row: class.wire_bytes_per_row(),
-                ..cell(
+            let call = gen_call("setgen", class, mode, rows, 1, batch_rows);
+            v.push(
+                CellSpec::new(
                     format!("set_gen_{c}_{mode}"),
                     "set_gen",
-                    format!(
-                        "SELECT COUNT(*), MAX(k) FROM (SELECT bench.setgen_{c}_{entry}({args}) FROM DUAL)"
-                    ),
+                    class,
+                    rows,
+                    format!("SELECT COUNT(*), MAX(k) FROM (SELECT {call} FROM DUAL)"),
                 )
-            });
+                .mode(mode)
+                .expect(rows)
+                .wire(class.wire_bytes_per_row()),
+            );
         }
     }
-    // Last: on a client that does not echo `row_number`, this query brings the
-    // SQL session down, and the reconnect must not disturb any other cell.
+    // Last: without row_number echo this query closes the SQL session; the reconnect must not
+    // disturb any other cell.
     let per_row = (n / SMALL_ROWS).max(1);
-    v.push(CellSpec {
-        class: Some("native"),
-        expect_count: Some(per_row * SMALL_ROWS),
-        passthrough: true,
-        rows: per_row * SMALL_ROWS,
-        ..cell(
-            "scalar_emits_pt".into(),
-            "scalar_emits_passthrough",
-            format!(
-                "SELECT COUNT(*), SUM(CASE WHEN k <> k_out THEN 1 ELSE 0 END) \
-                 FROM (SELECT k, bench.pt_native(k, {per_row}) FROM bench.src_small)"
-            ),
-        )
-    });
-
+    let mut pt = CellSpec::new(
+        "scalar_emits_pt".into(),
+        "scalar_emits_passthrough",
+        Class::Native,
+        per_row * SMALL_ROWS,
+        format!(
+            "SELECT COUNT(*), SUM(CASE WHEN k <> k_out THEN 1 ELSE 0 END) \
+             FROM (SELECT k, bench.pt_native(k, {per_row}) FROM bench.src_small)"
+        ),
+    )
+    .expect(per_row * SMALL_ROWS);
+    pt.passthrough = true;
+    v.push(pt);
     v
 }
 

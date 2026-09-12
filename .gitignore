@@ -15,5 +15,4 @@
 # Idea
 /.idea/
 
-# Tier 2 benchmark results (udf-bench run)
 /bench-results/

@@ -28,7 +28,7 @@ enum Cmd {
         /// `quick` or `full`; defaults to `BENCH_PROFILE`, then `quick`.
         #[arg(long)]
         profile: Option<String>,
-        /// Override the profile's table row count (recorded in the file; `compare` refuses mismatched counts).
+        /// Override the profile's row count.
         #[arg(long)]
         rows: Option<u64>,
         /// Output directory for `<commit>-<timestamp>.json`.
@@ -40,8 +40,7 @@ enum Cmd {
         /// Keep schema BENCH after the run.
         #[arg(long)]
         keep: bool,
-        /// host:port of a listener for the UDF debug log (adds
-        /// `%udf_debug_level debug` to every script and redirects script output).
+        /// host:port of a listener; scripts get `%udf_debug_level debug` and script output is redirected there.
         #[arg(long)]
         udf_debug: Option<String>,
     },

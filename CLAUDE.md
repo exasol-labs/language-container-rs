@@ -75,18 +75,13 @@ Project mission in: @specs/mission.md
 
 ## Benchmarks
 
-- The benchmark suite lives in `benches/` (bench UDF, shared column schema, Tier 2 driver) and `crates/exa-mock-db` (Tier 1 mock engine); `benches/README.md` has the commands.
-- Tier 1 is `cargo bench -p exa-udf-runtime --features bench --bench protocol`; Tier 2 is `cargo run --release -p udf-bench -- run` against a live DB.
-- `quick` is the developer loop, `full` is the evidence; a performance PR quotes both tiers in the `full` profile.
-- Tier 1 A/B is Criterion `--save-baseline` on base and `--baseline` on change; Tier 2 A/B is `udf-bench compare` over alternating runs pooled per side.
-- A Tier 2 query must return at most one row; never stream a result set to the client inside a timed cell.
-- Every Tier 2 aggregate must reference a UDF output column so the optimizer cannot skip the call.
-- `bench-udfs` is an optional dependency of `exa-udf-runtime` behind the `bench` feature, never a plain dev-dependency: it needs `emit-arrow`, which would otherwise unify into every test build.
-- CI runs only the Tier 1 smoke (`BENCH_ROWS=10000 ... -- --test`); no performance gate.
-- Tier 1 must show zero `MT_EMIT` messages over 4,000,000 bytes in every emit cell; a non-zero count is a flush-estimate bug.
-- Treat Tier 2 deltas inside the practical band (8 % full, 15 % quick) or with an interval crossing zero as no change.
-- `scalar_emits_pt` reports `incorrect` until emitted rows land beside their input rows; do not "fix" the gate by relaxing it.
-- Describe engine behaviour observably and cite only the protobuf definition, the reference C++ SLC, and measurements.
+- Suite in `benches/` and `crates/exa-mock-db`; commands, profiles and cell names in `benches/README.md`. `quick` is the loop, `full` is the evidence a performance PR quotes for both tiers.
+- Tier 1 A/B is Criterion `--save-baseline` / `--baseline`; Tier 2 A/B is `udf-bench compare` over alternating runs. Deltas inside the band (8 % full, 15 % quick) or with an interval crossing zero are no change.
+- A Tier 2 query returns one row and aggregates a UDF output column, so nothing streams to the client and the optimizer cannot skip the call.
+- `bench-udfs` is an optional dependency of `exa-udf-runtime` behind the `bench` feature, never a dev-dependency (it needs `emit-arrow`, which would unify into every test build).
+- CI runs only the Tier 1 smoke; it asserts row counts and zero `MT_EMIT` messages over 4,000,000 bytes.
+- `scalar_emits_pt` reports `incorrect` until emitted rows land beside their input rows; do not relax the gate.
+- Describe engine behaviour observably; cite only the protobuf definition, the reference C++ SLC and measurements.
 
 ## Misc
 

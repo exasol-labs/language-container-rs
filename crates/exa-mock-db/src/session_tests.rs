@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn peek_type_reads_the_leading_type_field() {
+fn peek_type_reads_the_leading_type_field_and_rejects_foreign_bytes() {
     for mt in [
         MessageType::MtClient,
         MessageType::MtNext,
@@ -16,10 +16,6 @@ fn peek_type_reads_the_leading_type_field() {
         };
         assert_eq!(peek_type(&req.encode_to_vec()), Some(mt as i32));
     }
-}
-
-#[test]
-fn peek_type_rejects_foreign_bytes() {
     assert_eq!(peek_type(&[]), None);
     assert_eq!(peek_type(&[0x10, 0x01]), None);
     assert_eq!(peek_type(&[0x08]), None);
@@ -30,9 +26,8 @@ fn bind_creates_a_removable_ipc_socket() {
     let path = {
         let s = Session::bind("unit").unwrap();
         assert!(s.endpoint().starts_with("ipc://"));
-        let p = s.ipc_path.clone();
-        assert!(p.exists());
-        p
+        assert!(s.ipc_path.exists());
+        s.ipc_path.clone()
     };
-    assert!(!path.exists(), "socket file must be removed on drop");
+    assert!(!path.exists());
 }

@@ -1,11 +1,6 @@
-//! The benchmark suite's shared column schema, so `bench-udfs` (the UDF),
-//! `exa-mock-db` (Tier 1's engine) and `udf-bench` (Tier 2's driver) agree on
-//! the `wide` class without a dependency edge between them. No dependencies.
+//! Column schema shared by the bench UDF, the mock engine and the Tier 2 driver.
 
-/// The wide class: `(name, SQL type, nullable)` per column. A third native, a
-/// third string-block, a third VARCHAR of growing maximum length; every odd
-/// column is nullable. Models a UDF that expands one input row (a file
-/// reference) into millions of rows with dozens of columns.
+/// `(name, SQL type, nullable)` of the emit-only wide class; odd columns are nullable.
 pub const WIDE_COLUMNS: [(&str, &str, bool); 24] = [
     ("k", "DECIMAL(18,0)", false),
     ("i1", "DECIMAL(18,0)", true),
@@ -33,11 +28,9 @@ pub const WIDE_COLUMNS: [(&str, &str, bool); 24] = [
     ("s200", "VARCHAR(200)", true),
 ];
 
-/// Rows per Arrow record batch in the wide batch cells: the small and the
-/// large end of what a file reader hands out.
+/// Rows per Arrow record batch in the wide batch cells: `(cell suffix, rows)`.
 pub const WIDE_BATCH_ROWS: [(&str, u64); 2] = [("batch8k", 8_192), ("batch64k", 65_536)];
 
-/// [`WIDE_COLUMNS`] as a `name TYPE, ...` column list.
 pub fn wide_ddl() -> String {
     WIDE_COLUMNS
         .iter()
@@ -46,7 +39,6 @@ pub fn wide_ddl() -> String {
         .join(", ")
 }
 
-/// Declared size of a `VARCHAR(n)` type, `None` for any other type.
 pub fn varchar_size(ty: &str) -> Option<u32> {
     ty.strip_prefix("VARCHAR(")?.strip_suffix(')')?.parse().ok()
 }

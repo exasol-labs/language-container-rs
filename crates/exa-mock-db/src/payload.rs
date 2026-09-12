@@ -1,11 +1,7 @@
-//! Input payload builder: column classes to `column_definition`s and to
-//! pre-encoded `MT_NEXT` reply frames, batched the way the database batches.
-//!
-//! Layout follows `exascript_table_data` in `zmqcontainer.proto`: one packed
-//! array per cell type, cells in row-major order within each array, a
-//! row-major `data_nulls` bitmap over every cell, and one `row_number` per row.
+//! Column classes, handshake metadata and `MT_NEXT` frames batched the way the
+//! database batches: cells accumulate until the byte count passes the limit.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDate;
 use exa_proto::exascript_metadata::ColumnDefinition;
 use exa_proto::{
     ColumnType, ExascriptMetadata, ExascriptNextDataRep, ExascriptResponse, ExascriptTableData,
@@ -17,43 +13,31 @@ use crate::InputSource;
 use crate::session::MOCK_CONN_ID;
 use crate::sink::EMIT_LIMIT_BYTES;
 
-/// Bytes the database counts for one int64 or double cell when filling a batch.
-pub const FIXED_CELL_BYTES: usize = 8;
+pub use bench_schema::{WIDE_BATCH_ROWS, WIDE_COLUMNS};
 
-/// A source of input rows: their column metadata and the cells of row `i`.
+const FIXED_CELL_BYTES: usize = 8;
+
 pub trait RowSource {
     fn columns(&self) -> Vec<ColumnDefinition>;
-    /// Append row `i` to every block of `table` (not `rows` or `row_number`)
-    /// and return its byte cost: [`FIXED_CELL_BYTES`] per int64 or double
-    /// cell, the byte length per string cell.
+    /// Appends row `i` to the data blocks and returns its byte cost.
     fn write_row(&self, i: u64, table: &mut ExascriptTableData) -> usize;
 }
 
-/// The three benchmark column classes.
-///
-/// | class      | columns                                                       | on the wire                          |
-/// |------------|---------------------------------------------------------------|--------------------------------------|
-/// | `Native`   | `k DECIMAL(18,0), v DOUBLE`                                   | packed int64 and double arrays only  |
-/// | `Strblock` | `k DECIMAL(18,0), amount DECIMAL(18,2), d DATE, ts TIMESTAMP` | three of four cells in `data_string` |
-/// | `Varchar`  | `k DECIMAL(18,0), label VARCHAR(100)`                         | one 50-byte string per row           |
-/// | `Wide`     | 24 columns of all three kinds, 12 nullable (`bench-udfs::WIDE_COLUMNS`) | emit-only: output metadata, no input rows |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnClass {
     Native,
     Strblock,
     Varchar,
+    /// Emit-only: output metadata, no input rows.
     Wide,
 }
 
 impl ColumnClass {
-    /// Classes with source rows: input to RETURNS and SET cells.
     pub const ALL: [ColumnClass; 3] = [
         ColumnClass::Native,
         ColumnClass::Strblock,
         ColumnClass::Varchar,
     ];
-
-    /// Classes a generator can emit.
     pub const GEN: [ColumnClass; 4] = [
         ColumnClass::Native,
         ColumnClass::Strblock,
@@ -71,27 +55,6 @@ impl ColumnClass {
     }
 }
 
-pub use bench_schema::{WIDE_BATCH_ROWS, WIDE_COLUMNS};
-
-/// Column definitions for [`WIDE_COLUMNS`].
-pub fn wide_columns() -> Vec<ColumnDefinition> {
-    WIDE_COLUMNS
-        .iter()
-        .map(|(name, ty, _)| match *ty {
-            "DECIMAL(18,0)" => int64_col(name),
-            "DOUBLE" => double_col(name),
-            "BOOLEAN" => boolean_col(name),
-            "DECIMAL(18,2)" => numeric_col(name, 18, 2),
-            "DECIMAL(36,10)" => numeric_col(name, 36, 10),
-            "DATE" => date_col(name),
-            "TIMESTAMP" => timestamp_col(name),
-            other => varchar_col(name, bench_schema::varchar_size(other).expect("VARCHAR(n)")),
-        })
-        .collect()
-}
-
-// --- column definitions ---------------------------------------------------
-
 fn column(name: &str, ty: ColumnType, type_name: &str) -> ColumnDefinition {
     ColumnDefinition {
         name: name.into(),
@@ -103,7 +66,6 @@ fn column(name: &str, ty: ColumnType, type_name: &str) -> ColumnDefinition {
     }
 }
 
-/// `DECIMAL(18,0)`, which the database delivers as a packed int64.
 pub fn int64_col(name: &str) -> ColumnDefinition {
     ColumnDefinition {
         precision: Some(18),
@@ -116,7 +78,6 @@ pub fn double_col(name: &str) -> ColumnDefinition {
     column(name, ColumnType::PbDouble, "DOUBLE")
 }
 
-/// `DECIMAL(precision, scale)` in the string block.
 pub fn numeric_col(name: &str, precision: u32, scale: u32) -> ColumnDefinition {
     ColumnDefinition {
         precision: Some(precision),
@@ -129,26 +90,29 @@ pub fn numeric_col(name: &str, precision: u32, scale: u32) -> ColumnDefinition {
     }
 }
 
-pub fn date_col(name: &str) -> ColumnDefinition {
-    column(name, ColumnType::PbDate, "DATE")
-}
-
-pub fn timestamp_col(name: &str) -> ColumnDefinition {
-    column(name, ColumnType::PbTimestamp, "TIMESTAMP")
-}
-
-pub fn boolean_col(name: &str) -> ColumnDefinition {
-    column(name, ColumnType::PbBoolean, "BOOLEAN")
-}
-
-pub fn varchar_col(name: &str, size: u32) -> ColumnDefinition {
+fn varchar_col(name: &str, size: u32) -> ColumnDefinition {
     ColumnDefinition {
         size: Some(size),
         ..column(name, ColumnType::PbString, &format!("VARCHAR({size}) UTF8"))
     }
 }
 
-/// Handshake metadata for a data (non single-call) script.
+fn wide_columns() -> Vec<ColumnDefinition> {
+    WIDE_COLUMNS
+        .iter()
+        .map(|(name, ty, _)| match *ty {
+            "DECIMAL(18,0)" => int64_col(name),
+            "DOUBLE" => double_col(name),
+            "BOOLEAN" => column(name, ColumnType::PbBoolean, "BOOLEAN"),
+            "DECIMAL(18,2)" => numeric_col(name, 18, 2),
+            "DECIMAL(36,10)" => numeric_col(name, 36, 10),
+            "DATE" => column(name, ColumnType::PbDate, "DATE"),
+            "TIMESTAMP" => column(name, ColumnType::PbTimestamp, "TIMESTAMP"),
+            other => varchar_col(name, bench_schema::varchar_size(other).expect("VARCHAR(n)")),
+        })
+        .collect()
+}
+
 pub fn metadata(
     input_iter: IterType,
     output_iter: IterType,
@@ -164,44 +128,28 @@ pub fn metadata(
     }
 }
 
-// --- cell values, mirroring benches/bench-udfs -----------------------------
-
-fn base_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2020, 1, 1).expect("valid base date")
+fn base() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()
 }
 
-/// `amount` for row `i` rendered as the database renders a `DECIMAL(18,2)`.
-pub fn amount_text(i: u64) -> String {
+fn amount_text(i: u64) -> String {
     let unscaled = i as i128 * 137 + 4200;
     format!("{}.{:02}", unscaled / 100, unscaled % 100)
 }
 
-pub fn date_value(i: u64) -> NaiveDate {
-    base_date() + chrono::Duration::days((i % 3650) as i64)
-}
-
-/// `ts` for row `i` at microsecond granularity, the resolution the database
-/// delivers TIMESTAMP inputs at.
-pub fn timestamp_value(i: u64) -> NaiveDateTime {
-    let micros = (i * 137 % 1_000_000) as i64;
-    base_date().and_hms_opt(0, 0, 0).expect("midnight")
-        + chrono::Duration::seconds(i as i64)
-        + chrono::Duration::microseconds(micros)
-}
-
-pub fn date_text(i: u64) -> String {
-    date_value(i).format("%Y-%m-%d").to_string()
-}
-
-pub fn timestamp_text(i: u64) -> String {
-    timestamp_value(i)
-        .format("%Y-%m-%d %H:%M:%S.%6f")
+fn date_text(i: u64) -> String {
+    (base() + chrono::Duration::days((i % 3650) as i64))
+        .format("%Y-%m-%d")
         .to_string()
 }
 
-/// Fifty-byte label for row `i`.
-pub fn label_text(i: u64) -> String {
-    format!("{i:0>50}")
+/// Microsecond granularity, the resolution the database delivers TIMESTAMP inputs at.
+fn timestamp_text(i: u64) -> String {
+    (base().and_hms_opt(0, 0, 0).unwrap()
+        + chrono::Duration::seconds(i as i64)
+        + chrono::Duration::microseconds((i * 137 % 1_000_000) as i64))
+    .format("%Y-%m-%d %H:%M:%S.%6f")
+    .to_string()
 }
 
 fn push_int64(table: &mut ExascriptTableData, v: i64) -> usize {
@@ -230,8 +178,8 @@ impl RowSource for ColumnClass {
             ColumnClass::Strblock => vec![
                 int64_col("k"),
                 numeric_col("amount", 18, 2),
-                date_col("d"),
-                timestamp_col("ts"),
+                column("d", ColumnType::PbDate, "DATE"),
+                column("ts", ColumnType::PbTimestamp, "TIMESTAMP"),
             ],
             ColumnClass::Varchar => vec![int64_col("k"), varchar_col("label", 100)],
             ColumnClass::Wide => wide_columns(),
@@ -248,17 +196,15 @@ impl RowSource for ColumnClass {
                     + push_string(table, date_text(i))
                     + push_string(table, timestamp_text(i))
             }
-            ColumnClass::Varchar => push_int64(table, k) + push_string(table, label_text(i)),
-            ColumnClass::Wide => panic!("ColumnClass::Wide is emit-only and has no input rows"),
+            ColumnClass::Varchar => push_int64(table, k) + push_string(table, format!("{i:0>50}")),
+            ColumnClass::Wide => panic!("ColumnClass::Wide has no input rows"),
         }
     }
 }
 
-/// Rows of `DECIMAL(18,0)` columns with caller-supplied values, for parameter
-/// rows such as a generator's `(n, do_emit)` or a pass-through's `(k, n)`.
 pub struct Int64Columns {
-    pub names: Vec<String>,
-    pub fill: Box<dyn Fn(u64) -> Vec<i64>>,
+    names: Vec<String>,
+    fill: Box<dyn Fn(u64) -> Vec<i64>>,
 }
 
 impl Int64Columns {
@@ -282,26 +228,9 @@ impl RowSource for Int64Columns {
     }
 }
 
-// --- encoding ---------------------------------------------------------------
-
-/// Pre-encoded input for one benchmark cell: `cycles[c]` holds the `MT_NEXT`
-/// reply frames of run cycle `c`.
+/// `cycles[c]` holds the `MT_NEXT` frames of run cycle `c`.
 pub struct EncodedInput {
     pub cycles: Vec<Vec<Vec<u8>>>,
-    /// Total rows across all cycles.
-    pub rows: u64,
-}
-
-impl EncodedInput {
-    /// Frames across all cycles.
-    pub fn frames(&self) -> usize {
-        self.cycles.iter().map(Vec::len).sum()
-    }
-
-    /// Bytes across all frames.
-    pub fn bytes(&self) -> usize {
-        self.cycles.iter().flatten().map(Vec::len).sum()
-    }
 }
 
 fn encode_frame(table: ExascriptTableData) -> Vec<u8> {
@@ -314,52 +243,35 @@ fn encode_frame(table: ExascriptTableData) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Encode rows `[first, last)` as the frames of one cycle, batched as the
-/// database batches: cells accumulate until the running byte count passes
-/// [`EMIT_LIMIT_BYTES`] or the rows run out. `row_number` is stamped from
-/// `next_row_number`, which advances by one per row.
-pub fn encode_cycle(
-    src: &dyn RowSource,
-    first: u64,
-    last: u64,
-    next_row_number: &mut u64,
-) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-    let mut table = ExascriptTableData::default();
-    let mut bytes = 0usize;
-    for i in first..last {
-        bytes += src.write_row(i, &mut table);
-        table.rows += 1;
-        table.row_number.push(*next_row_number);
-        *next_row_number += 1;
-        if bytes > EMIT_LIMIT_BYTES {
-            frames.push(encode_frame(std::mem::take(&mut table)));
-            bytes = 0;
-        }
-    }
-    if table.rows > 0 {
-        frames.push(encode_frame(table));
-    }
-    frames
-}
-
-/// Encode `rows` rows of `src` spread evenly over `cycles` run cycles, in
-/// row order, with a single monotonic `row_number` sequence across the whole
-/// input. Cycles that receive no rows are still present (and empty), so the
-/// client sees `MT_DONE` at once for them.
+/// Spreads `rows` evenly over `cycles` (empty cycles stay present), with one
+/// monotonic `row_number` sequence across the whole input.
 pub fn encode(src: &dyn RowSource, rows: u64, cycles: u64) -> EncodedInput {
-    assert!(cycles > 0, "at least one cycle");
-    let mut next_row_number = 0u64;
-    let mut out = Vec::with_capacity(cycles as usize);
-    for c in 0..cycles {
-        let first = rows * c / cycles;
-        let last = rows * (c + 1) / cycles;
-        out.push(encode_cycle(src, first, last, &mut next_row_number));
-    }
-    EncodedInput { cycles: out, rows }
+    assert!(cycles > 0);
+    let mut row_number = 0u64;
+    let out = (0..cycles)
+        .map(|c| {
+            let mut frames = Vec::new();
+            let mut table = ExascriptTableData::default();
+            let mut bytes = 0usize;
+            for i in rows * c / cycles..rows * (c + 1) / cycles {
+                bytes += src.write_row(i, &mut table);
+                table.rows += 1;
+                table.row_number.push(row_number);
+                row_number += 1;
+                if bytes > EMIT_LIMIT_BYTES {
+                    frames.push(encode_frame(std::mem::take(&mut table)));
+                    bytes = 0;
+                }
+            }
+            if table.rows > 0 {
+                frames.push(encode_frame(table));
+            }
+            frames
+        })
+        .collect();
+    EncodedInput { cycles: out }
 }
 
-/// Cursor over one cycle's frames.
 pub struct FrameCursor<'a> {
     frames: &'a [Vec<u8>],
     pos: usize,
@@ -377,15 +289,6 @@ impl InputSource for FrameCursor<'_> {
         self.pos += 1;
         Some(f.as_slice())
     }
-}
-
-/// Decode a frame produced by [`encode_cycle`] back into its table.
-pub fn decode_frame(frame: &[u8]) -> ExascriptTableData {
-    ExascriptResponse::decode(frame)
-        .expect("frame is an exascript_response")
-        .next
-        .expect("MT_NEXT frame carries a table")
-        .table
 }
 
 #[cfg(test)]

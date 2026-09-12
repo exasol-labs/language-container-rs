@@ -1,36 +1,27 @@
-//! `compare`: pool the raw repetitions of two sets of run files and print a
-//! verdict per cell.
+//! `compare`: pool the repetitions of two sets of run files and print a verdict per cell.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use crate::results::{CellResult, RunFile};
+use crate::results::RunFile;
 use crate::stats::{self, Verdict, Welch};
 
-/// Practical band per profile, percent.
-pub fn band_pct(profile: &str) -> f64 {
-    match profile {
-        "full" => 8.0,
-        _ => 15.0,
-    }
-}
-
-/// Fewer pooled samples than this on either side flags the verdict.
 pub const LOW_POWER_BELOW: usize = 8;
 
-/// One side of a comparison: raw times pooled per cell.
+fn band_pct(profile: &str) -> f64 {
+    if profile == "full" { 8.0 } else { 15.0 }
+}
+
 #[derive(Debug, Default)]
 pub struct Side {
     pub profile: String,
     pub n: u64,
     pub commits: Vec<String>,
-    /// cell name → pooled repetitions (`None` when any file reports a non-ok status).
+    /// `None` once any file reports a non-ok status for the cell.
     pub cells: BTreeMap<String, Option<Vec<f64>>>,
     pub statuses: BTreeMap<String, String>,
-    /// Rows per cell, so a cell whose row count changed between the two
-    /// sides (for example the `strblock` table size) is never compared.
     pub rows: BTreeMap<String, u64>,
 }
 
@@ -55,13 +46,14 @@ pub fn pool(runs: &[RunFile]) -> Result<Side> {
         }
         side.commits.push(run.meta.commit.clone());
         for cell in &run.cells {
-            match side.rows.insert(cell.name.clone(), cell.rows) {
-                Some(prev) if prev != cell.rows => bail!(
+            if let Some(prev) = side.rows.insert(cell.name.clone(), cell.rows)
+                && prev != cell.rows
+            {
+                bail!(
                     "mixed row counts for {} on one side: {prev} vs {}",
                     cell.name,
                     cell.rows
-                ),
-                _ => {}
+                );
             }
             let entry = side
                 .cells
@@ -69,7 +61,7 @@ pub fn pool(runs: &[RunFile]) -> Result<Side> {
                 .or_insert_with(|| Some(Vec::new()));
             if cell.status == "ok" {
                 if let Some(v) = entry {
-                    v.extend(cell.raw_s.iter().copied());
+                    v.extend(&cell.raw_s);
                 }
             } else {
                 *entry = None;
@@ -80,8 +72,7 @@ pub fn pool(runs: &[RunFile]) -> Result<Side> {
     Ok(side)
 }
 
-/// One row of the comparison table.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Row {
     pub name: String,
     pub base_median: Option<f64>,
@@ -107,11 +98,20 @@ pub fn compare(base: &Side, change: &Side) -> Result<Vec<Row>> {
         );
     }
     let band = band_pct(&base.profile);
-    let mut rows = Vec::new();
-    for name in base.cells.keys().chain(change.cells.keys()) {
-        if rows.iter().any(|r: &Row| &r.name == name) {
-            continue;
+    let names: std::collections::BTreeSet<&String> =
+        base.cells.keys().chain(change.cells.keys()).collect();
+    let status = |side: &Side, name: &str, present: bool| {
+        if present {
+            "ok".to_string()
+        } else {
+            side.statuses
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "missing".into())
         }
+    };
+    let mut rows = Vec::new();
+    for name in names {
         let b = base.cells.get(name).cloned().flatten();
         let c = change.cells.get(name).cloned().flatten();
         let mut row = Row {
@@ -120,20 +120,16 @@ pub fn compare(base: &Side, change: &Side) -> Result<Vec<Row>> {
             base_min: b.as_deref().and_then(stats::min),
             change_median: c.as_deref().and_then(stats::median),
             change_min: c.as_deref().and_then(stats::min),
-            welch: None,
-            median_delta_pct: None,
-            verdict: None,
-            outliers: 0,
-            low_power: false,
-            note: None,
+            ..Row::default()
         };
-        let (br, cr) = (
-            base.rows.get(name).copied().unwrap_or(0),
-            change.rows.get(name).copied().unwrap_or(0),
-        );
+        let (br, cr) = (base.rows.get(name), change.rows.get(name));
         match (&b, &c) {
             (Some(_), Some(_)) if br != cr => {
-                row.note = Some(format!("rows differ: base {br} / change {cr}"));
+                row.note = Some(format!(
+                    "rows differ: base {} / change {}",
+                    br.copied().unwrap_or(0),
+                    cr.copied().unwrap_or(0)
+                ));
             }
             (Some(b), Some(c)) => {
                 row.outliers = stats::tukey_outliers(b).len() + stats::tukey_outliers(c).len();
@@ -151,24 +147,10 @@ pub fn compare(base: &Side, change: &Side) -> Result<Vec<Row>> {
                 };
             }
             _ => {
-                let status = |side: &Side| {
-                    side.statuses
-                        .get(name)
-                        .cloned()
-                        .unwrap_or_else(|| "missing".into())
-                };
                 row.note = Some(format!(
                     "base {} / change {}",
-                    if b.is_some() {
-                        "ok".into()
-                    } else {
-                        status(base)
-                    },
-                    if c.is_some() {
-                        "ok".into()
-                    } else {
-                        status(change)
-                    }
+                    status(base, name, b.is_some()),
+                    status(change, name, c.is_some())
                 ));
             }
         }
@@ -183,21 +165,25 @@ fn ms(v: Option<f64>) -> String {
 }
 
 pub fn render(base: &Side, change: &Side, rows: &[Row]) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "profile {} n {} band ±{}%  base {} ({} files)  change {} ({} files)\n",
+    let mut out = format!(
+        "profile {} n {} band ±{}%  base {} ({} files)  change {} ({} files)\n\
+         {:<40} {:>10} {:>10} {:>10} {:>10}  {:<28} {:<10} {}\n",
         base.profile,
         base.n,
         band_pct(&base.profile),
         base.commits.join(","),
         base.commits.len(),
         change.commits.join(","),
-        change.commits.len()
-    ));
-    out.push_str(&format!(
-        "{:<40} {:>10} {:>10} {:>10} {:>10}  {:<28} {:<10} {}\n",
-        "cell", "base_ms", "base_min", "chg_ms", "chg_min", "delta [95% CI]", "verdict", "flags"
-    ));
+        change.commits.len(),
+        "cell",
+        "base_ms",
+        "base_min",
+        "chg_ms",
+        "chg_min",
+        "delta [95% CI]",
+        "verdict",
+        "flags"
+    );
     for r in rows {
         let delta = match (&r.welch, r.median_delta_pct) {
             (Some(w), Some(d)) => {
@@ -205,16 +191,14 @@ pub fn render(base: &Side, change: &Side, rows: &[Row]) -> String {
             }
             _ => "-".into(),
         };
-        let mut flags = Vec::new();
-        if r.outliers > 0 {
-            flags.push(format!("{} outlier(s)", r.outliers));
-        }
-        if r.low_power {
-            flags.push("low power".to_string());
-        }
-        if let Some(n) = &r.note {
-            flags.push(n.clone());
-        }
+        let flags: Vec<String> = [
+            (r.outliers > 0).then(|| format!("{} outlier(s)", r.outliers)),
+            r.low_power.then(|| "low power".to_string()),
+            r.note.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         out.push_str(&format!(
             "{:<40} {:>10} {:>10} {:>10} {:>10}  {:<28} {:<10} {}\n",
             r.name,
@@ -230,20 +214,14 @@ pub fn render(base: &Side, change: &Side, rows: &[Row]) -> String {
     out
 }
 
-pub fn run(base: &[std::path::PathBuf], change: &[std::path::PathBuf]) -> Result<String> {
-    let read = |paths: &[std::path::PathBuf]| -> Result<Vec<RunFile>> {
-        paths.iter().map(|p| RunFile::read(Path::new(p))).collect()
+pub fn run(base: &[PathBuf], change: &[PathBuf]) -> Result<String> {
+    let read = |paths: &[PathBuf]| -> Result<Vec<RunFile>> {
+        paths.iter().map(|p| RunFile::read(p)).collect()
     };
     let base = pool(&read(base)?)?;
     let change = pool(&read(change)?)?;
     let rows = compare(&base, &change)?;
     Ok(render(&base, &change, &rows))
-}
-
-/// Cell summary statistics for `run`, shared with `compare` semantics.
-pub fn summarize(cell: &mut CellResult) {
-    cell.min_s = stats::min(&cell.raw_s);
-    cell.median_s = stats::median(&cell.raw_s);
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
-//! `run`: bring up (or attach to) a database, install the SLC and the bench
-//! UDF, build the source tables, time every cell and write one JSON file.
+//! `run`: bring up or attach to a database, install SLC and bench UDF, build the source
+//! tables, time every cell, write one JSON file.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,10 +12,9 @@ use it::{Harness, register_slc};
 use sha2::{Digest, Sha256};
 
 use crate::cells::{self, CellSpec, Class, SMALL_ROWS};
-use crate::compare::summarize;
 use crate::results::{CellResult, Meta, RunFile};
+use crate::stats;
 
-/// Rows, warm-up and timed repetitions per profile.
 #[derive(Debug, Clone, Copy)]
 pub struct Profile {
     pub name: &'static str,
@@ -40,16 +39,13 @@ pub const FULL: Profile = Profile {
 pub struct RunOpts {
     pub profile: Profile,
     pub out: PathBuf,
-    /// Only cells whose name contains this substring.
     pub filter: Option<String>,
-    /// Leave schema `BENCH` in place afterwards (external mode).
     pub keep: bool,
-    /// `host:port` of a listener for the UDF debug log; scripts get
-    /// `%udf_debug_level debug` and the session redirects script output there.
     pub udf_debug: Option<String>,
 }
 
-/// The database side of a run: one session, re-opened when the server drops it.
+const UDF_LIB: &str = "libbench_udfs.so";
+
 struct Db {
     harness: Harness,
     slc: it::SlcRef,
@@ -58,7 +54,6 @@ struct Db {
 }
 
 impl Db {
-    /// Session state a fresh connection needs before it can run a cell.
     async fn prepare_session(
         conn: &mut Connection,
         slc: &it::SlcRef,
@@ -71,24 +66,17 @@ impl Db {
             ))
             .await
             .context("redirecting script output")?;
-            let b = conn
-                .query(
-                    "SELECT SESSION_VALUE FROM EXA_PARAMETERS \
-                     WHERE PARAMETER_NAME = 'SCRIPT_OUTPUT_ADDRESS'",
-                )
-                .await?;
-            let value = first_row(&b)?
-                .into_iter()
-                .flatten()
-                .next()
-                .unwrap_or_default();
+            let value = scalar(
+                conn,
+                "SELECT SESSION_VALUE FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SCRIPT_OUTPUT_ADDRESS'",
+            )
+            .await?;
             eprintln!("  script output redirected to {value:?}");
         }
         Ok(())
     }
 
-    /// Open a new session after the server closed the old one (a UDF that
-    /// brings its SQL process down does that) and re-open schema `bench`.
+    // A UDF that brings its SQL process down closes the session; the next cell needs a new one.
     async fn reconnect(&mut self) -> Result<()> {
         eprintln!("  connection lost; reconnecting ...");
         let mut conn = self.harness.connect().await?;
@@ -97,23 +85,7 @@ impl Db {
         self.conn = conn;
         Ok(())
     }
-
-    /// Run a cell query; after a failure, reconnect once and retry.
-    async fn query_with_retry(&mut self, sql: &str) -> Result<Vec<RecordBatch>> {
-        match self.conn.query(sql).await {
-            Ok(b) => Ok(b),
-            Err(first) => {
-                self.reconnect().await?;
-                self.conn
-                    .query(sql)
-                    .await
-                    .map_err(|second| anyhow!("{first}; after reconnect: {second}"))
-            }
-        }
-    }
 }
-
-const UDF_LIB: &str = "libbench_udfs.so";
 
 fn git(args: &[&str]) -> Result<String> {
     let out = Command::new("git")
@@ -130,11 +102,6 @@ fn git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-/// First row of a result as text, one entry per column (`None` for NULL).
 fn first_row(batches: &[RecordBatch]) -> Result<Vec<Option<String>>> {
     let Some(batch) = batches.iter().find(|b| b.num_rows() > 0) else {
         return Ok(Vec::new());
@@ -154,6 +121,15 @@ fn first_row(batches: &[RecordBatch]) -> Result<Vec<Option<String>>> {
         .collect()
 }
 
+async fn scalar(conn: &mut Connection, sql: &str) -> Result<String> {
+    let b = conn.query(sql).await?;
+    Ok(first_row(&b)?
+        .into_iter()
+        .flatten()
+        .next()
+        .unwrap_or_default())
+}
+
 fn parse_int(cell: &Option<String>) -> Option<i64> {
     let text = cell.as_deref()?;
     text.parse::<i64>()
@@ -170,8 +146,6 @@ async fn exec_all(conn: &mut Connection, stmts: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Build one source table, range form first, generator UDF as fallback.
-/// Returns which form succeeded.
 async fn build_table(
     conn: &mut Connection,
     table: &str,
@@ -193,118 +167,104 @@ async fn build_table(
     }
 }
 
-/// Time one cell: warm-up, repetitions, correctness checks.
 async fn time_cell(db: &mut Db, spec: &CellSpec, profile: Profile) -> Result<CellResult> {
-    let mut result = CellResult {
+    let mut r = CellResult {
         name: spec.name.clone(),
         shape: spec.shape.to_string(),
         class: spec.class.map(str::to_string),
         mode: spec.mode.map(str::to_string),
         groups: spec.groups,
         rows: spec.rows,
-        raw_s: Vec::new(),
-        min_s: None,
-        median_s: None,
-        rows_per_s: None,
-        mb_per_s: None,
-        ratio_to_control: None,
         status: "ok".into(),
-        error: None,
-        mismatches: None,
-        result: Vec::new(),
+        ..Default::default()
+    };
+    let fail = |r: &mut CellResult, status: &str, error: String| {
+        r.status = status.into();
+        r.error = Some(error);
+        r.raw_s.clear();
     };
     for i in 0..(profile.warmup + profile.reps) {
         let started = Instant::now();
         let batches = match db.conn.query(spec.sql.as_str()).await {
             Ok(b) => b,
-            Err(e) => {
-                // The server may have dropped the session; make sure the next
-                // cell gets a working one, then give this cell one more try.
-                if spec.passthrough {
-                    // The server closes the session instead of returning a
-                    // row when emitted rows cannot be placed beside their
-                    // input rows; that is the correctness gate failing.
-                    db.reconnect().await?;
-                    result.status = "incorrect".into();
-                    result.error = Some(format!(
+            Err(e) if spec.passthrough => {
+                db.reconnect().await?;
+                fail(
+                    &mut r,
+                    "incorrect",
+                    format!(
                         "server closed the session during the pass-through query \
                          (the client does not echo row_number): {e}"
-                    ));
-                    result.raw_s.clear();
-                    return Ok(result);
-                }
-                let retry = db.query_with_retry(&spec.sql).await;
-                match retry {
+                    ),
+                );
+                return Ok(r);
+            }
+            Err(e) => {
+                db.reconnect().await?;
+                match db.conn.query(spec.sql.as_str()).await {
                     Ok(_) if i == 0 => continue,
-                    Ok(_) => {
-                        result.status = "error".into();
-                        result.error = Some(format!("{e} (succeeded after reconnect)"));
-                    }
-                    Err(e2) => {
-                        result.status = "error".into();
-                        result.error = Some(e2.to_string());
-                    }
+                    Ok(_) => fail(&mut r, "error", format!("{e} (succeeded after reconnect)")),
+                    Err(e2) => fail(&mut r, "error", format!("{e}; after reconnect: {e2}")),
                 }
-                result.raw_s.clear();
-                return Ok(result);
+                return Ok(r);
             }
         };
         let elapsed = started.elapsed().as_secs_f64();
         let row = match first_row(&batches) {
-            Ok(r) => r,
+            Ok(row) => row,
             Err(e) => {
-                result.status = "error".into();
-                result.error = Some(e.to_string());
-                return Ok(result);
+                fail(&mut r, "error", e.to_string());
+                return Ok(r);
             }
         };
-        if let Some(expected) = spec.expect_count {
-            let got = row.first().and_then(parse_int);
-            if got != Some(expected as i64) {
-                result.status = "incorrect".into();
-                result.error = Some(format!(
-                    "expected first column {expected}, got {}",
-                    row.first()
-                        .cloned()
-                        .flatten()
-                        .unwrap_or_else(|| "NULL".into())
-                ));
-            }
+        if let Some(expected) = spec.expect_count
+            && row.first().and_then(parse_int) != Some(expected as i64)
+        {
+            let got = row
+                .first()
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| "NULL".into());
+            fail(
+                &mut r,
+                "incorrect",
+                format!("expected first column {expected}, got {got}"),
+            );
         }
         if spec.passthrough {
             let mismatches = row.get(1).and_then(parse_int).unwrap_or(-1);
-            result.mismatches = Some(mismatches);
+            r.mismatches = Some(mismatches);
             if mismatches != 0 {
-                result.status = "incorrect".into();
-                result.error = Some(format!("{mismatches} pass-through mismatches"));
+                fail(
+                    &mut r,
+                    "incorrect",
+                    format!("{mismatches} pass-through mismatches"),
+                );
             }
         }
-        if result.status != "ok" {
-            result.raw_s.clear();
-            result.result = row;
-            return Ok(result);
+        if r.status != "ok" {
+            r.result = row;
+            return Ok(r);
         }
         if i >= profile.warmup {
-            if result.result.is_empty() {
-                result.result = row;
+            if r.result.is_empty() {
+                r.result = row;
             }
-            result.raw_s.push(elapsed);
+            r.raw_s.push(elapsed);
         }
     }
-    summarize(&mut result);
-    result.rows_per_s = result.median_s.map(|m| spec.rows as f64 / m);
-    result.mb_per_s = match (result.rows_per_s, spec.wire_bytes_per_row) {
-        (Some(r), Some(b)) => Some(r * b / 1e6),
-        _ => None,
-    };
-    Ok(result)
+    r.min_s = stats::min(&r.raw_s);
+    r.median_s = stats::median(&r.raw_s);
+    r.rows_per_s = r.median_s.map(|m| spec.rows as f64 / m);
+    r.mb_per_s = spec
+        .wire_bytes_per_row
+        .and_then(|b| r.rows_per_s.map(|rps| rps * b / 1e6));
+    Ok(r)
 }
 
 pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     let profile = opts.profile;
     let started_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-    // Fail fast on everything that does not need the database.
     let commit = git(&["rev-parse", "--short", "HEAD"])?;
     let dirty = !git(&["status", "--porcelain", "--untracked-files=no"])?.is_empty();
     let slc_path = std::env::var("SLC_TARBALL").context("SLC_TARBALL is not set")?;
@@ -316,7 +276,6 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     } else {
         "docker"
     };
-
     eprintln!(
         "udf-bench run: profile={} rows={} warmup={} reps={} commit={commit}{} db={db_mode}",
         profile.name,
@@ -333,26 +292,18 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     let mut conn = harness.connect().await?;
     Db::prepare_session(&mut conn, &slc, opts.udf_debug.as_deref()).await?;
     let udf_object = harness.upload_udf(UDF_LIB, so_bytes.clone()).await?;
-
-    let db_version = {
-        let b = conn
-            .query(
-                "SELECT PARAM_VALUE FROM EXA_METADATA WHERE PARAM_NAME = 'databaseProductVersion'",
-            )
-            .await?;
-        first_row(&b)?
-            .into_iter()
-            .flatten()
-            .next()
-            .unwrap_or_default()
-    };
+    let db_version = scalar(
+        &mut conn,
+        "SELECT PARAM_VALUE FROM EXA_METADATA WHERE PARAM_NAME = 'databaseProductVersion'",
+    )
+    .await?;
 
     eprintln!("installing schema BENCH, scripts and source tables ...");
     exec_all(
         &mut conn,
         &[
-            "CREATE SCHEMA IF NOT EXISTS bench".to_string(),
-            "OPEN SCHEMA bench".to_string(),
+            "CREATE SCHEMA IF NOT EXISTS bench".into(),
+            "OPEN SCHEMA bench".into(),
         ],
     )
     .await?;
@@ -367,9 +318,8 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
         let rows = class.input_rows(profile.rows);
         forms.push(build_table(&mut conn, &class.table(), class, rows).await?);
         eprintln!(
-            "  {} ({} rows) in {:.1}s",
+            "  {} ({rows} rows) in {:.1}s",
             class.table(),
-            rows,
             t.elapsed().as_secs_f64()
         );
     }
@@ -394,20 +344,10 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     let mut results = Vec::with_capacity(specs.len());
     for spec in &specs {
         let r = time_cell(&mut db, spec, profile).await?;
-        match r.status.as_str() {
-            "ok" => eprintln!(
-                "  {:<40} median {:>8.1} ms  min {:>8.1} ms  {:>10.0} rows/s",
-                r.name,
-                r.median_s.unwrap_or(0.0) * 1000.0,
-                r.min_s.unwrap_or(0.0) * 1000.0,
-                r.rows_per_s.unwrap_or(0.0)
-            ),
-            s => eprintln!("  {:<40} {s}: {}", r.name, r.error.as_deref().unwrap_or("")),
-        }
+        eprintln!("  {}", summary_row(&r));
         results.push(r);
     }
-
-    let control_median = |name: &str| -> Option<f64> {
+    let control_median = |name: &str| {
         results
             .iter()
             .find(|r| r.name == name && r.status == "ok")
@@ -416,15 +356,11 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     let ratios: Vec<Option<f64>> = specs
         .iter()
         .zip(&results)
-        .map(|(spec, r)| {
-            let ctrl = spec.control.as_deref().and_then(control_median)?;
-            Some(r.median_s? / ctrl)
-        })
+        .map(|(spec, r)| Some(r.median_s? / spec.control.as_deref().and_then(control_median)?))
         .collect();
     for (r, ratio) in results.iter_mut().zip(ratios) {
         r.ratio_to_control = ratio;
     }
-
     if !opts.keep {
         let _ = db.conn.execute("DROP SCHEMA IF EXISTS bench CASCADE").await;
     }
@@ -435,8 +371,8 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
             dirty,
             db_version,
             db_mode: db_mode.into(),
-            slc_sha256: sha256_hex(&slc_bytes),
-            bench_udfs_sha256: sha256_hex(&so_bytes),
+            slc_sha256: format!("{:x}", Sha256::digest(&slc_bytes)),
+            bench_udfs_sha256: format!("{:x}", Sha256::digest(&so_bytes)),
             profile: profile.name.into(),
             n: profile.rows,
             reps: profile.reps,
@@ -452,41 +388,45 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Print a run file as the summary table `run` also logs.
+fn summary_row(c: &CellResult) -> String {
+    let f = |v: Option<f64>, scale: f64, prec: usize| {
+        v.map(|x| format!("{:.*}", prec, x * scale))
+            .unwrap_or_else(|| "-".into())
+    };
+    format!(
+        "{:<40} {:>10} {:>10} {:>12} {:>8} {:>8} {}{}",
+        c.name,
+        f(c.median_s, 1000.0, 1),
+        f(c.min_s, 1000.0, 1),
+        f(c.rows_per_s, 1.0, 0),
+        f(c.mb_per_s, 1.0, 1),
+        f(c.ratio_to_control, 1.0, 2),
+        c.status,
+        c.error
+            .as_deref()
+            .map(|e| format!(" ({e})"))
+            .unwrap_or_default()
+    )
+}
+
 pub fn print_summary(path: &Path) -> Result<()> {
     let file = RunFile::read(path)?;
+    let m = &file.meta;
     println!(
-        "{} {} db {} profile {} n {} reps {}",
-        file.meta.commit,
-        if file.meta.dirty { "(dirty)" } else { "" },
-        file.meta.db_version,
-        file.meta.profile,
-        file.meta.n,
-        file.meta.reps
+        "{}{} db {} profile {} n {} reps {}",
+        m.commit,
+        if m.dirty { " (dirty)" } else { "" },
+        m.db_version,
+        m.profile,
+        m.n,
+        m.reps
     );
     println!(
-        "{:<40} {:>10} {:>10} {:>12} {:>7} {:>8} status",
+        "{:<40} {:>10} {:>10} {:>12} {:>8} {:>8} status",
         "cell", "median_ms", "min_ms", "rows_per_s", "MB_per_s", "x_ctrl"
     );
     for c in &file.cells {
-        let f = |v: Option<f64>, scale: f64, prec: usize| {
-            v.map(|x| format!("{:.*}", prec, x * scale))
-                .unwrap_or_else(|| "-".into())
-        };
-        println!(
-            "{:<40} {:>10} {:>10} {:>12} {:>7} {:>8} {}{}",
-            c.name,
-            f(c.median_s, 1000.0, 1),
-            f(c.min_s, 1000.0, 1),
-            f(c.rows_per_s, 1.0, 0),
-            f(c.mb_per_s, 1.0, 1),
-            f(c.ratio_to_control, 1.0, 2),
-            c.status,
-            c.error
-                .as_deref()
-                .map(|e| format!(" ({e})"))
-                .unwrap_or_default()
-        );
+        println!("{}", summary_row(c));
     }
     Ok(())
 }
