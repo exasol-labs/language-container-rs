@@ -6,7 +6,7 @@ Defines the `#[repr(C)]` ABI vtable, SDK fingerprint, vtable stability rules, an
 
 The SDK ABI layer is the binary contract between a compiled UDF `.so` and the host runtime. The `#[repr(C)] ExaUdfVTable` carries an `abi_version`, an `sdk_fingerprint` (baked at build time from `SDK_VERSION:RUSTC_HASH`), a marker recording whether the UDF returns a value (RETURNS) or emits (EMITS), and function pointer slots for `run`, `destroy`, and optional single-call hooks. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable. The host loader checks `abi_version` and `sdk_fingerprint` at load time; a mismatch is a clean `AbiMismatch` error rather than silent UB.
 
-The `UdfContext` trait-object vtable is ordered by method declaration. Every `UdfContext` method must be declared unconditionally (no `#[cfg(feature = ...)]`) so the vtable layout is identical in all build configurations — a feature-mismatched `.so` must fail the version check, not misdispatch calls. The `emit-arrow` feature gates only the optional `arrow` dependency and the `EmitBatch` extension trait; it never gates `UdfContext` method declarations.
+The `UdfContext` trait-object vtable is ordered by method declaration. Every `UdfContext` method must be declared unconditionally (no `#[cfg(feature = ...)]`) so the vtable layout is identical in all build configurations — a feature-mismatched `.so` must fail the version check, not misdispatch calls. A change to the signature of an existing method changes that slot's calling convention while leaving the layout intact, and requires the same version increment as an added or reordered slot. The `emit-arrow` feature gates only the optional `arrow` dependency and the `EmitBatch` extension trait; it never gates `UdfContext` method declarations.
 
 ## Scenarios
 
@@ -65,7 +65,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *THEN* the optional `arrow` dependency MUST NOT be compiled and the `EmitBatch` extension trait (`emit_batch(&RecordBatch)`, which serialises to Arrow IPC bytes in the caller crate) MUST NOT be present, because it is the only API that names an `arrow` type
 * *AND* the `UdfContext::emit_record_batch_ipc(&[u8])` trait method MUST still be present (it names no `arrow` type), so the vtable is unchanged whether or not `emit-arrow` is enabled
 * *AND* with `emit-arrow` enabled, `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `emit_record_batch_ipc(&[u8])`; an Arrow `RecordBatch` MUST NOT cross the `.so` boundary, only `&[u8]`
-* *AND* the row-based `emit(&mut self, values: &[Value])` MUST remain a required trait method, so a UDF MAY mix `emit` and `emit_batch` within one `run`
+* *AND* the row-based `emit(&mut self, values: Vec<Value>)` MUST remain a required trait method, so a UDF MAY mix `emit` and `emit_batch` within one `run`
 
 ### Scenario: emit_batch serialises to Arrow IPC bytes so Arrow never crosses the .so boundary
 
@@ -75,7 +75,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `self.emit_record_batch_ipc(&[u8])` — an Arrow `RecordBatch` MUST NOT be passed across the `.so` boundary, because two independently linked static `arrow` copies disagree on `Arc<dyn Array>` vtables and `TypeId` (a hard memory fault, the same hazard documented for connect-back `query_arrow`); only `&[u8]` crosses
 * *AND* `UdfContext` MUST expose a defaulted `emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError>` gated `#[cfg(feature = "emit-arrow")]` whose default returns `Err(UdfError::Unimplemented("emit_record_batch_ipc"))`, so existing `UdfContext` implementations that do not override it keep compiling unchanged
 * *AND* neither `emit_record_batch_ipc` nor `EmitBatch` MUST be present when the crate is built without the `emit-arrow` feature, and the trait MUST compile in that configuration with no reference to any `arrow` type
-* *AND* the row-based `emit(&mut self, values: &[Value])` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
+* *AND* the row-based `emit(&mut self, values: Vec<Value>)` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
 
 ### Scenario: Return channel adds set_return and an output-shape marker, bumping the ABI version
 

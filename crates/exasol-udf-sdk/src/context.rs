@@ -7,10 +7,11 @@ pub trait UdfContext {
     fn num_columns(&self) -> usize;
     /// Get a specific input column value (0-indexed)
     fn get(&self, col: usize) -> Result<&Value, UdfError>;
-    /// Emit one output row. Valid only for EMITS output (any number of rows per
-    /// invocation); the host bans it in RETURNS output, where the returned value
-    /// crosses via `set_return` instead.
-    fn emit(&mut self, values: &[Value]) -> Result<(), UdfError>;
+    /// Emit one output row, taking ownership of it so string cells move into the
+    /// wire buffer instead of being cloned. Valid only for EMITS output (any
+    /// number of rows per invocation); the host bans it in RETURNS output, where
+    /// the returned value crosses via `set_return` instead.
+    fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError>;
     /// Advance to the next input row of a SET group, spanning input batches;
     /// returns false at the group boundary. Valid only for SET (Multiple) input:
     /// the host bans it in scalar (ExactlyOnce) input, where the framework drives

@@ -73,7 +73,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
     };
     assert_eq!(rc, 0, "UDF run returned non-zero");
 
-    let table = emit_buf.to_proto(&output_meta);
+    let table = emit_buf.take_proto(&output_meta);
     assert_eq!(table.rows, 3, "expected 3 emitted rows");
     let rs = InputRowSet::from_proto(&table, &output_meta);
     assert_eq!(rs.row(0).unwrap()[1], Value::String("a".into()));

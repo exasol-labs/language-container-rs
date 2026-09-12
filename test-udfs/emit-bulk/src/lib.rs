@@ -40,7 +40,7 @@ pub fn emit_bulk(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         _ => DEFAULT_PAYLOAD.to_string(),
     };
     for _ in 0..n {
-        ctx.emit(&[Value::String(payload.clone())])?;
+        ctx.emit(vec![Value::String(payload.clone())])?;
     }
     Ok(())
 }

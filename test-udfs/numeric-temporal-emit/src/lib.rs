@@ -50,7 +50,7 @@ pub fn numeric_temporal_emit(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     ];
 
     for (amount, event_date, event_ts) in rows {
-        ctx.emit(&[
+        ctx.emit(vec![
             Value::Numeric(amount),
             Value::Date(event_date),
             Value::Timestamp(event_ts),

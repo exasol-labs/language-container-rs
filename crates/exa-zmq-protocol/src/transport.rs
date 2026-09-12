@@ -71,10 +71,17 @@ impl ZmqTransport {
     /// lockstep, so we retry transient timeouts rather than treating them as
     /// fatal. The frame is queued at most once: the first non-`EAGAIN` return
     /// (success or genuine error) ends the loop.
+    ///
+    /// The encoded buffer is handed to libzmq as an owned `Message`, which takes
+    /// it over via `zmq_msg_init_data` instead of copying it into a message of
+    /// its own. A failed send frees that message, so the rare retry re-encodes
+    /// rather than re-queueing the same frame.
     pub fn send(&self, req: &ExascriptRequest) -> Result<(), ProtocolError> {
-        let buf = req.encode_to_vec();
-        tracing::debug!(mt = req.r#type, len = buf.len(), "send");
-        self.retry_transient(|| self.socket.send(&buf, 0), "send")
+        tracing::debug!(mt = req.r#type, len = req.encoded_len(), "send");
+        self.retry_transient(
+            || self.socket.send(zmq::Message::from(req.encode_to_vec()), 0),
+            "send",
+        )
     }
 
     /// Blocks until the DB's REP socket delivers its single reply frame; the

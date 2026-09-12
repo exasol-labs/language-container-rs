@@ -162,7 +162,7 @@ fn returns_output_bans_emit() {
         IterType::ExactlyOnce,
         Box::new(|| Ok(None)),
     );
-    match bridge.emit(&[Value::Int64(9)]) {
+    match bridge.emit(vec![Value::Int64(9)]) {
         Err(UdfError::User(msg)) => assert!(
             msg.contains("emit()") && msg.contains("RETURNS"),
             "unexpected emit-ban message: {msg}"
@@ -292,12 +292,12 @@ fn emitted_rows_carry_the_input_row_number() {
                 ))
             }),
         );
-        bridge.emit(&[Value::Int64(1)]).unwrap();
-        bridge.emit(&[Value::Int64(2)]).unwrap();
+        bridge.emit(vec![Value::Int64(1)]).unwrap();
+        bridge.emit(vec![Value::Int64(2)]).unwrap();
         assert!(bridge.advance_row().unwrap());
-        bridge.emit(&[Value::Int64(3)]).unwrap();
+        bridge.emit(vec![Value::Int64(3)]).unwrap();
     }
-    assert_eq!(emit.to_proto(&out_meta).row_number, vec![41, 41, 42]);
+    assert_eq!(emit.take_proto(&out_meta).row_number, vec![41, 41, 42]);
 }
 
 /// `to_proto`'s per-type blocks are pre-sized with `Vec::with_capacity` for
@@ -316,7 +316,7 @@ fn to_proto_presizes_string_block_capacity() {
     emit.push(vec![Value::String("b".into())], 0);
     emit.push(vec![Value::String("c".into())], 0);
 
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
     assert_eq!(table.data_string, vec!["a", "b", "c"]);
 }
 
@@ -369,7 +369,7 @@ fn emit_buffer_roundtrips_through_proto() {
         0,
     );
 
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
     // Decoding the emitted batch back must reproduce the original rows,
     // proving from_proto/to_proto are symmetric (dense per-type blocks).
     let rs = InputRowSet::from_proto(&table, &meta);
@@ -412,7 +412,7 @@ fn emit_packs_by_declared_type_not_value_variant() {
     emit.push(vec![Value::String("EU".into()), Value::Int64(1)], 0);
     emit.push(vec![Value::String("EU".into()), Value::Int64(2)], 0);
 
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
     // Both columns are numeric/string -> the string block holds all cells in
     // row-major (row, column) order: row0 region,id then row1 region,id.
     assert_eq!(table.data_string, vec!["EU", "1", "EU", "2"]);
@@ -466,7 +466,7 @@ fn emit_string_block_is_row_major_across_columns() {
         0,
     );
 
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
     assert_eq!(table.data_string, vec!["100", "AAA", "200", "BBB"]);
 
     let rs = InputRowSet::from_proto(&table, &meta);
@@ -511,7 +511,7 @@ fn emit_null_cell_occupies_no_type_block_slot() {
         0,
     );
 
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
     // row0: id=NULL (skipped), note="AAA"; row1: id="5", note="BBB".
     assert_eq!(table.data_string, vec!["AAA", "5", "BBB"]);
     assert_eq!(table.data_nulls, vec![true, false, false, false]);
@@ -573,7 +573,7 @@ fn bridge_typed_getters_return_typed_options() {
     // Round-trip: from_proto -> to_proto -> from_proto preserves typed values.
     let mut emit = EmitBuffer::new();
     emit.push(decoded.to_vec(), 0);
-    let reproto = emit.to_proto(&meta);
+    let reproto = emit.take_proto(&meta);
     let reread = InputRowSet::from_proto(&reproto, &meta);
     assert_eq!(reread.row(0).unwrap(), decoded);
 }
@@ -696,7 +696,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
         );
 
         for _ in 0..(rows_to_limit - 1) {
-            bridge.emit(&[row_value()]).unwrap();
+            bridge.emit(vec![row_value()]).unwrap();
         }
         assert_eq!(
             flush_count.get(),
@@ -704,7 +704,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
             "no flush expected while under the limit"
         );
 
-        bridge.emit(&[row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
         assert_eq!(
             flush_count.get(),
             1,
@@ -713,8 +713,8 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
 
         // Rows pushed after the mid-run flush stay buffered for the eventual
         // tail flush; they must not trigger a second flush on their own.
-        bridge.emit(&[row_value()]).unwrap();
-        bridge.emit(&[row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
+        bridge.emit(vec![row_value()]).unwrap();
         assert_eq!(
             flush_count.get(),
             1,
@@ -741,7 +741,7 @@ fn timestamp_emit_nanosecond_roundtrip() {
     // WHEN serialised via EmitBuffer -> to_proto (uses value_to_block_string).
     let mut emit = EmitBuffer::new();
     emit.push(vec![Value::Timestamp(ts)], 0);
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
 
     // THEN the emitted string contains exactly 9 fractional digits.
     let emitted_str = &table.data_string[0];
@@ -1178,7 +1178,7 @@ fn to_proto_skips_unsupported_columns_in_both_tally_and_packing() {
     let meta = vec![col("a", ExaType::Int64), col("u", ExaType::Unsupported)];
     let mut emit = EmitBuffer::new();
     emit.push(vec![Value::Int64(7), Value::String("ignored".into())], 0);
-    let table = emit.to_proto(&meta);
+    let table = emit.take_proto(&meta);
 
     assert_eq!(table.data_int64, vec![7]);
     assert!(
@@ -1436,7 +1436,7 @@ fn single_call_context_get_is_unimplemented() {
 /// `Unimplemented`.
 #[test]
 fn single_call_context_emit_is_unimplemented() {
-    match single_call_ctx().emit(&[Value::Int64(1)]) {
+    match single_call_ctx().emit(vec![Value::Int64(1)]) {
         Err(UdfError::Unimplemented(msg)) => assert!(msg.contains("emit")),
         other => panic!("expected Unimplemented, got {other:?}"),
     }
@@ -1726,7 +1726,7 @@ mod fast_string_block_tests {
         for row in &rows {
             emit.push(row.clone(), 0);
         }
-        let table = emit.to_proto(&meta);
+        let table = emit.take_proto(&meta);
 
         assert_eq!(
             table.data_string, expected_string,
@@ -2044,7 +2044,7 @@ mod arrow_tests {
             ],
             0,
         );
-        let row_table = row_buf.to_proto(&meta);
+        let row_table = row_buf.take_proto(&meta);
 
         // Batch path — batch fits in one slice (< 4MB), so no mid-batch
         // flush; the whole thing lands in the tail.
@@ -2062,7 +2062,7 @@ mod arrow_tests {
             "no flush expected for tiny batch"
         );
         // Tail is now in batch_buf.
-        let batch_table = batch_buf.to_proto(&meta);
+        let batch_table = batch_buf.take_proto(&meta);
 
         // The two tables must be byte-identical.
         assert_eq!(row_table.data_int64, batch_table.data_int64, "int64 block");
@@ -2131,7 +2131,7 @@ mod arrow_tests {
 
         let mut buf = EmitBuffer::new();
         buf.push_batch(&batch, &meta, 7, &mut |_| Ok(())).unwrap();
-        assert_eq!(buf.to_proto(&meta).row_number, vec![7, 7, 7]);
+        assert_eq!(buf.take_proto(&meta).row_number, vec![7, 7, 7]);
     }
 
     /// `encode_slice` is byte-identical to the row path across all five proto
@@ -2349,7 +2349,7 @@ mod arrow_tests {
                 0,
             );
         }
-        let row_table = row_buf.to_proto(&meta);
+        let row_table = row_buf.take_proto(&meta);
 
         let slice_table = encode_slice(&batch, &meta, 0).unwrap();
 
@@ -2393,7 +2393,7 @@ mod arrow_tests {
 
         let mut buf = EmitBuffer::new();
         buf.push_batch(&batch, &meta, 0, &mut |_| Ok(())).unwrap();
-        let table = buf.to_proto(&meta);
+        let table = buf.take_proto(&meta);
 
         // Row-major: row0(s1,s2), row1(s1,s2)
         assert_eq!(table.data_string, vec!["A0", "B0", "A1", "B1"]);
@@ -2429,7 +2429,7 @@ mod arrow_tests {
 
         let mut buf = EmitBuffer::new();
         buf.push_batch(&batch, &meta, 0, &mut |_| Ok(())).unwrap();
-        let table = buf.to_proto(&meta);
+        let table = buf.take_proto(&meta);
 
         // Only row0's non-null values are in the type blocks.
         assert_eq!(table.data_int64, vec![10i64]);
@@ -2616,13 +2616,13 @@ mod arrow_tests {
         for n in [1i64, 2, 3] {
             row_buf.push(vec![Value::Int64(n)], 0);
         }
-        let row_table = row_buf.to_proto(&meta);
+        let row_table = row_buf.take_proto(&meta);
 
         let mut batch_buf = EmitBuffer::new();
         batch_buf
             .push_batch(&batch, &meta, 0, &mut |_| Ok(()))
             .expect("Int64 must feed a NUMERIC column");
-        let batch_table = batch_buf.to_proto(&meta);
+        let batch_table = batch_buf.take_proto(&meta);
 
         assert_eq!(batch_table.data_string, vec!["1", "2", "3"]);
         assert_eq!(row_table.data_string, batch_table.data_string);
@@ -2731,7 +2731,7 @@ mod arrow_tests {
         {
             let mut bridge = make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
             // Row-based emit: 1 row
-            bridge.emit(&[Value::Int64(1)]).unwrap();
+            bridge.emit(vec![Value::Int64(1)]).unwrap();
             // Batch-based emit: 2 rows. push_batch flushes the pending row
             // first (decision-log [7] step 1) to preserve FIFO order, then
             // the 2 batch rows land in the tail as they're under threshold.
@@ -2747,7 +2747,7 @@ mod arrow_tests {
         assert_eq!(emit.len(), 2, "batch tail must have 2 rows");
 
         // Verify the tail values (the 2 batch rows).
-        let table = emit.to_proto(&meta);
+        let table = emit.take_proto(&meta);
         let rs2 = InputRowSet::from_proto(&table, &meta);
         assert_eq!(rs2.row(0).unwrap(), &[Value::Int64(2)]);
         assert_eq!(rs2.row(1).unwrap(), &[Value::Int64(3)]);

@@ -9,7 +9,7 @@ use exasol_udf_sdk::value::Value;
 /// compile cleanly and let the ban be exercised at IT time.
 #[exasol_udf]
 pub fn returns_with_emit(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
-    ctx.emit(&[Value::Int64(1)])?;
+    ctx.emit(vec![Value::Int64(1)])?;
     Ok(Some(Value::Int64(42)))
 }
 

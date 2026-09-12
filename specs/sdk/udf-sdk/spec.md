@@ -71,6 +71,13 @@ A UDF author needs a `UdfContext` to unit-test a UDF function without a live hos
 * *AND* `None` MUST convert to `Value::Null`, so a RETURNS function expresses SQL NULL as `Ok(None)`
 * *AND* the unit form `Result<(), UdfError>` MUST remain the EMITS shape, so `UdfRun::run` and existing EMITS UDFs that produce output through `ctx.emit()` compile and behave unchanged
 
+### Scenario: UdfContext exposes an emit channel for EMITS output
+
+* *GIVEN* the `UdfContext` trait
+* *WHEN* a UDF produces an EMITS output row
+* *THEN* the trait MUST provide `emit(&mut self, values: Vec<Value>) -> Result<(), UdfError>`, taking the row by value so the author hands the host ownership of it
+* *AND* the SDK MUST NOT expose a borrowed-slice form of `emit`, so one call shape carries every output row
+
 ### Scenario: UdfContext exposes a set_return channel for RETURNS output
 
 * *GIVEN* the `UdfContext` trait

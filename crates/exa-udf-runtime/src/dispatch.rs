@@ -232,11 +232,10 @@ fn tail_flush(
         return Ok(());
     }
     emit_buf.record_flush_telemetry();
-    let table = emit_buf.to_proto(&meta.output_columns);
+    let table = emit_buf.take_proto(&meta.output_columns);
     let mut proto = proto_cell.borrow_mut();
     let req = proto.emit_request(table);
     request(transport, &mut proto, req)?;
-    emit_buf.clear();
     Ok(())
 }
 

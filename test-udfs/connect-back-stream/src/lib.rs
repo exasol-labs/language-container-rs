@@ -13,7 +13,7 @@ pub fn connect_back_stream(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         count += 1;
         Ok(())
     })?;
-    ctx.emit(&[Value::Numeric(Decimal {
+    ctx.emit(vec![Value::Numeric(Decimal {
         unscaled: count as i128,
         scale: 0,
     })])
