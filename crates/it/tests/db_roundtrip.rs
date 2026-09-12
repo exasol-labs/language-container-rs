@@ -196,8 +196,8 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     // Single-call scenarios.
     single_call_default_output_columns_roundtrip(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_default_output_columns ok");
-    single_call_unimplemented_returns_undefined(&mut conn, &sc_path).await?;
-    eprintln!("[it] scenario single_call_unimplemented ok");
+    dynamic_emits_without_columns_surfaces_db_error(&mut conn, &emit_k_path).await?;
+    eprintln!("[it] scenario dynamic_emits_without_columns ok");
     single_call_adapter_surfaces_live_handshake_metadata(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_adapter_handshake_metadata ok");
 
@@ -1228,15 +1228,45 @@ async fn single_call_default_output_columns_roundtrip(
     Ok(())
 }
 
-/// Scenario: a single-call request for an unimplemented function
-/// (`SC_FN_GENERATE_SQL_FOR_EXPORT_SPEC`) surfaces `MT_UNDEFINED_CALL`.
-/// Unit tests already cover dispatch correctness; here we confirm the script
-/// loads without issue.
-async fn single_call_unimplemented_returns_undefined(
-    _conn: &mut Connection,
-    _udf_object: &str,
+/// Scenario: an EMITS script with dynamic output columns called without an
+/// EMITS clause. The DB requests `SC_FN_DEFAULT_OUTPUT_COLUMNS`, which the
+/// `#[exasol_udf]` macro leaves unimplemented, so the container replies
+/// `MT_UNDEFINED_CALL` and must accept the DB's echo of it: the query then
+/// fails with the DB's own diagnostic instead of a container protocol error.
+/// The call with an explicit EMITS clause proves the script itself is sound.
+/// The DB's wording is not asserted — it varies across the version matrix.
+async fn dynamic_emits_without_columns_surfaces_db_error(
+    conn: &mut Connection,
+    udf_object: &str,
 ) -> Result<()> {
-    Ok(())
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_k(k BIGINT) EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(TO_CHAR(idx) ORDER BY idx) \
+         FROM (SELECT emit_k(2) EMITS (idx BIGINT) FROM DUAL)",
+    )
+    .await?;
+    if got.as_deref() != Some("0,1") {
+        bail!("emit_k with an explicit EMITS clause produced {got:?}, expected \"0,1\"");
+    }
+
+    match conn.query("SELECT emit_k(2) FROM DUAL").await {
+        Ok(_) => {
+            bail!("emit_k without an EMITS clause succeeded; expected the DB to reject it")
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("F-UDF-CL-RUST-") {
+                bail!("undefined single call surfaced a container protocol error: {msg}");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Extract the digits following `<key>=` in the adapter error text and parse

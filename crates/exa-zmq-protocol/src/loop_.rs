@@ -90,6 +90,12 @@ impl Protocol {
                 Ok((HostEvent::SingleCallAck, None))
             }
 
+            // Likewise the DB echoes MT_UNDEFINED_CALL for a hook the container
+            // does not implement, and only ends the session afterwards.
+            (MessageType::MtUndefinedCall, Phase::Run) if self.single_call_mode => {
+                Ok((HostEvent::UndefinedCallAck, None))
+            }
+
             // MT_CALL is only valid in single-call mode.
             (MessageType::MtCall, Phase::Run) if self.single_call_mode => {
                 let call = resp

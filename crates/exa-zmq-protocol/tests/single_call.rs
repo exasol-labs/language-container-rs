@@ -160,6 +160,35 @@ fn mt_return_ack_in_single_call_mode_emits_single_call_ack() {
     );
 }
 
+#[test]
+fn mt_undefined_call_ack_in_single_call_mode_emits_undefined_call_ack() {
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto, single_call_meta());
+
+    let (ev, _) = proto.step(response(MessageType::MtUndefinedCall)).unwrap();
+    assert!(
+        matches!(ev, HostEvent::UndefinedCallAck),
+        "expected UndefinedCallAck for the MT_UNDEFINED_CALL echo, got {ev:?}"
+    );
+}
+
+/// MT_UNDEFINED_CALL outside single-call mode is still a protocol error.
+#[test]
+fn mt_undefined_call_in_non_single_call_mode_is_protocol_error() {
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto, scalar_meta());
+
+    let err = proto
+        .step(response(MessageType::MtUndefinedCall))
+        .unwrap_err();
+    match err {
+        exa_zmq_protocol::ProtocolError::UnexpectedMessage(ty, _) => {
+            assert_eq!(ty, MessageType::MtUndefinedCall as i32);
+        }
+        other => panic!("expected UnexpectedMessage, got {other:?}"),
+    }
+}
+
 /// MT_RETURN from DB in non-single-call mode is still a protocol error.
 #[test]
 fn mt_return_in_non_single_call_mode_is_protocol_error() {

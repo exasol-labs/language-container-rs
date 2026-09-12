@@ -28,6 +28,8 @@ v2 adds single-call dispatch routing `SC_FN_*` to vtable hooks and load-time val
 * *WHEN* the single-call dispatcher receives a `HostEvent::SingleCall` with `Sc_Fn_Generate_Sql_For_Export_Spec`
 * *THEN* the hook MUST return `UdfError::Unimplemented`
 * *AND* the dispatcher MUST reply with `HostAction::UndefinedCall`
+* *AND* it MUST accept the DB's `MT_UNDEFINED_CALL` echo as the acknowledgement and close the run with `MT_DONE`, leaving the DB to raise its own "function not implemented" error
+* *AND* an acknowledgement that does not echo the message just sent MUST close the session with an error rather than be accepted
 
 ### Scenario: Virtual-schema adapter call is dispatched to the adapter hook
 

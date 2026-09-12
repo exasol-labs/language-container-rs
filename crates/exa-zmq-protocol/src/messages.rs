@@ -17,6 +17,10 @@ pub enum HostEvent {
     /// echoing MT_RETURN. The container continues the single-call loop (closing
     /// the run with MT_DONE); the session ends only on a later MT_CLEANUP.
     SingleCallAck,
+    /// The DB acknowledged the container's `MT_UNDEFINED_CALL` by echoing it.
+    /// The container closes the run with `MT_DONE`; the DB then ends the
+    /// session and raises its own "function not implemented" error.
+    UndefinedCallAck,
     Finished,
     Close(Option<String>),
     Ping(String),
