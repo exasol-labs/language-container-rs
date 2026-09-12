@@ -41,22 +41,25 @@ pub fn run_single_call(
             HostEvent::SingleCall {
                 fn_id, json_arg, ..
             } => {
-                let reply = match invoke_hook(
+                let outcome = invoke_hook(
                     transport,
                     proto,
                     udf,
                     fn_id,
                     json_arg.as_deref(),
                     handshake.clone(),
-                )? {
+                )?;
+                let undefined = matches!(outcome, HookOutcome::Undefined);
+                let reply = match outcome {
                     HookOutcome::Returned(result) => proto.return_request(result),
                     HookOutcome::Undefined => proto.undefined_call_request(fn_name(fn_id)),
                 };
-                // Send MT_RETURN/MT_UNDEFINED_CALL and consume the DB's ack.
-                // The ack is MT_RETURN (`SingleCallAck`); a defensive MT_CLEANUP
+                // Send MT_RETURN/MT_UNDEFINED_CALL and consume the DB's ack,
+                // which echoes the message just sent; a defensive MT_CLEANUP
                 // ends the session early.
                 match request(transport, proto, reply)? {
-                    HostEvent::SingleCallAck => {}
+                    HostEvent::SingleCallAck if !undefined => {}
+                    HostEvent::UndefinedCallAck if undefined => {}
                     HostEvent::Cleanup => break,
                     HostEvent::Close(msg) => return close_error(msg),
                     other => return unexpected(other),

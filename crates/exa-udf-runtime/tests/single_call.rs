@@ -245,6 +245,107 @@ fn unimplemented_hook_replies_undefined_call() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
+/// The DB acknowledges the container's MT_UNDEFINED_CALL by echoing it (17),
+/// not with MT_CLEANUP: it ends the session only after the container closes the
+/// run with MT_DONE, and then raises its own "function not implemented" error.
+/// This is the live path for an EMITS script called without an EMITS clause,
+/// whose SC_FN_DEFAULT_OUTPUT_COLUMNS hook the `#[exasol_udf]` macro leaves
+/// unimplemented.
+#[test]
+fn mt_undefined_call_ack_terminates_session() {
+    let so = fixture_cdylib_path("single_call_fixture");
+    let conn_id = 23u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("undef-ack");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnGenerateSqlForExportSpec,
+            Some("{}"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtUndefinedCall as i32,
+        "expected MT_UNDEFINED_CALL for an unregistered hook"
+    );
+    send_resp(&server, &response(MessageType::MtUndefinedCall, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtDone as i32,
+        "expected MT_DONE after the MT_UNDEFINED_CALL echo"
+    );
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+/// The ack must echo the message the container sent. An MT_RETURN answering an
+/// MT_UNDEFINED_CALL is a desynchronised exchange and is reported, not masked.
+#[test]
+fn mismatched_ack_for_undefined_call_is_hard_error() {
+    let so = fixture_cdylib_path("single_call_fixture");
+    let conn_id = 29u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("undef-mismatch");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &call_response(
+            conn_id,
+            SingleCallFunctionId::ScFnGenerateSqlForExportSpec,
+            Some("{}"),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtUndefinedCall as i32);
+    send_resp(&server, &response(MessageType::MtReturn, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "expected the session to close on a mismatched ack"
+    );
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(
+        result.is_err(),
+        "expected a runtime error on a mismatched ack"
+    );
+}
+
 /// The DB acknowledges the container's MT_RETURN with MT_RETURN (16), not
 /// MT_CLEANUP (11).  The runtime must then close the run with MT_DONE, get
 /// MT_CLEANUP, and finish cleanly — mirroring the canonical C++ single-call
