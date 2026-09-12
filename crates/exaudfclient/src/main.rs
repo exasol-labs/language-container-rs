@@ -7,16 +7,6 @@ fn main() {
     // SAFETY: main() runs single-threaded before any other threads are spawned.
     unsafe { std::env::set_var("HOME", "/tmp") };
 
-    // Debug tracing: write to /tmp so it survives even when BucketFS is read-only.
-    // This file is read by the integration test harness via dump_udf_logs().
-    let _ = std::fs::write(
-        "/tmp/exaudf_started.txt",
-        format!(
-            "exaudfclient started; args: {:?}\n",
-            std::env::args().collect::<Vec<_>>()
-        ),
-    );
-
     // The filter starts at INFO (or RUST_LOG if set). After the handshake
     // delivers %udf_debug_level from the script source, Runtime::run() calls
     // the on_level_resolved hook which modifies this handle in-place — no
@@ -32,6 +22,7 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
+    tracing::debug!("exaudfclient started; args: {:?}", args);
 
     match run(&args, |level| {
         // Apply %udf_debug_level resolved from the script source post-handshake.
@@ -90,9 +81,6 @@ fn run(args: &[String], on_level_resolved: impl Fn(tracing::Level)) -> Result<()
         ));
     }
 
-    let parser_version = resolve_parser_version(args);
-    tracing::debug!("parser_version={}", parser_version);
-
     // MT_CLIENT's client_name field is documented as "URL of the client in form:
     // tcp://10.10.1.1:2000". Send the actual ZMQ endpoint URL so Part:40 recognises
     // this as a valid SLC connection and allows connect-back sessions without crashing.
@@ -103,21 +91,8 @@ fn run(args: &[String], on_level_resolved: impl Fn(tracing::Level)) -> Result<()
         .map_err(|e| Exit::new(1, format!("F-UDF-CL-RUST-0001: {}", e)))
 }
 
-/// Resolve parser version from env var, then from a `parser_version=N` CLI arg,
-/// then default to "1".
-pub fn resolve_parser_version(args: &[String]) -> String {
-    if let Ok(v) = std::env::var("EXAUDF_PARSER_VERSION") {
-        return v;
-    }
-    args.iter()
-        .skip(3)
-        .find(|a| a.starts_with("parser_version="))
-        .map(|a| a.trim_start_matches("parser_version=").to_string())
-        .unwrap_or_else(|| "1".to_string())
-}
-
 fn usage() -> &'static str {
-    "Usage: exaudfclient <endpoint> lang=rust [parser_version=N]\n\
+    "Usage: exaudfclient <endpoint> lang=rust [scriptOptionsParserVersion=N]\n\
      Exasol Rust UDF Client v1"
 }
 

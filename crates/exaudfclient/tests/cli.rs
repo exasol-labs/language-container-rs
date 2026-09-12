@@ -61,3 +61,16 @@ fn valid_invocation_delegates() {}
 #[test]
 #[ignore = "requires live ZMQ endpoint"]
 fn runtime_failure_prefixed() {}
+
+#[test]
+fn start_writes_no_debug_file() {
+    let marker = std::path::Path::new("/tmp/exaudf_started.txt");
+    let _ = std::fs::remove_file(marker);
+
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_exaudfclient"))
+        .args(["tcp://localhost:1234", "lang=python"])
+        .output()
+        .expect("failed to run binary");
+
+    assert!(!marker.exists(), "launcher wrote {}", marker.display());
+}
