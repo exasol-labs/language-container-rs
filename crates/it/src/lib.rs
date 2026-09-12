@@ -271,7 +271,7 @@ impl Harness {
         let script = concat!(
             // Search entire container filesystem for debug files the SLC may have written
             "echo '=== Searching for exaudf debug files ===';",
-            " find / -maxdepth 8 \\( -name 'cb_debug.txt' -o -name 'exaudf_started.txt' -o -name 'udf_trace.txt' \\)",
+            " find / -maxdepth 8 -name 'cb_debug.txt'",
             " 2>/dev/null | head -10",
             " | xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}' 2>/dev/null;",
             " echo '=== EXASolution log tail ===';",
