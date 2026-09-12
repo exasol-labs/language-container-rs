@@ -210,6 +210,11 @@ jobs:
           cargo llvm-cov report \
             --lcov --output-path lcov-unit.info
 
+      - name: Protocol benchmark smoke (one iteration per cell, no timing)
+        run: |
+          BENCH_ROWS=10000 cargo bench -p exa-udf-runtime \
+            --features bench --bench protocol -- --test
+
       - name: Upload unit coverage
         if: always()
         uses: actions/upload-artifact@v4

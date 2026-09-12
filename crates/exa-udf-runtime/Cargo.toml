@@ -28,6 +28,8 @@ itoa = { workspace = true }
 # (dev-dependency features unify into the crate under test), so a featureless
 # `cargo test` would no longer cover the emit-arrow-off configuration.
 emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch", optional = true }
+# Optional, not a dev-dependency: it needs `emit-arrow`, which would unify into every test build.
+bench-udfs = { path = "../../benches/bench-udfs", optional = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
@@ -36,6 +38,7 @@ connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
 # neither the production graph nor the default test graph. Runs
 # `tests/emit_arrow_dlopen.rs`, which is otherwise compiled out.
 emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch"]
+bench = ["emit-arrow", "dep:bench-udfs"]
 
 [dev-dependencies]
 exasol-udf-sdk = { path = "../exasol-udf-sdk", features = ["test-support"] }
@@ -51,3 +54,10 @@ scalar-double = { path = "../../test-udfs/scalar-double" }
 scalar-next-illegal = { path = "../../test-udfs/scalar-next-illegal" }
 set-sum = { path = "../../test-udfs/set-sum" }
 single-call-fixture = { path = "../../test-udfs/single-call-fixture" }
+criterion = { workspace = true }
+exa-mock-db = { path = "../exa-mock-db" }
+
+[[bench]]
+name = "protocol"
+harness = false
+required-features = ["bench"]

@@ -4,7 +4,7 @@
 
 # Debugging Rust UDFs
 
-## Output redirect: `SET SESSION SCRIPT OUTPUT ADDRESS`
+## Output redirect: `SCRIPT_OUTPUT_ADDRESS`
 
 This is the primary mechanism for capturing live UDF output. It is a **database feature**, not an SLC feature: the engine reads the session attribute, opens a TCP connection to your listener, and `dup2`s the socket onto the child process's fd 1 (stdout) and fd 2 (stderr) *before* `exaudfclient` is spawned. Because the redirect is wired before the process starts, it captures:
 
@@ -25,7 +25,7 @@ nc -l 5000
 In your SQL session, set the redirect and run a Rust UDF:
 
 ```sql
-SET SESSION SCRIPT OUTPUT ADDRESS 'mydev.local:5000';
+ALTER SESSION SET SCRIPT_OUTPUT_ADDRESS = 'mydev.local:5000';
 
 SELECT my_schema.scalar_double(21);
 ```
@@ -34,7 +34,7 @@ All runtime output for that query appears live in the `nc` terminal.
 
 To verify the redirect captures pre-Rust output (e.g. a bad `%udf_object` path), register a script that points at a nonexistent `.so` and run it — the load error appears in `nc` even though no UDF code executed.
 
-> The redirect is session-scoped. Clear it with `SET SESSION SCRIPT OUTPUT ADDRESS ''` or by closing the session.
+> The redirect is session-scoped. Clear it with `ALTER SESSION SET SCRIPT_OUTPUT_ADDRESS = ''` or by closing the session.
 
 ---
 
@@ -107,7 +107,7 @@ The Python3 SLC exposes `exa.redirect_output(host, port)` from the script body �
 
 | | Python3 SLC | Rust SLC |
 |---|---|---|
-| Redirect mechanism | `exa.redirect_output(host, port)` in script body | `SET SESSION SCRIPT OUTPUT ADDRESS` DB session attribute |
+| Redirect mechanism | `exa.redirect_output(host, port)` in script body | `SCRIPT_OUTPUT_ADDRESS` DB session attribute |
 | Captures startup crashes | No — connection opened after script starts | Yes — DB `dup2`s before spawn |
 | Captures ABI/load errors | No | Yes |
 | Verbosity control | `exa.set_output_level(...)` or similar | `%udf_debug_level` directive in `CREATE SCRIPT` |

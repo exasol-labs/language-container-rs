@@ -34,8 +34,10 @@ members = [
     "test-udfs/emit-k",
     "test-udfs/scalar-next-illegal",
     "test-udfs/returns-with-emit",
-    "benches/emit-bench",
-    "benches/emit-bench-udf",
+    "benches/bench-schema",
+    "benches/bench-udfs",
+    "benches/udf-bench",
+    "crates/exa-mock-db",
 ]
 # `it` requires a live Exasol container; build/test it explicitly:
 # `cargo test -p it --features integration`
@@ -104,6 +106,12 @@ syn = { version = "2", features = ["full"] }
 exarrow-rs = { version = "^0.13.0", features = ["websocket"] }
 chrono = "0.4"
 itoa = "1"
+# Benchmark suite (benches/, crates/exa-mock-db): Tier 1 harness and Tier 2
+# driver/CLI/JSON. None of these enter the shipped binary.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 goblin = { version = "0.9", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 
 [profile.release]

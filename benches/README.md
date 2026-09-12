@@ -1,61 +1,82 @@
-# Emit-throughput benchmark — Rust SLC vs native Python3
+# UDF shape benchmarks
 
-Verifies the Rust SLC's emit path is as fast as it can be, with the builtin
-Python3 SLC as the baseline. Each run is decomposed into four measure points:
+| Tier | Runs | Measures | A/B |
+|---|---|---|---|
+| 1 `protocol` | `cargo bench`, mock engine (`crates/exa-mock-db`), no Docker | client receive, decode, dispatch, UDF body, encode, send; every `MT_EMIT` size | Criterion `--save-baseline` / `--baseline` |
+| 2 `udf-bench` | Exasol in Docker or external | the whole query including the engine; pass-through correctness | JSON per run, `compare` two sets |
 
-1. **SLC startup** — cold first call (process spawn + `dlopen` / interpreter import).
-2. **Data generation** — build all N rows, emit one sentinel (`do_emit=0`).
-3. **Data transfer (emit)** — emit + fetch all N rows (`do_emit=1`);
-   `T_transfer = T_full − T_generation`.
-4. **Data transfer (ingest, Rust only)** — decode-side cost of
-   `InputRowSet::from_proto` / `decode_string_block`: a `sink_<shape>` SET
-   script reads every column of every row produced by `emit_<shape>_<mode>`
-   and reports the row count back; `T_ingest = T_ingest_full − T_full` (the
-   emit `T_full` already measured in point 3, for the same shape/mode/N).
+Both use `benches/bench-udfs` (one cdylib, every entry point) and `benches/bench-schema`.
+Column classes: `native` (`k DECIMAL(18,0), v DOUBLE`), `strblock` (`k, amount DECIMAL(18,2), d DATE, ts TIMESTAMP`),
+`varchar` (`k, label VARCHAR(100)`), `wide` (24 columns, 12 nullable, emit-only: a SCALAR EMITS UDF expanding one
+input row into millions of wide rows; its batch cells take rows per Arrow batch, 8192 or 65536, as third parameter).
+Wire bytes per row (Tier 1 `bytes/row`): 12.9, 60.6, 56.9, 472.2.
 
-**Data transfer (rows/s, MB/s) is the headline metric.** Matrix: two shapes ×
-{row, columnar} × {Rust, Python3} × {1M, 5M}. Median of 5 runs.
-
-## Shapes
-
-- **mixed** — `id BIGINT, label VARCHAR(100), val DOUBLE` (~66 B/row). No
-  NUMERIC/DATE/TIMESTAMP string-block columns.
-- **wide** — `id BIGINT, amount DECIMAL(18,2), event_date DATE, event_ts
-  TIMESTAMP, label VARCHAR(100)` (~106 B/row). Exercises
-  `value_to_block_string`'s `chrono`- and `Decimal`-`Display`-based formatting
-  for all three string-block temporal/numeric types on the emit side, and the
-  mirror `decode_string_block` parsing on the ingest side — added because the
-  original `mixed`-only benchmark had zero coverage of the types under
-  suspicion of dominating `emit_batch`'s cost (see
-  `specs/_recorded/2026-07-06-add-emit-transfer-spikes/plan.md`).
-
-Both shapes have Rust (`emit_<shape>_row`, `emit_<shape>_batch`,
-`sink_<shape>`) and Python3 (`py_<shape>_row`, `py_<shape>_batch`) scripts;
-ingest is measured for the Rust runtime only (`InputRowSet::from_proto` /
-`decode_string_block` are Rust-runtime-internal, not exercised by Python3's
-own decode path).
-
-## Run (Docker, Exasol 2026.1, EXA_DB_MEM_SIZE=4 GiB)
+## Tier 1
 
 ```bash
-docker build --target artifact --output type=local,dest=/tmp/slc .
-export SLC_TARBALL=/tmp/slc/lc-rs.tar.gz
-cargo build --release -p emit-bench-udf      # the bench UDF .so
-cargo run  --release -p emit-bench           # boots the DB and prints the table
+cargo bench -p exa-udf-runtime --features bench --bench protocol -- --save-baseline base   # on base
+cargo bench -p exa-udf-runtime --features bench --bench protocol -- --baseline base        # on change
+cargo bench -p exa-udf-runtime --features bench --bench protocol -- set_emits/native       # one group or cell
+BENCH_ROWS=10000 cargo bench -p exa-udf-runtime --features bench --bench protocol -- --test  # CI smoke
 ```
 
-## Run against an external Exasol
+| `BENCH_PROFILE` | rows/iteration | warm-up | measure | samples | 25 cells, 4-core Xeon 8488C |
+|---|---|---|---|---|---|
+| `quick` (default) | 250,000 | 1 s | 3 s | 10 | 169 s |
+| `full` | 1,000,000 | 3 s | 5 s | 10 | not yet measured |
 
-Set the harness external-mode vars, then run the bench (it uses `exapump` to wait
-for readiness):
+`BENCH_ROWS` overrides rows; `BENCH_ROWS_PER_CYCLE` (default 2,000) is how many SCALAR input rows the mock hands
+over per `MT_RUN` cycle, calibrated on docker-db 2026.1.1 from a Tier 2 `--udf-debug` log (row count, not a byte
+budget: native and varchar frames carry the same 2,000 rows at fourfold different sizes).
+
+Groups: `scalar_returns`, `scalar_emits_gen` (incl. `wide_row`, `wide_batch8k`, `wide_batch64k`),
+`scalar_emits_passthrough`, `set_returns` and `set_emits` (1 and 1,000 groups). After each group a counter table
+prints `MT_EMIT` messages, rows, bytes, `bytes/row`, `max_bytes` and the count over 4,000,000 bytes, which must be 0
+and is asserted.
+
+## Tier 2
 
 ```bash
-export EXASOL_HOST=... EXASOL_PORT=8563 BUCKETFS_PORT=2581 BUCKETFS_PASSWORD=...
+docker build --target artifact --output type=local,dest=/tmp/slc .   # per side, from its checkout
 export SLC_TARBALL=/tmp/slc/lc-rs.tar.gz
-cargo run --release -p emit-bench
+cargo build --release -p bench-udfs
+cargo run --release -p udf-bench -- run [--profile quick|full] [--rows N] [--filter set_] [--keep] [--udf-debug 172.17.0.1:5055]
+cargo run --release -p udf-bench -- compare --base a.json b.json --change c.json d.json
+cargo run --release -p udf-bench -- show bench-results/<commit>-<timestamp>.json
 ```
 
-Start that DB with `EXA_DB_MEM_SIZE='4 GiB'`. Override the Docker image via
-`EXASOL_VERSION` / `EXASOL_DB_SERIES`; override DB memory via `EXA_DB_MEM_SIZE`.
+Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`, `EXA_DB_MEM_SIZE`, default 4 GiB); external mode uses
+`EXASOL_HOST`, `EXASOL_PORT`, `BUCKETFS_PORT`, `BUCKETFS_PASSWORD`. Results land in the gitignored `bench-results/`.
+`--udf-debug host:port` sets `%udf_debug_level debug` and redirects the runtime log to a TCP listener on the host.
 
-> The Python3 columnar cells show `N/A` if pandas is absent from the builtin Python3.
+| `--profile` | rows (strblock table / wide) | warm-up | reps | 44 cells, docker-db 2026.1.1, 4 GiB | band |
+|---|---|---|---|---|---|
+| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s incl. Docker start | ±15 % |
+| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 264 s incl. Docker start | ±8 % |
+
+Cells: `control_<class>`, `scalar_returns_<class>`, `scalar_emits_gen_<class>_<mode>[_noemit]`, `scalar_emits_pt`,
+`set_returns_<class>_g<G>`, `set_emits_<class>_<mode>_g<G>`, `set_gen_<class>_<mode>`. Every query returns one row and
+aggregates a UDF output column. `scalar_emits_pt` reports `incorrect` while emitted rows do not land beside their
+input rows. The DB feeds DATE/TIMESTAMP columns into a UDF at 3k to 7k rows/s on 2026.1.1 (builtin Python3 is
+equally slow), so the strblock table is `n / 100` rows and those cells' `x_ctrl` is not comparable to native.
+Wide cells emit `n / 4` rows; generator cells report `MB_per_s` from `WIRE_BYTES_PER_ROW` in `cells.rs`, which
+must follow the Tier 1 `bytes/row` when a generator or the encoder changes.
+
+A/B against one DB: `run` from the base checkout (A), from the change checkout (C), repeat both (B, D), then
+`compare --base A B --change C D`. Mixed profiles, row counts or cells with changed rows are refused or noted.
+
+| interval vs 0 | median delta vs band | verdict |
+|---|---|---|
+| excludes | outside | `improved` / `regressed` |
+| excludes | inside | `small` |
+| crosses | any | `no change` |
+
+Fewer than 8 pooled samples on a side flags `low power`; Tukey outliers are flagged, never removed.
+
+## Decisions
+
+- `bench-udfs` is an optional dependency of the runtime behind the `bench` feature (it needs `emit-arrow`; a dev-dependency would unify that into every test build) and stays cdylib-only (UDF crates export identical symbols).
+- Tier 2 compares runs, not SLCs: each side builds its own tarball and `.so`.
+- Keys are `DECIMAL(18,0)` so `native` is native on the wire (BIGINT travels as a string).
+- `wide` is synthetic and emit-only: no Parquet reader (that would measure the reader, not the SLC).
+- CI runs the Tier 1 smoke only; `quick` is the loop, `full` is the evidence a performance PR quotes.

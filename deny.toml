@@ -1,12 +1,6 @@
-# cargo-deny gates what the SLC ships. The integration-test crate (`it`) and the
-# `benches/emit-bench*` harness are `publish = false` and never part of the
-# shipped binary, but they pull heavy test-only tooling (testcontainers/bollard/
-# reqwest → tokio-tar, hickory-dns, rustls-pemfile, webpki-roots). Excluding them
-# scopes the license/advisory scan to the shipped dependency graph; those deps
-# stay covered when they are genuinely shipped (verified: `cargo tree -p
-# exaudfclient -i <crate>` finds none of them).
+# Scope the license/advisory scan to what the SLC ships: `it` and the benchmark crates are `publish = false` and pull heavy test-only tooling.
 [graph]
-exclude = ["it", "emit-bench", "emit-bench-udf"]
+exclude = ["it", "udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
 
 [advisories]
 ignore = [
