@@ -6,7 +6,7 @@ Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/
 
 The SDK crate is a pure contract crate: it defines the ABI, trait interfaces, and value types. It does not link the host runtime or exarrow-rs. The `#[exasol_udf]` proc-macro generates the cdylib entry point and vtable from a struct that implements `UdfRun`. Output is produced two ways selected by the UDF function's return type: an EMITS function returns `Result<(), UdfError>` and pushes rows through `ctx.emit()`; a RETURNS function returns `Result<Option<T>, UdfError>` and its value becomes the single output row.
 
-`UdfContext` exposes plain handshake metadata to UDF code. Beyond the typed column accessors it provides `memory_limit()` and the `exascript_info` identity/origin accessors (`session_id`, `statement_id`, `node_id`, `node_count`, `vm_id`, `database_name`, `database_version`, `script_name`, `script_schema`, `current_user`, `current_schema`, `scope_user`), each sourced from `UdfMeta`; these are defaulted accessors (not feature-gated) so existing implementations keep compiling, overridden by the host context bridge to return the live value.
+`UdfContext` exposes plain handshake metadata to UDF code, including the declared column descriptors of both sides. Beyond the typed column accessors it provides `memory_limit()` and the `exascript_info` identity/origin accessors (`session_id`, `statement_id`, `node_id`, `node_count`, `vm_id`, `database_name`, `database_version`, `script_name`, `script_schema`, `current_user`, `current_schema`, `scope_user`), each sourced from `UdfMeta`; these are defaulted accessors (not feature-gated) so existing implementations keep compiling, overridden by the host context bridge to return the live value.
 
 A UDF author needs a `UdfContext` to unit-test a UDF function without a live host. The SDK therefore ships that double itself, behind the non-default `test-support` cargo feature, so no author and no in-repo fixture hand-writes an `impl UdfContext`. The feature adds items only. It declares no dependency and enables no other feature, so a dependent crate's featureless test configuration keeps its meaning.
 
@@ -78,6 +78,24 @@ A UDF author needs a `UdfContext` to unit-test a UDF function without a live hos
 * *THEN* the trait MUST provide `emit(&mut self, values: Vec<Value>) -> Result<(), UdfError>`, taking the row by value so the author hands the host ownership of it
 * *AND* the SDK MUST NOT expose a borrowed-slice form of `emit`, so one call shape carries every output row
 
+### Scenario: UdfContext exposes the declared input and output column metadata
+
+* *GIVEN* the `UdfContext` trait
+* *WHEN* a UDF inspects the schema the database declared for this call
+* *THEN* the SDK MUST own a `ColumnInfo` carrying `name`, `typ`, `type_name`, `size`, `precision`, and `scale`, and `exa-zmq-protocol` MUST re-use it rather than define its own column descriptor
+* *AND* the trait MUST provide `input_column(idx) -> Result<&ColumnInfo, UdfError>`, `output_column_count() -> usize`, and `output_column(idx) -> Result<&ColumnInfo, UdfError>`, returning a borrow so reading a schema allocates nothing, and `Err(UdfError::Type)` for an index outside the declared column count
+* *AND* each MUST be a provided (defaulted) trait method — the index accessors returning `UdfError::Unimplemented`, `output_column_count` returning `0` — so existing `UdfContext` implementations continue to compile
+* *AND* the output accessors MUST describe the shape the call site declared, so a UDF whose `EMITS` list is supplied per call builds its row from them rather than from a column plan passed as a parameter
+
+### Scenario: An emitted row is rejected when the declared columns cannot carry it
+
+* *GIVEN* a UDF producing an output row through `emit` (EMITS output) or the framework's `set_return` (RETURNS output)
+* *WHEN* the row's width differs from the declared output column count, or a cell's `Value` variant cannot feed its declared column
+* *THEN* the host MUST return `Err(UdfError::Type)` naming the offending column, before the row is buffered, rather than padding, truncating, or coercing it
+* *AND* `Value::Null` MUST be accepted in every column
+* *AND* an integer column MUST accept `Int32` and `Int64`, rejecting an `Int64` outside `i32` range for a column whose wire type is `PB_INT32`; a NUMERIC column MUST additionally accept `Numeric`, because Exasol delivers `BIGINT` as `PB_NUMERIC`
+* *AND* `Double`, `Bool`, `Date`, `Timestamp`, and `String` MUST be accepted only by DOUBLE, BOOLEAN, DATE, TIMESTAMP, and the string-family columns respectively
+
 ### Scenario: UdfContext exposes a set_return channel for RETURNS output
 
 * *GIVEN* the `UdfContext` trait
@@ -93,7 +111,7 @@ A UDF author needs a `UdfContext` to unit-test a UDF function without a live hos
 * *THEN* the crate MUST expose a `test_support` module providing a `TestContext` that implements `UdfContext` over caller-supplied rows, so the author writes no `impl UdfContext`
 * *AND* `TestContext` MUST offer a scalar constructor taking one `Vec<Value>` row whose `next` reports exhaustion, and a set constructor taking `Vec<Vec<Value>>` whose `next` advances a cursor across the group, with `num_columns` derived from the supplied row data rather than from a caller-set constant
 * *AND* `TestContext` MUST record emitted rows and the `set_return` value as `emitted()` and `captured_return()`, where `captured_return()` distinguishes "never called" from "called with `None`", and MUST let the caller replace the default `emit` and `next` behavior with a caller-supplied `UdfError`, so a fixture can assert the runtime's ban on `emit` in RETURNS output and on `next` in scalar input
-* *AND* `TestContext` MUST let the caller set each handshake metadata accessor and `debug_level`, every default matching the value the trait's own default returns, and MUST return `Err(UdfError::Type)` rather than panic from a `get` outside the current row or before the first `next` in set mode
+* *AND* `TestContext` MUST let the caller set each handshake metadata accessor and `debug_level`, every default matching the value the trait's own default returns, and supply the input and output `ColumnInfo` lists (unset by default) so a fixture can unit-test a UDF that reads its own schema, and MUST return `Err(UdfError::Type)` rather than panic from a `get` outside the current row or before the first `next` in set mode
 
 ### Scenario: The test-support feature ships a defaults-preserving UdfContext double
 

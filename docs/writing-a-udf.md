@@ -180,7 +180,46 @@ Every UDF receives `&mut dyn UdfContext`. The four core operations are:
 | `ctx.next()` | Advances to the next input row of a SET group, spanning `MT_NEXT` batches; returns `false` at the group boundary. Valid only for SET input — the host returns `Err` if a SCALAR UDF calls it |
 | `ctx.set_return(value)` | Sets the invocation's single RETURNS output value. The `#[exasol_udf]` macro calls this for you from the function's `Ok(Some(v))` / `Ok(None)` return; you never call it directly |
 
+| `ctx.num_columns()` | Number of input columns |
+| `ctx.input_column(i)` / `ctx.output_column(i)` | `&ColumnInfo` for input/output column `i`: `name`, `typ`, `type_name`, `size`, `precision`, `scale`, exactly as the database declared it. `ctx.output_column_count()` gives the output width |
+
 `next()` is for SET UDFs only — call it before the first `get()` on each row; it walks every row of the group across all `MT_NEXT` batches transparently. SCALAR UDFs start with the single input row already loaded and must not call `next()`. See §6 for the full RETURNS/EMITS × SCALAR/SET matrix.
+
+### Emitted rows are validated
+
+`emit()` (and the macro's RETURNS return value) is checked against the declared
+output columns before the row is buffered. A row of the wrong width, or a cell no
+declared column can carry, fails the query with a `Type` error naming the column.
+`Value::Null` is valid everywhere; otherwise each column accepts:
+
+| Declared column | Accepted `Value` |
+|-----------------|------------------|
+| `DECIMAL(p,0)` fitting i32 | `Int32`, `Int64` in i32 range |
+| `DECIMAL(p,0)` fitting i64 | `Int32`, `Int64` |
+| `DECIMAL(p,s)`, `BIGINT` | `Int32`, `Int64`, `Numeric` |
+| `DOUBLE` | `Double` |
+| `BOOLEAN` | `Bool` |
+| `VARCHAR`, `CHAR`, `GEOMETRY`, `HASHTYPE`, intervals | `String` |
+| `DATE` | `Date` |
+| `TIMESTAMP` | `Timestamp` |
+
+The database acknowledges an emit batch before it reads the rows, so it never
+reports a per-row problem: an unchecked mismatch would land as a wrong result
+rather than an error.
+
+### Column metadata
+
+A UDF whose output shape is supplied per call site reads it from the context
+instead of taking a redundant column plan as a parameter:
+
+```rust
+let mut row = Vec::with_capacity(ctx.output_column_count());
+for idx in 0..ctx.output_column_count() {
+    let column = ctx.output_column(idx)?;
+    row.push(render(&column.typ));
+}
+ctx.emit(row)?;
+```
 
 ### Typed getters
 

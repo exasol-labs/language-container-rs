@@ -1,6 +1,6 @@
 use crate::error::ProtocolError;
 use exa_proto::{ColumnType, ExascriptInfo, ExascriptMetadata, IterType as PbIterType};
-pub use exasol_udf_sdk::value::ExaType;
+pub use exasol_udf_sdk::value::{ColumnInfo, ExaType};
 
 /// Iteration axis for a UDF's input or output: `ExactlyOnce` is the scalar /
 /// RETURNS shape (one row per invocation), `Multiple` the set / EMITS shape
@@ -13,21 +13,11 @@ pub enum IterType {
 }
 
 #[derive(Debug, Clone)]
-pub struct ColumnMeta {
-    pub name: String,
-    pub typ: ExaType,
-    pub type_name: String,
-    pub size: Option<u32>,
-    pub precision: Option<u32>,
-    pub scale: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
 pub struct UdfMeta {
     pub(crate) input_iter: IterType,
     pub(crate) output_iter: IterType,
-    pub input_columns: Vec<ColumnMeta>,
-    pub output_columns: Vec<ColumnMeta>,
+    pub input_columns: Vec<ColumnInfo>,
+    pub output_columns: Vec<ColumnInfo>,
     pub single_call_mode: bool,
     pub source_code: String,
     pub script_name: String,
@@ -70,30 +60,29 @@ impl ConnInfo {
     }
 }
 
-impl ColumnMeta {
-    pub fn from_pb(col: &exa_proto::exascript_metadata::ColumnDefinition) -> Self {
-        let typ = match col.r#type() {
-            ColumnType::PbDouble => ExaType::Double,
-            ColumnType::PbInt32 => ExaType::Int32,
-            ColumnType::PbInt64 => ExaType::Int64,
-            ColumnType::PbNumeric => ExaType::Numeric {
-                precision: col.precision,
-                scale: col.scale,
-            },
-            ColumnType::PbDate => ExaType::Date,
-            ColumnType::PbBoolean => ExaType::Boolean,
-            ColumnType::PbUnsupported => ExaType::Unsupported,
-            ColumnType::PbTimestamp => refine_timestamp(&col.type_name),
-            ColumnType::PbString => refine_string(&col.type_name, col.size),
-        };
-        ColumnMeta {
-            name: col.name.clone(),
-            typ,
-            type_name: col.type_name.clone(),
-            size: col.size,
+/// Map one protobuf column definition onto the SDK's [`ColumnInfo`].
+pub fn column_from_pb(col: &exa_proto::exascript_metadata::ColumnDefinition) -> ColumnInfo {
+    let typ = match col.r#type() {
+        ColumnType::PbDouble => ExaType::Double,
+        ColumnType::PbInt32 => ExaType::Int32,
+        ColumnType::PbInt64 => ExaType::Int64,
+        ColumnType::PbNumeric => ExaType::Numeric {
             precision: col.precision,
             scale: col.scale,
-        }
+        },
+        ColumnType::PbDate => ExaType::Date,
+        ColumnType::PbBoolean => ExaType::Boolean,
+        ColumnType::PbUnsupported => ExaType::Unsupported,
+        ColumnType::PbTimestamp => refine_timestamp(&col.type_name),
+        ColumnType::PbString => refine_string(&col.type_name, col.size),
+    };
+    ColumnInfo {
+        name: col.name.clone(),
+        typ,
+        type_name: col.type_name.clone(),
+        size: col.size,
+        precision: col.precision,
+        scale: col.scale,
     }
 }
 
@@ -135,12 +124,8 @@ impl UdfMeta {
         Ok(UdfMeta {
             input_iter: iter_from_pb(meta.input_iter_type()),
             output_iter: iter_from_pb(meta.output_iter_type()),
-            input_columns: meta.input_columns.iter().map(ColumnMeta::from_pb).collect(),
-            output_columns: meta
-                .output_columns
-                .iter()
-                .map(ColumnMeta::from_pb)
-                .collect(),
+            input_columns: meta.input_columns.iter().map(column_from_pb).collect(),
+            output_columns: meta.output_columns.iter().map(column_from_pb).collect(),
             single_call_mode: meta.single_call_mode,
             source_code: info.source_code.clone(),
             script_name: info.script_name.clone(),

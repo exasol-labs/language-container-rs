@@ -180,6 +180,24 @@ pub enum ExaType {
     IntervalDayToSecond,
 }
 
+/// Declared metadata of one input or output column, as the database reported it
+/// in the handshake. Reached from UDF code through
+/// [`UdfContext::input_column`](crate::context::UdfContext::input_column) and
+/// [`output_column`](crate::context::UdfContext::output_column); the host holds
+/// the owning slices, so the accessors hand out a borrow and never allocate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnInfo {
+    pub name: String,
+    /// Mapped SQL type; the wire block a value of this column travels in.
+    pub typ: ExaType,
+    /// The SQL type as spelled by the database, e.g. `DECIMAL(18,2)`.
+    pub type_name: String,
+    /// Character length for string types, storage width for NUMERIC.
+    pub size: Option<u32>,
+    pub precision: Option<u32>,
+    pub scale: Option<u32>,
+}
+
 #[cfg(test)]
 #[path = "value_tests.rs"]
 mod tests;

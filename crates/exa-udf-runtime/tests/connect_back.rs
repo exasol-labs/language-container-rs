@@ -8,14 +8,14 @@
 #![cfg(feature = "connect-back")]
 
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
-use exa_zmq_protocol::{ColumnMeta, ConnInfo, ExaType};
+use exa_zmq_protocol::{ColumnInfo, ConnInfo, ExaType};
 use exasol_udf_sdk::connect_back::{ConnectionObject, ExaConnection};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 
 /// Build a minimal single-column bridge for tests that don't care about rows.
-fn empty_bridge_parts() -> (InputRowSet, EmitBuffer, Vec<ColumnMeta>) {
-    let cols = vec![ColumnMeta {
+fn empty_bridge_parts() -> (InputRowSet, EmitBuffer, Vec<ColumnInfo>) {
+    let cols = vec![ColumnInfo {
         name: "x".into(),
         typ: ExaType::Int64,
         type_name: "BIGINT".into(),

@@ -143,6 +143,6 @@ bitmap. The runtime maps these to the SDK `Value` enum. **Exasol `BIGINT` and
 write-back guide's Pitfalls).
 
 The wire delivers each column as one of eight proto column types.
-`ColumnMeta::from_pb` refines those using the SQL-level `type_name` field into
+`column_from_pb` refines those using the SQL-level `type_name` field into
 the canonical `ExaType` enum, which now lives in `exasol_udf_sdk::value` and is
 re-exported by `exa-zmq-protocol`.

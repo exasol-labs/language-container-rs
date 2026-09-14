@@ -12,7 +12,7 @@ use super::*;
 fn host_bridge_debug_level_returns_valid_level() {
     use exa_proto::ExascriptTableData;
 
-    let meta = vec![ColumnMeta {
+    let meta = vec![ColumnInfo {
         name: "a".to_string(),
         typ: ExaType::Int64,
         type_name: String::new(),
@@ -85,8 +85,8 @@ fn single_call_context_debug_level_returns_valid_level() {
     );
 }
 
-fn col(name: &str, typ: ExaType) -> ColumnMeta {
-    ColumnMeta {
+fn col(name: &str, typ: ExaType) -> ColumnInfo {
+    ColumnInfo {
         name: name.to_string(),
         typ,
         type_name: String::new(),
@@ -101,7 +101,7 @@ fn col(name: &str, typ: ExaType) -> ColumnMeta {
 fn make_bridge<'a>(
     input: &'a mut InputRowSet,
     emit: &'a mut EmitBuffer,
-    cols: &'a [ColumnMeta],
+    cols: &'a [ColumnInfo],
 ) -> HostContextBridge<'a> {
     HostContextBridge::new(
         input,
@@ -120,7 +120,7 @@ fn make_bridge<'a>(
 }
 
 /// A one-row single-Int64-column batch for the contract-gate tests.
-fn single_int_batch() -> (ExascriptTableData, Vec<ColumnMeta>) {
+fn single_int_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
     let meta = vec![col("a", ExaType::Int64)];
     let table = ExascriptTableData {
         rows: 1,
@@ -195,7 +195,7 @@ fn set_return_records_some_as_row_and_none_as_null() {
 
 /// One batch, 2 rows, mixed types with a NULL cell. Verifies dense per-type
 /// block decoding and row-major NULL bitmap handling.
-fn mixed_batch() -> (ExascriptTableData, Vec<ColumnMeta>) {
+fn mixed_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
     // Columns: [Int64, String, Double, Boolean]
     let meta = vec![
         col("a", ExaType::Int64),
@@ -656,6 +656,119 @@ fn emit_buffer_limit_is_exactly_4_000_000() {
     // The other tests use EMIT_BUFFER_LIMIT_BYTES symbolically, so a silent
     // change to 4 MiB would pass them. The wire limit is 4,000,000 bytes.
     assert_eq!(EMIT_BUFFER_LIMIT_BYTES, 4_000_000);
+}
+
+/// Every emitted row is checked against the declared output columns before it
+/// is buffered: `take_proto` packs by declared type, so an unchecked mismatch
+/// would reach the DB as a NULL, a wrapped integer or a stringified variant.
+#[test]
+fn bridge_emit_rejects_wrong_arity_and_types() {
+    let meta = vec![col("a", ExaType::Int64), col("b", ExaType::Double)];
+    let empty = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&empty, &meta);
+    let mut emit = EmitBuffer::new();
+    let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+
+    let cases: Vec<(&str, Vec<Value>)> = vec![
+        ("short row", vec![Value::Int64(1)]),
+        (
+            "long row",
+            vec![Value::Int64(1), Value::Double(1.0), Value::Int64(2)],
+        ),
+        (
+            "string into INT64",
+            vec![Value::String("1".into()), Value::Double(1.0)],
+        ),
+        ("int into DOUBLE", vec![Value::Int64(1), Value::Int64(2)]),
+    ];
+    for (what, row) in cases {
+        match bridge.emit(row) {
+            Err(UdfError::Type(_)) => {}
+            other => panic!("{what} must be rejected with Err(Type), got {other:?}"),
+        }
+    }
+
+    bridge
+        .emit(vec![Value::Int64(1), Value::Double(1.0)])
+        .expect("a well-typed row is accepted");
+    bridge
+        .emit(vec![Value::Null, Value::Null])
+        .expect("NULL is valid in every column");
+}
+
+/// `take_proto` narrows an INT32 column with `as i32`, which wraps. The check
+/// rejects the out-of-range value instead of emitting a wrapped one, and keeps
+/// accepting the integer widths each declared type can carry.
+#[test]
+fn column_accepts_integer_widths_and_range_checks_int32() {
+    assert!(column_accepts(&ExaType::Int32, &Value::Int32(7)));
+    assert!(column_accepts(&ExaType::Int32, &Value::Int64(7)));
+    assert!(!column_accepts(
+        &ExaType::Int32,
+        &Value::Int64(3_000_000_000)
+    ));
+    // Exasol reports BIGINT as PB_NUMERIC, so a UDF emitting Int64 into a
+    // DECIMAL(p,0) column is the common case, not an error.
+    assert!(column_accepts(
+        &ExaType::Numeric {
+            precision: None,
+            scale: None
+        },
+        &Value::Int64(7)
+    ));
+    // A Double into NUMERIC would be stringified by Display, which can produce
+    // `1e21`, `NaN` or `inf` — none of them a DECIMAL literal.
+    assert!(!column_accepts(
+        &ExaType::Numeric {
+            precision: None,
+            scale: None
+        },
+        &Value::Double(1.0)
+    ));
+}
+
+/// The bridge surfaces the handshake column metadata for both sides; a UDF whose
+/// output shape comes from the call-site EMITS list reads it here.
+#[test]
+fn bridge_exposes_input_and_output_column_metadata() {
+    let input = vec![col("x", ExaType::Int64)];
+    let output = vec![
+        col("y", ExaType::Double),
+        col("z", ExaType::String { size: Some(10) }),
+    ];
+    let empty = ExascriptTableData {
+        rows: 0,
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&empty, &input);
+    let mut emit = EmitBuffer::new();
+    let bridge = HostContextBridge::new(
+        &mut rs,
+        &mut emit,
+        &input,
+        &output,
+        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        HandshakeMeta::default(),
+        #[cfg(feature = "connect-back")]
+        Box::new(|_name| {
+            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                "no credential fetcher in test".into(),
+            ))
+        }),
+    );
+
+    assert_eq!(bridge.num_columns(), 1);
+    assert_eq!(bridge.input_column(0).unwrap().name, "x");
+    assert!(bridge.input_column(1).is_err());
+    assert_eq!(bridge.output_column_count(), 2);
+    assert_eq!(
+        bridge.output_column(1).unwrap().typ,
+        ExaType::String { size: Some(10) }
+    );
+    assert!(bridge.output_column(2).is_err());
 }
 
 #[test]
@@ -2004,7 +2117,7 @@ mod arrow_tests {
         RecordBatch::try_new(schema, vec![int_arr, str_arr, float_arr, bool_arr]).unwrap()
     }
 
-    fn mixed_meta() -> Vec<ColumnMeta> {
+    fn mixed_meta() -> Vec<ColumnInfo> {
         vec![
             col("a", ExaType::Int64),
             col("b", ExaType::String { size: None }),
@@ -2637,7 +2750,7 @@ mod arrow_tests {
     fn make_emit_bridge_with_counter<'a>(
         input: &'a mut InputRowSet,
         emit: &'a mut EmitBuffer,
-        meta: &'a [ColumnMeta],
+        meta: &'a [ColumnInfo],
         flush_count: &'a std::cell::Cell<usize>,
     ) -> HostContextBridge<'a> {
         HostContextBridge::new(
@@ -3197,7 +3310,7 @@ mod arrow_tests {
     /// `DataType` is neither a `fixed_cell_cost` type nor `Utf8`/`LargeUtf8`
     /// — reachable for an `ExaType::Unsupported` column, which `build_accessors`
     /// accepts paired with any Arrow type, since `compute_row_costs` inspects
-    /// only the raw Arrow `DataType` (it ignores `ColumnMeta` entirely).
+    /// only the raw Arrow `DataType` (it ignores `ColumnInfo` entirely).
     #[test]
     fn compute_row_costs_wildcard_arm_costs_zero_for_unrecognized_arrow_type() {
         use arrow::array::UInt32Array;

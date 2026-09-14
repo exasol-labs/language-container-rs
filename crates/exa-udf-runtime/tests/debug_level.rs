@@ -7,7 +7,7 @@
 
 use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet};
-use exa_zmq_protocol::{ColumnMeta, ExaType};
+use exa_zmq_protocol::{ColumnInfo, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::test_support::TestContext;
 use exasol_udf_sdk::value::Value;
@@ -40,8 +40,8 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LockedWriter {
     }
 }
 
-fn int64_col(name: &str) -> ColumnMeta {
-    ColumnMeta {
+fn int64_col(name: &str) -> ColumnInfo {
+    ColumnInfo {
         name: name.to_string(),
         typ: ExaType::Int64,
         type_name: String::new(),
@@ -51,7 +51,7 @@ fn int64_col(name: &str) -> ColumnMeta {
     }
 }
 
-fn empty_rowset(meta: &[ColumnMeta]) -> InputRowSet {
+fn empty_rowset(meta: &[ColumnInfo]) -> InputRowSet {
     let table = ExascriptTableData {
         rows: 0,
         ..Default::default()
@@ -62,7 +62,7 @@ fn empty_rowset(meta: &[ColumnMeta]) -> InputRowSet {
 fn make_bridge<'a>(
     input: &'a mut InputRowSet,
     emit: &'a mut EmitBuffer,
-    cols: &'a [ColumnMeta],
+    cols: &'a [ColumnInfo],
 ) -> HostContextBridge<'a> {
     HostContextBridge::new(
         input,

@@ -1,6 +1,6 @@
 use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
-use exa_zmq_protocol::{ColumnMeta, ExaType, UdfMeta};
+use exa_zmq_protocol::{ColumnInfo, ExaType, UdfMeta};
 
 /// One field of an annotated schema as embedded in the vtable by the
 /// `#[exasol_udf]` macro: `{"name":"x","type":"Int64"}`.
@@ -27,7 +27,7 @@ pub fn validate_schema(udf: &LoadedUdf, meta: &UdfMeta) -> Result<(), RuntimeErr
     Ok(())
 }
 
-fn validate_one(side: &str, json: &str, columns: &[ColumnMeta]) -> Result<(), RuntimeError> {
+fn validate_one(side: &str, json: &str, columns: &[ColumnInfo]) -> Result<(), RuntimeError> {
     let annotated = parse_schema(side, json)?;
 
     if annotated.len() != columns.len() {

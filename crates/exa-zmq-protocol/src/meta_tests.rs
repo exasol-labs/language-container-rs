@@ -2,32 +2,30 @@ use super::*;
 use exa_proto::exascript_metadata::ColumnDefinition;
 use exa_proto::{ExascriptInfo, ExascriptMetadata};
 
-impl super::ColumnMeta {
-    pub(crate) fn to_pb(&self) -> exa_proto::exascript_metadata::ColumnDefinition {
-        let pb_type = match self.typ {
-            ExaType::Double => ColumnType::PbDouble,
-            ExaType::Int32 => ColumnType::PbInt32,
-            ExaType::Int64 => ColumnType::PbInt64,
-            ExaType::Numeric { .. } => ColumnType::PbNumeric,
-            ExaType::Timestamp | ExaType::TimestampTz => ColumnType::PbTimestamp,
-            ExaType::Date => ColumnType::PbDate,
-            ExaType::String { .. }
-            | ExaType::Char { .. }
-            | ExaType::Geometry
-            | ExaType::HashType
-            | ExaType::IntervalYearToMonth
-            | ExaType::IntervalDayToSecond => ColumnType::PbString,
-            ExaType::Boolean => ColumnType::PbBoolean,
-            ExaType::Unsupported => ColumnType::PbUnsupported,
-        };
-        exa_proto::exascript_metadata::ColumnDefinition {
-            name: self.name.clone(),
-            r#type: Some(pb_type as i32),
-            type_name: self.type_name.clone(),
-            size: self.size,
-            precision: self.precision,
-            scale: self.scale,
-        }
+pub(crate) fn column_to_pb(col: &ColumnInfo) -> exa_proto::exascript_metadata::ColumnDefinition {
+    let pb_type = match col.typ {
+        ExaType::Double => ColumnType::PbDouble,
+        ExaType::Int32 => ColumnType::PbInt32,
+        ExaType::Int64 => ColumnType::PbInt64,
+        ExaType::Numeric { .. } => ColumnType::PbNumeric,
+        ExaType::Timestamp | ExaType::TimestampTz => ColumnType::PbTimestamp,
+        ExaType::Date => ColumnType::PbDate,
+        ExaType::String { .. }
+        | ExaType::Char { .. }
+        | ExaType::Geometry
+        | ExaType::HashType
+        | ExaType::IntervalYearToMonth
+        | ExaType::IntervalDayToSecond => ColumnType::PbString,
+        ExaType::Boolean => ColumnType::PbBoolean,
+        ExaType::Unsupported => ColumnType::PbUnsupported,
+    };
+    exa_proto::exascript_metadata::ColumnDefinition {
+        name: col.name.clone(),
+        r#type: Some(pb_type as i32),
+        type_name: col.type_name.clone(),
+        size: col.size,
+        precision: col.precision,
+        scale: col.scale,
     }
 }
 
@@ -43,8 +41,8 @@ impl super::UdfMeta {
         ExascriptMetadata {
             input_iter_type: iter_to_pb(&self.input_iter) as i32,
             output_iter_type: iter_to_pb(&self.output_iter) as i32,
-            input_columns: self.input_columns.iter().map(ColumnMeta::to_pb).collect(),
-            output_columns: self.output_columns.iter().map(ColumnMeta::to_pb).collect(),
+            input_columns: self.input_columns.iter().map(column_to_pb).collect(),
+            output_columns: self.output_columns.iter().map(column_to_pb).collect(),
             single_call_mode: self.single_call_mode,
         }
     }
@@ -70,7 +68,7 @@ fn col(
 #[test]
 fn from_pb_uses_sdk_exatype() {
     let pb = col(ColumnType::PbNumeric, "DECIMAL", None, Some(18), Some(2));
-    let meta = ColumnMeta::from_pb(&pb);
+    let meta = column_from_pb(&pb);
     assert_eq!(
         meta.typ,
         ExaType::Numeric {
@@ -124,16 +122,16 @@ fn from_pb_refines_extended_types_via_type_name() {
 
     for (type_name, pb_ty, size, expected) in cases {
         let pb = col(pb_ty, type_name, size, None, None);
-        let meta = ColumnMeta::from_pb(&pb);
+        let meta = column_from_pb(&pb);
         assert_eq!(meta.typ, expected, "type_name = {type_name}");
     }
 
     let plain_ts = col(ColumnType::PbTimestamp, "TIMESTAMP(3)", None, None, None);
-    assert_eq!(ColumnMeta::from_pb(&plain_ts).typ, ExaType::Timestamp);
+    assert_eq!(column_from_pb(&plain_ts).typ, ExaType::Timestamp);
 
     let unknown_string = col(ColumnType::PbString, "MYSTERY", Some(7), None, None);
     assert_eq!(
-        ColumnMeta::from_pb(&unknown_string).typ,
+        column_from_pb(&unknown_string).typ,
         ExaType::String { size: Some(7) }
     );
 }
@@ -151,12 +149,12 @@ fn unambiguous_types_ignore_type_name() {
     ];
     for (pb_ty, expected) in cases {
         let pb = col(pb_ty, misleading, None, None, None);
-        assert_eq!(ColumnMeta::from_pb(&pb).typ, expected);
+        assert_eq!(column_from_pb(&pb).typ, expected);
     }
 
     let numeric = col(ColumnType::PbNumeric, misleading, None, Some(5), Some(1));
     assert_eq!(
-        ColumnMeta::from_pb(&numeric).typ,
+        column_from_pb(&numeric).typ,
         ExaType::Numeric {
             precision: Some(5),
             scale: Some(1)
@@ -255,7 +253,7 @@ fn extended_exatype_roundtrips_to_pb() {
     ];
 
     for (typ, type_name, expected_pb) in cases {
-        let meta = ColumnMeta {
+        let meta = ColumnInfo {
             name: "c".to_string(),
             typ: typ.clone(),
             type_name: type_name.to_string(),
@@ -263,7 +261,7 @@ fn extended_exatype_roundtrips_to_pb() {
             precision: Some(3),
             scale: Some(1),
         };
-        let pb = meta.to_pb();
+        let pb = column_to_pb(&meta);
         assert_eq!(pb.r#type(), expected_pb, "typ = {typ:?}");
         assert_eq!(pb.type_name, type_name);
         assert_eq!(pb.size, Some(10));

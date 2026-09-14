@@ -34,6 +34,7 @@ members = [
     "test-udfs/emit-k",
     "test-udfs/scalar-next-illegal",
     "test-udfs/returns-with-emit",
+    "test-udfs/column-meta",
     "benches/bench-schema",
     "benches/bench-udfs",
     "benches/udf-bench",
@@ -73,10 +74,11 @@ default-members = [
     "test-udfs/emit-k",
     "test-udfs/scalar-next-illegal",
     "test-udfs/returns-with-emit",
+    "test-udfs/column-meta",
 ]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 license = "MIT"
 repository = "https://github.com/exasol-labs/language-container-rs"
 homepage = "https://github.com/exasol-labs/language-container-rs"
@@ -84,7 +86,7 @@ homepage = "https://github.com/exasol-labs/language-container-rs"
 [workspace.dependencies]
 # Internal SDK, published to crates.io. The `version` here MUST track
 # [workspace.package].version so dependents publish against the matching release.
-exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.25.0" }
+exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.26.0" }
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"

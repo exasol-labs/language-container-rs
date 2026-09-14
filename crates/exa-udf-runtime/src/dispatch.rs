@@ -2,7 +2,7 @@ use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
 use crate::rowset::{BatchFetcher, EmitBuffer, EmitFlusher, HostContextBridge, InputRowSet};
 use crate::wire::{close_error, request};
-use exa_zmq_protocol::{ColumnMeta, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
+use exa_zmq_protocol::{ColumnInfo, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use std::cell::{Cell, RefCell};
@@ -184,7 +184,7 @@ fn batch_fetcher<'a>(
 /// `None` means the group delivered no rows, so `run()` is invoked zero times.
 fn first_nonempty_input(
     fetch: &mut BatchFetcher,
-    input_cols: &[ColumnMeta],
+    input_cols: &[ColumnInfo],
 ) -> Result<Option<InputRowSet>, RuntimeError> {
     while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
         let rows = InputRowSet::from_proto(&table, input_cols);
