@@ -49,6 +49,7 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *THEN* `push` MUST increase a `byte_estimate` field by an approximation of the wire size of the pushed values (summing per-value byte costs plus the row's `row_number` entry), and `should_flush` MUST return true exactly when `byte_estimate` is greater than or equal to `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`)
 * *AND* serialising the buffer for an `MT_EMIT` MUST reset the row vector, the recorded row numbers and the `byte_estimate`, so the next cycle starts fresh and no row is sent twice
 * *AND* the byte estimate MUST be a monotonic non-negative running total computed without re-serializing the whole buffer on every `push`, so emit cost stays linear in the number of rows
+* *AND* the buffer MUST accept a row cost the caller already computed, so the bridge's output-row validation and the cost accumulation walk an emitted row once rather than twice
 
 ### Scenario: EmitBuffer emits timestamps at full nanosecond precision
 

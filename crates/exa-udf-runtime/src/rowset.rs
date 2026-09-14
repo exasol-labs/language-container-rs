@@ -259,6 +259,12 @@ impl EmitBuffer {
 
     pub fn push(&mut self, values: Vec<Value>, row_number: u64) {
         let row_cost = BYTES_ROW_NUMBER + values.iter().map(value_byte_cost).sum::<usize>();
+        self.push_costed(values, row_number, row_cost);
+    }
+
+    /// `push` with the row's byte cost already computed. The bridge computes it
+    /// in the same pass that validates the row, so an emitted row is walked once.
+    pub fn push_costed(&mut self, values: Vec<Value>, row_number: u64, row_cost: usize) {
         self.byte_estimate += row_cost;
         self.cumulative_bytes += row_cost;
         self.cumulative_rows += 1;
@@ -1286,13 +1292,14 @@ fn value_take_block_string(v: &mut Value) -> String {
 }
 
 /// Coerce a non-null `Value` to `i64` for an INT32/INT64 EMITS column.
-/// Reject an output row that the declared columns cannot carry losslessly.
+/// Reject an output row that the declared columns cannot carry losslessly, and
+/// return its buffered byte cost from the same pass.
 ///
 /// `take_proto` packs by declared column type, so an arity or variant mismatch
 /// would otherwise land as a NULL, a truncated number or a stringified variant
 /// with no error anywhere: the DB acknowledges `MT_EMIT` before it reads the
 /// row and never reports a per-row problem. NULL is valid in every column.
-fn check_output_row(row: &[Value], meta: &[ColumnInfo]) -> Result<(), UdfError> {
+fn check_output_row(row: &[Value], meta: &[ColumnInfo]) -> Result<usize, UdfError> {
     if row.len() != meta.len() {
         return Err(UdfError::Type(format!(
             "output row has {} value(s) but the output has {} column(s)",
@@ -1300,6 +1307,7 @@ fn check_output_row(row: &[Value], meta: &[ColumnInfo]) -> Result<(), UdfError> 
             meta.len()
         )));
     }
+    let mut cost = BYTES_ROW_NUMBER;
     for (idx, (v, col)) in row.iter().zip(meta).enumerate() {
         if !column_accepts(&col.typ, v) {
             return Err(UdfError::Type(format!(
@@ -1307,8 +1315,9 @@ fn check_output_row(row: &[Value], meta: &[ColumnInfo]) -> Result<(), UdfError> 
                 col.name, col.type_name
             )));
         }
+        cost += value_byte_cost(v);
     }
-    Ok(())
+    Ok(cost)
 }
 
 /// Whether a value can feed a column of this declared type. `Int64` into an
@@ -1644,8 +1653,9 @@ impl<'a> HostContextBridge<'a> {
     /// validation, buffering and flush contract; the trailing rows are flushed by the
     /// dispatcher before the group's `MT_DONE`.
     fn push_output_row(&mut self, row: Vec<Value>) -> Result<(), UdfError> {
-        check_output_row(&row, self.output_meta)?;
-        self.emit_buf.push(row, self.input.current_row_number());
+        let row_cost = check_output_row(&row, self.output_meta)?;
+        self.emit_buf
+            .push_costed(row, self.input.current_row_number(), row_cost);
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
             let table = self.emit_buf.take_proto(self.output_meta);
