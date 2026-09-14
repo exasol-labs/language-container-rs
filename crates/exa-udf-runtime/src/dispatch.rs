@@ -117,7 +117,7 @@ fn run_group(
         None => {}
     }
 
-    tail_flush(&mut emit_buf, meta, transport, cell_ref)?;
+    tail_flush(&mut emit_buf, transport, cell_ref)?;
     Ok(None)
 }
 
@@ -224,7 +224,6 @@ fn drive_group_rows(
 /// even if the byte threshold was never reached.
 fn tail_flush(
     emit_buf: &mut EmitBuffer,
-    meta: &UdfMeta,
     transport: &ZmqTransport,
     proto_cell: &RefCell<&mut Protocol>,
 ) -> Result<(), RuntimeError> {
@@ -232,7 +231,7 @@ fn tail_flush(
         return Ok(());
     }
     emit_buf.record_flush_telemetry();
-    let table = emit_buf.take_proto(&meta.output_columns);
+    let table = emit_buf.take_proto();
     let mut proto = proto_cell.borrow_mut();
     let req = proto.emit_request(table);
     request(transport, &mut proto, req)?;

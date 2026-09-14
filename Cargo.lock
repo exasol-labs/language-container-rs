@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "exasol-udf-sdk",
  "goblin",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "exa-mock-db"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "bench-schema",
  "chrono",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "prost",
  "prost-build",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "annotated-fixture",
  "arrow",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "arrow",
  "chrono",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -2041,7 +2041,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "it"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "arrow",
