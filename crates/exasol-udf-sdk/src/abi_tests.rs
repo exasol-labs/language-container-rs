@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn abi_version_and_vtable_layout() {
-    assert_eq!(EXA_UDF_ABI_VERSION, 8);
+    assert_eq!(EXA_UDF_ABI_VERSION, 9);
     assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
     let _ = EXA_SDK_FINGERPRINT;
 }

@@ -85,3 +85,11 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `ExaUdfVTable` MUST carry an output-shape marker (RETURNS versus EMITS) that the loader/runtime validates against `meta.output_iter`
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `6 → 7` because both the `dyn UdfContext` layout and the `ExaUdfVTable` fields changed, so a `.so` built against ABI 6 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching
 * *AND* the `run` vtable function-pointer signature MUST remain `(ctx: *mut c_void, error_out: *mut *mut c_char)` — the returned value crosses through the existing trait-object `set_return` slot, not a new `run` parameter
+
+### Scenario: Column metadata accessors change the vtable, bumping the ABI version
+
+* *GIVEN* the `input_column`, `output_column_count`, and `output_column` accessors added to `UdfContext`
+* *WHEN* the trait is compiled under this change
+* *THEN* each MUST be declared unconditionally with a default body, so the `dyn UdfContext` vtable layout stays feature-independent
+* *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `8 → 9`, so a `.so` built against ABI 8 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching through a shifted vtable slot
+* *AND* `ExaUdfVTable` MUST be unchanged, because the new methods are reached through the trait object rather than through the struct

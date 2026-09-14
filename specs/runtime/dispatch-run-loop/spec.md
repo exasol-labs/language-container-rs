@@ -99,3 +99,12 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 * *THEN* the bridge MUST override each defaulted accessor to return the exact value carried on the originating `UdfMeta` field, performing no rescaling or reinterpretation
 * *AND* the bridge MUST return the optional accessors (`current_user`, `current_schema`, `scope_user`) as `Some(value)` when the proto field was present and `None` when it was absent
 * *AND* the bridge MUST source every value from `UdfMeta` threaded in at construction time, not from any per-call protocol exchange
+
+### Scenario: Bridge validates every output row and surfaces the column metadata
+
+* *GIVEN* a `HostContextBridge` holding the declared input and output `ColumnInfo` slices from the handshake
+* *WHEN* a UDF emits a row, returns a RETURNS value, or reads `input_column` / `output_column_count` / `output_column`
+* *THEN* the bridge MUST check the row's arity and per-cell type against the declared output columns on the push path shared by `emit` and `set_return`, and MUST reject a mismatch with `UdfError::Type` before the row is buffered
+* *AND* the rejection MUST travel the existing UDF-error path, closing the session with the `F-UDF-CL-RUST-` prefixed message naming the offending column
+* *AND* the bridge MUST override the defaulted column accessors to borrow from those two slices, copying nothing
+* *AND* the Arrow batch path MUST keep its own column validation, which runs once per batch before any row is materialised

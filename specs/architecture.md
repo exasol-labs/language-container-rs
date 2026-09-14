@@ -64,10 +64,10 @@ exaudfclient (binary)
   `load` (dlopen the `.so`, resolve `__exa_udf_entry_<NAME>`, validate ABI + fingerprint) →
   `run` loop (MT_RUN; per group: MT_NEXT input batch → UDF `run()` → MT_EMIT output) →
   `cleanup` (MT_FINISHED, then `exit(0)`).
-- **Emit path:** `ctx.emit(row)` moves the row into an `EmitBuffer` that tracks a running byte
-  estimate and flushes an `MT_EMIT` at the 4,000,000-byte threshold, with a final tail
-  flush at end of `run`. The row is owned end to end, so the protobuf encode is the only
-  user-space copy of a cell.
+- **Emit path:** `ctx.emit(row)` is checked against the declared output columns, then moves the
+  row into an `EmitBuffer` that tracks a running byte estimate and flushes an `MT_EMIT` at the
+  4,000,000-byte threshold, with a final tail flush at end of `run`. The row is owned end to
+  end, so the protobuf encode is the only user-space copy of a cell.
 - **Connect-back path (optional):** `ctx.connection("NAME")` fetches CONNECTION-object
   credentials via `MT_IMPORT`, then opens a *separate* SQL login over TCP to `:8563`
   using `exarrow-rs`; reads stream one Arrow batch at a time and are converted to
@@ -122,9 +122,10 @@ lc-rs/
 
 The DB delivers every column over the wire as one of **8 proto column types**
 (`exa-proto::ColumnType`). Several SQL types collapse onto the same proto type and are
-disambiguated at `ColumnMeta::from_pb` time by inspecting `type_name`. The SDK surfaces the
-refined type as `exasol_udf_sdk::value::ExaType` (the single canonical enum; `exa-zmq-protocol`
-re-exports it). The detailed scenarios live in `specs/protocol/column-meta`.
+disambiguated at `column_from_pb` time by inspecting `type_name`. The SDK surfaces the
+refined type as `exasol_udf_sdk::value::ExaType`, carried on `ColumnInfo` (both canonical in the
+SDK; `exa-zmq-protocol` re-exports them, and UDF code reads the descriptor through
+`UdfContext::input_column` / `output_column`). The detailed scenarios live in `specs/protocol/column-meta`.
 
 | Proto column type | Exasol SQL type(s) | `type_name` disambiguation | SDK `ExaType` | `Value` payload |
 |-------------------|--------------------|----------------------------|---------------|-----------------|

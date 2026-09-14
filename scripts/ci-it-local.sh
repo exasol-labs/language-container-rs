@@ -101,7 +101,8 @@ cargo build --release \
   -p set-sum \
   -p emit-k \
   -p scalar-next-illegal \
-  -p returns-with-emit
+  -p returns-with-emit \
+  -p column-meta
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
