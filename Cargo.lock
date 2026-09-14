@@ -566,7 +566,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "exasol-udf-sdk",
  "goblin",
@@ -730,6 +730,14 @@ name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "column-meta"
+version = "0.1.0"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
 
 [[package]]
 name = "connect-back-cluster-ip"
@@ -1171,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "exa-mock-db"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "bench-schema",
  "chrono",
@@ -1185,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1194,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "annotated-fixture",
  "arrow",
@@ -1228,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1273,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1284,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1294,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -2033,7 +2041,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "it"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "arrow",

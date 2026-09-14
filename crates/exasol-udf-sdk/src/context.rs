@@ -1,10 +1,29 @@
 use crate::error::UdfError;
-use crate::value::{Decimal, Value};
+use crate::value::{ColumnInfo, Decimal, Value};
 
 /// Context for a single UDF call — provided by the host, read by the UDF
 pub trait UdfContext {
     /// Number of input columns
     fn num_columns(&self) -> usize;
+
+    /// Declared metadata of input column `idx`. Errors when the index is out of
+    /// range, or reports itself unimplemented on a context without a schema.
+    fn input_column(&self, _idx: usize) -> Result<&ColumnInfo, UdfError> {
+        Err(UdfError::Unimplemented("input_column".into()))
+    }
+
+    /// Number of output columns: the call-site `EMITS` list, or 1 for `RETURNS`.
+    /// Returns `0` on a context that does not override this method.
+    fn output_column_count(&self) -> usize {
+        0
+    }
+
+    /// Declared metadata of output column `idx`. A UDF whose output shape comes
+    /// from the call site reads its own `EMITS` list through this instead of
+    /// taking a redundant column plan as a parameter.
+    fn output_column(&self, _idx: usize) -> Result<&ColumnInfo, UdfError> {
+        Err(UdfError::Unimplemented("output_column".into()))
+    }
     /// Get a specific input column value (0-indexed)
     fn get(&self, col: usize) -> Result<&Value, UdfError>;
     /// Emit one output row, taking ownership of it so string cells move into the

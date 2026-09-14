@@ -89,7 +89,8 @@ jobs:
             -p set-sum \
             -p emit-k \
             -p scalar-next-illegal \
-            -p returns-with-emit
+            -p returns-with-emit \
+            -p column-meta
 
       - name: Build IT test binary (compile once)
         run: |

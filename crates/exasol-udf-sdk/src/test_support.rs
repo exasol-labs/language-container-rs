@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use crate::connect_back::ConnectionObject;
 use crate::context::UdfContext;
 use crate::error::UdfError;
-use crate::value::Value;
+use crate::value::{ColumnInfo, Value};
 
 /// What [`TestContext::emit`] does with a row.
 #[derive(Debug, Default)]
@@ -75,6 +75,8 @@ pub struct TestContext {
     emit_policy: EmitPolicy,
     next_policy: NextPolicy,
     meta: Metadata,
+    input_columns: Vec<ColumnInfo>,
+    output_columns: Vec<ColumnInfo>,
 }
 
 impl TestContext {
@@ -103,6 +105,8 @@ impl TestContext {
             emit_policy: EmitPolicy::default(),
             next_policy: NextPolicy::default(),
             meta: Metadata::default(),
+            input_columns: Vec::new(),
+            output_columns: Vec::new(),
         }
     }
 
@@ -117,6 +121,19 @@ impl TestContext {
     /// value, `Some(&None)` means it returned SQL NULL.
     pub fn captured_return(&self) -> Option<&Option<Value>> {
         self.captured_return.as_ref()
+    }
+
+    /// Set the input column metadata this context reports. Unset by default, so
+    /// `input_column` errors unless a test supplies a schema.
+    pub fn with_input_columns(mut self, columns: Vec<ColumnInfo>) -> Self {
+        self.input_columns = columns;
+        self
+    }
+
+    /// Set the output column metadata this context reports.
+    pub fn with_output_columns(mut self, columns: Vec<ColumnInfo>) -> Self {
+        self.output_columns = columns;
+        self
     }
 
     /// Replace what `emit` does with a row.
@@ -240,6 +257,22 @@ impl TestContext {
 impl UdfContext for TestContext {
     fn num_columns(&self) -> usize {
         self.rows.first().map_or(0, Vec::len)
+    }
+
+    fn input_column(&self, idx: usize) -> Result<&ColumnInfo, UdfError> {
+        self.input_columns
+            .get(idx)
+            .ok_or_else(|| UdfError::Type(format!("input column {idx} out of range")))
+    }
+
+    fn output_column_count(&self) -> usize {
+        self.output_columns.len()
+    }
+
+    fn output_column(&self, idx: usize) -> Result<&ColumnInfo, UdfError> {
+        self.output_columns
+            .get(idx)
+            .ok_or_else(|| UdfError::Type(format!("output column {idx} out of range")))
     }
 
     fn get(&self, col: usize) -> Result<&Value, UdfError> {

@@ -10,7 +10,7 @@ impl Protocol {
         &self.phase
     }
 }
-use crate::meta::{ColumnMeta, ExaType, IterType};
+use crate::meta::{ExaType, IterType};
 use exa_proto::exascript_metadata::ColumnDefinition;
 use exa_proto::{
     ColumnType, ExascriptClose, ExascriptInfo, ExascriptMetadata, ExascriptNextDataRep,
@@ -111,7 +111,7 @@ fn meta_maps_all_pb_types() {
         (ColumnType::PbBoolean, ExaType::Boolean),
     ];
     for (pb, expected) in cases {
-        let cm = ColumnMeta::from_pb(&column("c", pb));
+        let cm = crate::meta::column_from_pb(&column("c", pb));
         assert_eq!(cm.typ, expected, "mapping failed for {pb:?}");
     }
 }

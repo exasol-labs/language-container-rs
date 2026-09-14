@@ -9,15 +9,15 @@
 
 use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet, LoadedUdf};
-use exa_zmq_protocol::{ColumnMeta, ExaType};
+use exa_zmq_protocol::{ColumnInfo, ExaType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
 
 mod common;
 use common::fixture_cdylib_path;
 
-fn col(name: &str, typ: ExaType) -> ColumnMeta {
-    ColumnMeta {
+fn col(name: &str, typ: ExaType) -> ColumnInfo {
+    ColumnInfo {
         name: name.to_string(),
         typ,
         type_name: String::new(),

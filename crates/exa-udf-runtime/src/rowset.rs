@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use exa_proto::ExascriptTableData;
-use exa_zmq_protocol::{ColumnMeta, ExaType, IterType};
+use exa_zmq_protocol::{ColumnInfo, ExaType, IterType};
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
@@ -30,7 +30,7 @@ impl InputRowSet {
     /// The proto packs each cell type into its own array, column by column,
     /// with one slot per row (including NULL cells). The NULL bitmap is
     /// row-major across all columns.
-    pub fn from_proto(table: &ExascriptTableData, meta: &[ColumnMeta]) -> Self {
+    pub fn from_proto(table: &ExascriptTableData, meta: &[ColumnInfo]) -> Self {
         let n_rows = table.rows as usize;
         let n_cols = meta.len();
 
@@ -298,7 +298,7 @@ impl EmitBuffer {
     /// A `Value::String`'s buffer moves into the string block instead of being
     /// cloned; every other variant is read in place, so a cell that owns nothing
     /// on the heap is not moved either.
-    pub fn take_proto(&mut self, meta: &[ColumnMeta]) -> ExascriptTableData {
+    pub fn take_proto(&mut self, meta: &[ColumnInfo]) -> ExascriptTableData {
         let n_rows = self.rows.len();
         let n_cols = meta.len();
 
@@ -460,7 +460,7 @@ impl EmitBuffer {
     pub fn push_batch(
         &mut self,
         batch: &arrow::record_batch::RecordBatch,
-        meta: &[ColumnMeta],
+        meta: &[ColumnInfo],
         row_number: u64,
         flush: &mut dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError>,
     ) -> Result<(), UdfError> {
@@ -525,7 +525,7 @@ impl EmitBuffer {
 /// The variant chosen records both the Arrow type (which determines how to
 /// extract a cell value) and — for the widening cases — the declared
 /// `ExaType` target (which determines which proto block the value lands in).
-/// The `ExaType` authority is the declared `ColumnMeta`; the Arrow type is
+/// The `ExaType` authority is the declared `ColumnInfo`; the Arrow type is
 /// used only for extraction.
 #[cfg(feature = "emit-arrow")]
 enum ColAccessor<'a> {
@@ -559,7 +559,7 @@ enum ColAccessor<'a> {
 #[cfg(feature = "emit-arrow")]
 fn build_accessors<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
-    meta: &[ColumnMeta],
+    meta: &[ColumnInfo],
 ) -> Result<Vec<ColAccessor<'a>>, UdfError> {
     use arrow::array::{
         Array, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
@@ -774,7 +774,7 @@ fn accumulate_costs(
 /// layout for efficiency (no per-cell work for fixed-width types; offset-buffer
 /// prefix-sum for variable-width; same fixed estimates as `value_byte_cost`).
 #[cfg(feature = "emit-arrow")]
-fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMeta]) -> Vec<usize> {
+fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnInfo]) -> Vec<usize> {
     use arrow::array::{Array, LargeStringArray, StringArray};
     use arrow::datatypes::DataType;
 
@@ -828,7 +828,7 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnMet
 #[cfg(feature = "emit-arrow")]
 fn encode_slice(
     batch: &arrow::record_batch::RecordBatch,
-    meta: &[ColumnMeta],
+    meta: &[ColumnInfo],
     row_number: u64,
 ) -> Result<exa_proto::ExascriptTableData, UdfError> {
     use arrow::array::Array;
@@ -935,7 +935,7 @@ fn encode_slice(
 #[cfg(feature = "emit-arrow")]
 fn arrow_batch_to_value_rows(
     batch: &arrow::record_batch::RecordBatch,
-    meta: &[ColumnMeta],
+    meta: &[ColumnInfo],
 ) -> Result<Vec<Vec<Value>>, UdfError> {
     use arrow::array::Array;
 
@@ -1286,6 +1286,57 @@ fn value_take_block_string(v: &mut Value) -> String {
 }
 
 /// Coerce a non-null `Value` to `i64` for an INT32/INT64 EMITS column.
+/// Reject an output row that the declared columns cannot carry losslessly.
+///
+/// `take_proto` packs by declared column type, so an arity or variant mismatch
+/// would otherwise land as a NULL, a truncated number or a stringified variant
+/// with no error anywhere: the DB acknowledges `MT_EMIT` before it reads the
+/// row and never reports a per-row problem. NULL is valid in every column.
+fn check_output_row(row: &[Value], meta: &[ColumnInfo]) -> Result<(), UdfError> {
+    if row.len() != meta.len() {
+        return Err(UdfError::Type(format!(
+            "output row has {} value(s) but the output has {} column(s)",
+            row.len(),
+            meta.len()
+        )));
+    }
+    for (idx, (v, col)) in row.iter().zip(meta).enumerate() {
+        if !column_accepts(&col.typ, v) {
+            return Err(UdfError::Type(format!(
+                "output column {idx} `{}` is {} but the value is {v:?}",
+                col.name, col.type_name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a value can feed a column of this declared type. `Int64` into an
+/// INT32 column is range-checked; every other pairing is decided by variant.
+fn column_accepts(typ: &ExaType, v: &Value) -> bool {
+    match (typ, v) {
+        (_, Value::Null) | (ExaType::Unsupported, _) => true,
+        (ExaType::Int32, Value::Int32(_)) => true,
+        (ExaType::Int32, Value::Int64(i)) => i32::try_from(*i).is_ok(),
+        (ExaType::Int64 | ExaType::Numeric { .. }, Value::Int32(_) | Value::Int64(_)) => true,
+        (ExaType::Numeric { .. }, Value::Numeric(_)) => true,
+        (ExaType::Double, Value::Double(_)) => true,
+        (ExaType::Boolean, Value::Bool(_)) => true,
+        (ExaType::Date, Value::Date(_)) => true,
+        (ExaType::Timestamp | ExaType::TimestampTz, Value::Timestamp(_)) => true,
+        (
+            ExaType::String { .. }
+            | ExaType::Char { .. }
+            | ExaType::Geometry
+            | ExaType::HashType
+            | ExaType::IntervalYearToMonth
+            | ExaType::IntervalDayToSecond,
+            Value::String(_),
+        ) => true,
+        _ => false,
+    }
+}
+
 fn value_to_i64(v: &Value) -> i64 {
     match v {
         Value::Int32(i) => *i as i64,
@@ -1434,12 +1485,12 @@ pub type EmitFlusher<'a> =
 pub struct HostContextBridge<'a> {
     input: &'a mut InputRowSet,
     emit_buf: &'a mut EmitBuffer,
-    input_cols: &'a [ColumnMeta],
+    input_cols: &'a [ColumnInfo],
     /// Declared EMITS output schema — used by `emit_batch` to choose the target
     /// proto block for each Arrow column. Threaded in by `dispatch::run_group`
     /// alongside `input_cols` because the bridge previously held only the input
     /// columns and `emit_batch` needs the output schema at encoding time.
-    output_meta: &'a [ColumnMeta],
+    output_meta: &'a [ColumnInfo],
     /// Input iteration axis. `Multiple` (SET) drives `next` across batches;
     /// `ExactlyOnce` (SCALAR) presents one row per `run()` via `advance_row` and
     /// bans `next`. Defaults to `Multiple` so a bridge over a single materialised
@@ -1520,8 +1571,8 @@ impl<'a> HostContextBridge<'a> {
     pub fn new(
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
-        input_cols: &'a [ColumnMeta],
-        output_meta: &'a [ColumnMeta],
+        input_cols: &'a [ColumnInfo],
+        output_meta: &'a [ColumnInfo],
         flusher: EmitFlusher<'a>,
         handshake: HandshakeMeta,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
@@ -1590,9 +1641,10 @@ impl<'a> HostContextBridge<'a> {
     /// Append one output row to the group-scoped buffer, flushing an `MT_EMIT`
     /// when the running byte estimate crosses the threshold. Shared by `emit`
     /// (EMITS output) and `set_return` (RETURNS output) so both honour the same
-    /// buffering and flush contract; the trailing rows are flushed by the
+    /// validation, buffering and flush contract; the trailing rows are flushed by the
     /// dispatcher before the group's `MT_DONE`.
     fn push_output_row(&mut self, row: Vec<Value>) -> Result<(), UdfError> {
+        check_output_row(&row, self.output_meta)?;
         self.emit_buf.push(row, self.input.current_row_number());
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
@@ -1622,8 +1674,8 @@ impl<'a> HostContextBridge<'a> {
     pub fn with_connection(
         input: &'a mut InputRowSet,
         emit_buf: &'a mut EmitBuffer,
-        input_cols: &'a [ColumnMeta],
-        output_meta: &'a [ColumnMeta],
+        input_cols: &'a [ColumnInfo],
+        output_meta: &'a [ColumnInfo],
         flusher: EmitFlusher<'a>,
         handshake: HandshakeMeta,
         conn_requester: ConnRequester<'a>,
@@ -1780,6 +1832,22 @@ macro_rules! delegate_connect_back_hooks {
 impl UdfContext for HostContextBridge<'_> {
     fn num_columns(&self) -> usize {
         self.input_cols.len()
+    }
+
+    fn input_column(&self, idx: usize) -> Result<&ColumnInfo, UdfError> {
+        self.input_cols
+            .get(idx)
+            .ok_or_else(|| UdfError::Type(format!("input column {idx} out of range")))
+    }
+
+    fn output_column_count(&self) -> usize {
+        self.output_meta.len()
+    }
+
+    fn output_column(&self, idx: usize) -> Result<&ColumnInfo, UdfError> {
+        self.output_meta
+            .get(idx)
+            .ok_or_else(|| UdfError::Type(format!("output column {idx} out of range")))
     }
 
     delegate_handshake_meta!();

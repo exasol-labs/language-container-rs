@@ -2,7 +2,7 @@ use super::{DefaultsCtx, EmitPolicy, NextPolicy, TestContext};
 use crate::connect_back::ConnectionObject;
 use crate::context::UdfContext;
 use crate::error::UdfError;
-use crate::value::Value;
+use crate::value::{ColumnInfo, ExaType, Value};
 
 #[test]
 fn test_context_covers_scalar_set_emit_and_return_paths() {
@@ -93,6 +93,35 @@ fn metadata_defaults_match_the_trait_defaults() {
         ctx.connection("ANY").is_err(),
         "connection unset by default"
     );
+}
+
+#[test]
+fn column_metadata_is_unset_until_supplied() {
+    let bare = TestContext::scalar(vec![Value::Int64(1)]);
+    assert!(bare.input_column(0).is_err(), "no schema supplied");
+    assert_eq!(
+        bare.output_column_count(),
+        DefaultsCtx.output_column_count()
+    );
+    assert!(DefaultsCtx.input_column(0).is_err());
+    assert!(DefaultsCtx.output_column(0).is_err());
+
+    let column = |name: &str, typ: ExaType| ColumnInfo {
+        name: name.into(),
+        typ,
+        type_name: String::new(),
+        size: None,
+        precision: None,
+        scale: None,
+    };
+    let ctx = TestContext::scalar(vec![Value::Int64(1)])
+        .with_input_columns(vec![column("x", ExaType::Int64)])
+        .with_output_columns(vec![column("y", ExaType::Double)]);
+
+    assert_eq!(ctx.input_column(0).unwrap().name, "x");
+    assert_eq!(ctx.output_column_count(), 1);
+    assert_eq!(ctx.output_column(0).unwrap().typ, ExaType::Double);
+    assert!(ctx.output_column(1).is_err());
 }
 
 #[test]

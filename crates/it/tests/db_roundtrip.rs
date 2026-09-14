@@ -39,6 +39,7 @@ const SET_SUM_LIB: &str = "libset_sum.so";
 const EMIT_K_LIB: &str = "libemit_k.so";
 const SCALAR_NEXT_ILLEGAL_LIB: &str = "libscalar_next_illegal.so";
 const RETURNS_WITH_EMIT_LIB: &str = "libreturns_with_emit.so";
+const COLUMN_META_LIB: &str = "libcolumn_meta.so";
 
 /// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
 /// cross-joined five times. Large enough that a scalar input or a single SET
@@ -164,6 +165,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
             RETURNS_WITH_EMIT_LIB,
             read_udf_artifact(RETURNS_WITH_EMIT_LIB)?,
         )
+        .await?;
+    let column_meta_path = harness
+        .upload_udf(COLUMN_META_LIB, read_udf_artifact(COLUMN_META_LIB)?)
         .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
@@ -332,6 +336,11 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario emit_k_passthrough_pairs_emitted_rows_with_input ok");
     scalar_next_illegal_fails_with_prefixed_error(&mut conn, &scalar_next_illegal_path).await?;
     eprintln!("[it] scenario scalar_next_illegal_fails_with_prefixed_error ok");
+    column_metadata_reaches_the_udf(&mut conn, &column_meta_path).await?;
+    eprintln!("[it] scenario column_metadata_reaches_the_udf ok");
+    emit_type_mismatch_surfaces_sql_error(&mut conn, &column_meta_path).await?;
+    eprintln!("[it] scenario emit_type_mismatch_surfaces_sql_error ok");
+
     returns_channel_value_null_and_emit_ban(&mut conn, &scalar_path, &returns_with_emit_path)
         .await?;
     eprintln!("[it] scenario returns_channel_value_null_and_emit_ban ok");
@@ -2233,6 +2242,97 @@ async fn returns_channel_value_null_and_emit_ban(
                     "returns_with_emit error did not identify the emit-in-RETURNS ban \
                      (\"RETURNS output\"): {msg}"
                 );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// A UDF reads its own input and output column metadata. `describe_output`
+/// builds its row from the call-site `EMITS` list alone, so registering the same
+/// entry point against two different lists must produce two different rows.
+async fn column_metadata_reaches_the_udf(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT describe_two(dummy BOOLEAN) \
+         EMITS (\"first\" VARCHAR(200), \"second\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT describe_one(dummy BOOLEAN) \
+         EMITS (\"only\" VARCHAR(200)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT input_column_name(\"amount\" DECIMAL(18,2)) \
+         RETURNS VARCHAR(200) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let two = query_single_string(
+        conn,
+        "SELECT first || '/' || TO_CHAR(second) FROM \
+         (SELECT describe_two(TRUE) FROM DUAL)",
+    )
+    .await?;
+    match two.as_deref() {
+        Some(v) if v.starts_with("first|VARCHAR(200)") && v.ends_with("/1") => {}
+        other => bail!(
+            "describe_two saw {other:?}; expected the declared name, type and ordinal of its \
+             own EMITS list"
+        ),
+    }
+
+    let one = query_single_string(
+        conn,
+        "SELECT only FROM (SELECT describe_one(TRUE) FROM DUAL)",
+    )
+    .await?;
+    match one.as_deref() {
+        Some(v) if v.starts_with("only|VARCHAR(200)") => {}
+        other => {
+            bail!("describe_one saw {other:?}; the same entry point must follow its own EMITS list")
+        }
+    }
+
+    let input = query_single_string(
+        conn,
+        "SELECT input_column_name(CAST(1 AS DECIMAL(18,2))) FROM DUAL",
+    )
+    .await?;
+    match input.as_deref() {
+        Some(v) if v.starts_with("amount|DECIMAL(18,2)") => Ok(()),
+        other => bail!("input_column_name saw {other:?}; expected the declared input column"),
+    }
+}
+
+/// An emitted value the declared column cannot carry is rejected before it
+/// reaches the wire. The DB acknowledges `MT_EMIT` before it reads the rows, so
+/// a value that slipped through would land as a silently wrong result instead.
+async fn emit_type_mismatch_surfaces_sql_error(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT emit_type_mismatch(x BIGINT) EMITS (y BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    match conn
+        .query("SELECT y FROM (SELECT emit_type_mismatch(1) FROM DUAL)")
+        .await
+    {
+        Ok(_) => bail!("emit_type_mismatch succeeded; expected a rejected-row error"),
+        Err(e) => {
+            let msg = e.to_string();
+            if !msg.contains("F-UDF-CL-RUST-") {
+                bail!("emit_type_mismatch error lacked the F-UDF-CL-RUST- prefix: {msg}");
+            }
+            if !msg.contains("output column 0") {
+                bail!("emit_type_mismatch error did not name the offending column: {msg}");
             }
             Ok(())
         }
