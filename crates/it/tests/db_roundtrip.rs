@@ -2249,61 +2249,60 @@ async fn returns_channel_value_null_and_emit_ban(
 }
 
 /// A UDF reads its own input and output column metadata. `describe_output`
-/// builds its row from the call-site `EMITS` list alone, so registering the same
-/// entry point against two different lists must produce two different rows.
+/// builds its row from the call-site `EMITS` list alone, so re-registering the
+/// same entry point against a different list must produce a different row.
 async fn column_metadata_reaches_the_udf(conn: &mut Connection, udf_object: &str) -> Result<()> {
-    conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT describe_two(dummy BOOLEAN) \
-         EMITS (\"first\" VARCHAR(200), \"second\" DECIMAL(18,0)) AS\n\
-         %udf_object {udf_object};\n/"
-    ))
-    .await?;
-    conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT describe_one(dummy BOOLEAN) \
-         EMITS (\"only\" VARCHAR(200)) AS\n\
-         %udf_object {udf_object};\n/"
-    ))
-    .await?;
-    conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT input_column_name(\"amount\" DECIMAL(18,2)) \
-         RETURNS VARCHAR(200) AS\n\
-         %udf_object {udf_object};\n/"
-    ))
-    .await?;
+    let describe = |emits: &str| {
+        format!(
+            "CREATE OR REPLACE RUST SCALAR SCRIPT describe_output(dummy BOOLEAN) EMITS ({emits}) AS\n\
+             %udf_object {udf_object};\n/"
+        )
+    };
 
+    conn.execute(&describe("col_a VARCHAR(200), col_b DECIMAL(18,0)"))
+        .await?;
     let two = query_single_string(
         conn,
-        "SELECT first || '/' || TO_CHAR(second) FROM \
-         (SELECT describe_two(TRUE) FROM DUAL)",
+        "SELECT col_a || '/' || TO_CHAR(col_b) FROM (SELECT describe_output(TRUE) FROM DUAL)",
     )
     .await?;
     match two.as_deref() {
-        Some(v) if v.starts_with("first|VARCHAR(200)") && v.ends_with("/1") => {}
+        Some(v) if v.starts_with("COL_A|VARCHAR(") && v.ends_with("/1") => {}
         other => bail!(
-            "describe_two saw {other:?}; expected the declared name, type and ordinal of its \
+            "describe_output saw {other:?}; expected the declared name, type and ordinal of its \
              own EMITS list"
         ),
     }
 
+    conn.execute(&describe("col_z VARCHAR(200)")).await?;
     let one = query_single_string(
         conn,
-        "SELECT only FROM (SELECT describe_one(TRUE) FROM DUAL)",
+        "SELECT col_z FROM (SELECT describe_output(TRUE) FROM DUAL)",
     )
     .await?;
     match one.as_deref() {
-        Some(v) if v.starts_with("only|VARCHAR(200)") => {}
-        other => {
-            bail!("describe_one saw {other:?}; the same entry point must follow its own EMITS list")
-        }
+        Some(v) if v.starts_with("COL_Z|VARCHAR(") => {}
+        other => bail!(
+            "describe_output saw {other:?} after re-registration; the same entry point must \
+             follow whichever EMITS list the call site declares"
+        ),
     }
 
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT input_column_name(amount DECIMAL(18,2)) \
+         RETURNS VARCHAR(200) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
     let input = query_single_string(
         conn,
         "SELECT input_column_name(CAST(1 AS DECIMAL(18,2))) FROM DUAL",
     )
     .await?;
+    // An input parameter keeps the case it was declared with; an EMITS column is
+    // an identifier and comes back upper-cased.
     match input.as_deref() {
-        Some(v) if v.starts_with("amount|DECIMAL(18,2)") => Ok(()),
+        Some(v) if v.starts_with("amount|DECIMAL(") => Ok(()),
         other => bail!("input_column_name saw {other:?}; expected the declared input column"),
     }
 }

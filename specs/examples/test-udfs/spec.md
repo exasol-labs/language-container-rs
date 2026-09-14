@@ -81,7 +81,7 @@ A fixture's unit tests build their `UdfContext` double from the `exasol-udf-sdk`
 ### Scenario: column-meta reads its own schema and proves emit validation
 
 * *GIVEN* the `column-meta` crate exporting `describe_output`, `input_column_name`, and `emit_type_mismatch`
-* *WHEN* `describe_output` builds its row from `output_column_count()` and `output_column(idx)` alone and the same entry point is registered against two different `EMITS` lists
+* *WHEN* `describe_output` builds its row from `output_column_count()` and `output_column(idx)` alone and the same entry point is re-registered against a different `EMITS` list
 * *THEN* each registration MUST produce the row its own `EMITS` list describes, naming that list's declared column name and type
 * *AND* `input_column_name` MUST report the declared name and type of its input column
 * *AND* `emit_type_mismatch`, which emits a `String` into a declared integer column, MUST fail the query with a prefixed error naming the column rather than return a row
