@@ -102,9 +102,9 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 
 ### Scenario: Bridge validates every output row and surfaces the column metadata
 
-* *GIVEN* a `HostContextBridge` holding the declared input and output `ColumnInfo` slices from the handshake
-* *WHEN* a UDF emits a row, returns a RETURNS value, or reads `input_column` / `output_column_count` / `output_column`
-* *THEN* the bridge MUST check the row's arity and per-cell type against the declared output columns on the push path shared by `emit` and `set_return`, and MUST reject a mismatch with `UdfError::Type` before the row is buffered
-* *AND* the rejection MUST travel the existing UDF-error path, closing the session with the `F-UDF-CL-RUST-` prefixed message naming the offending column
-* *AND* the bridge MUST override the defaulted column accessors to borrow from those two slices, copying nothing
-* *AND* the Arrow batch path MUST keep its own column validation, which runs once per batch before any row is materialised
+* *GIVEN* a `HostContextBridge` constructed from a `UdfMeta` whose declared input and output columns carry live values
+* *WHEN* a UDF produces an output row, through `emit` or through the framework's `set_return`, or reads its own column metadata
+* *THEN* the bridge MUST reject a row the declared output columns cannot carry with `UdfError::Type`, before the row is buffered, so no part of it reaches the wire
+* *AND* the rejection MUST close the session through the UDF-error path with the `F-UDF-CL-RUST-` prefixed message naming the offending column
+* *AND* the bridge MUST override the defaulted column accessors to return the declared metadata the handshake supplied, for both the input and the output side
+* *AND* a batch-emitted row MUST be validated against the same declared columns, once per batch before any row of it is materialised

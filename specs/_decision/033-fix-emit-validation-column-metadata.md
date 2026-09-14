@@ -45,14 +45,14 @@ literal. `Null` is valid in every column.
 
 A UDF that relied on a coercion now fails the query instead of returning a wrong value.
 
-The check is fused into the byte-cost pass `push` already made — it returns the row cost
-and the buffer takes it through `push_costed` — so an emitted row is still walked once.
-As a separate pass it cost a few percent on the row cells, scaling with columns per row
-(`wide_row`, 24 columns, was the clearest); fused, Tier 1 puts seven of the eight row
-cells inside the noise band over three interleaved pairs, with `scalar_emits_gen/wide_row`
-at −3.0 %. Unchanged code swings ±10 % run to run on this harness.
+Validation must not add a traversal of the row: as its own pass it took a few percent on
+the row cells, scaling with columns per row (`wide_row`, 24 columns, the clearest). It
+therefore shares the byte-cost pass `push` already made, returning the cost the buffer
+then takes. Tier 1 over three interleaved pairs puts seven of the eight row cells inside
+the noise band, `scalar_emits_gen/wide_row` at −3.0 %; unchanged code swings ±10 % run to
+run on this harness.
 
-## ADR: One owned column-metadata type, owned by the SDK
+## ADR: One column-metadata type, owned by the SDK
 
 **ID:** sdk-owns-column-info
 **Plan:** `fix-emit-validation-column-metadata`
