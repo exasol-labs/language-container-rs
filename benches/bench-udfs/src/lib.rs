@@ -304,7 +304,7 @@ fn set_params(ctx: &mut dyn UdfContext) -> Result<(i64, bool, usize), UdfError> 
     Ok(params)
 }
 
-fn generate_rows<R: AsRef<[Value]>>(
+fn generate_rows<R: Into<Vec<Value>>>(
     ctx: &mut dyn UdfContext,
     n: i64,
     do_emit: bool,
@@ -312,13 +312,13 @@ fn generate_rows<R: AsRef<[Value]>>(
 ) -> Result<(), UdfError> {
     if do_emit {
         for i in 0..n {
-            ctx.emit(row(i).as_ref())?;
+            ctx.emit(row(i).into())?;
         }
     } else {
         for i in 0..n {
             std::hint::black_box(row(i));
         }
-        ctx.emit(row(0).as_ref())?;
+        ctx.emit(row(0).into())?;
     }
     Ok(())
 }
@@ -352,7 +352,7 @@ fn reemit_rows(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         let row: Vec<Value> = (0..ctx.num_columns())
             .map(|c| ctx.get(c).cloned())
             .collect::<Result<_, _>>()?;
-        ctx.emit(&row)?;
+        ctx.emit(row)?;
     }
     Ok(())
 }
@@ -540,7 +540,7 @@ pub fn pt_native(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let k = ctx.get_i64(0)?.unwrap_or(0);
     let n = ctx.get_i64(1)?.unwrap_or(0);
     for _ in 0..n {
-        ctx.emit(&[Value::Int64(k)])?;
+        ctx.emit(vec![Value::Int64(k)])?;
     }
     Ok(())
 }

@@ -176,7 +176,7 @@ Every UDF receives `&mut dyn UdfContext`. The four core operations are:
 | Method | What it does |
 |--------|-------------|
 | `ctx.get(col)` | Returns `&Value` for column `col` (0-indexed) on the current input row |
-| `ctx.emit(values)` | Appends one output row. Valid only for EMITS output — the host returns `Err` if a RETURNS UDF calls it (see §6) |
+| `ctx.emit(values)` | Appends one output row, taking the `Vec<Value>` by value so string cells move into the wire buffer instead of being copied. Valid only for EMITS output — the host returns `Err` if a RETURNS UDF calls it (see §6) |
 | `ctx.next()` | Advances to the next input row of a SET group, spanning `MT_NEXT` batches; returns `false` at the group boundary. Valid only for SET input — the host returns `Err` if a SCALAR UDF calls it |
 | `ctx.set_return(value)` | Sets the invocation's single RETURNS output value. The `#[exasol_udf]` macro calls this for you from the function's `Ok(Some(v))` / `Ok(None)` return; you never call it directly |
 
@@ -356,7 +356,7 @@ use exasol_udf_sdk::value::Value;
 pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let k = ctx.get_i64(0)?.unwrap_or(0);
     for i in 0..k {
-        ctx.emit(&[Value::Int64(i)])?;
+        ctx.emit(vec![Value::Int64(i)])?;
     }
     Ok(())
 }
@@ -391,13 +391,13 @@ use exasol_udf_sdk::value::{Decimal, Value};
 pub fn set_filter(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
         match ctx.get(0)? {
-            Value::Int64(n) if *n > 0 => ctx.emit(&[Value::Int64(*n)])?,
+            Value::Int64(n) if *n > 0 => ctx.emit(vec![Value::Int64(*n)])?,
             // Exasol sends BIGINT as PB_NUMERIC (typed Decimal with scale=0).
             Value::Numeric(d) if d.scale == 0 => {
                 let n = i64::try_from(d.unscaled)
                     .map_err(|_| UdfError::Type(format!("cannot convert {} to i64", d)))?;
                 if n > 0 {
-                    ctx.emit(&[Value::Numeric(Decimal {
+                    ctx.emit(vec![Value::Numeric(Decimal {
                         unscaled: n as i128,
                         scale: 0,
                     })])?;
@@ -617,7 +617,7 @@ pub fn compute_and_store(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
     // BIGINT output column → emit as Numeric.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric(Decimal::from(1_i64))])?;
+        ctx.emit(vec![Value::Numeric(Decimal::from(1_i64))])?;
     }
     Ok(())
 }
@@ -698,7 +698,7 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+        fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
             Err(UdfError::Unimplemented("emit is banned in RETURNS output".into()))
         }
 
@@ -755,8 +755,8 @@ mod tests {
                 .ok_or_else(|| UdfError::User(format!("col {} out of range", col)))
         }
 
-        fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
-            self.emitted.push(values.to_vec());
+        fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
+            self.emitted.push(values);
             Ok(())
         }
 

@@ -115,7 +115,7 @@ A second, independent axis (`output_iter`) governs how a result leaves
   `NULL`. The value crosses through `ctx.set_return`, not `ctx.emit` — calling
   `ctx.emit` in RETURNS output returns `Err`.
 - **`Multiple` (EMITS).** `run()` returns `Result<(), UdfError>` and calls
-  `ctx.emit(&[...])` any number of times (0, 1, or many rows), flushed to
+  `ctx.emit(vec![...])` any number of times (0, 1, or many rows), flushed to
   `MT_EMIT` as shown above.
 
 The runtime validates the compiled `.so`'s output-shape marker against

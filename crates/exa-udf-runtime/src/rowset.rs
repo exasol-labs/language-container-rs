@@ -288,12 +288,17 @@ impl EmitBuffer {
         self.byte_estimate >= EMIT_BUFFER_LIMIT_BYTES
     }
 
-    /// Serialise accumulated rows into an `ExascriptTableData`.
+    /// Drain the accumulated rows into an `ExascriptTableData`, leaving the
+    /// buffer empty and ready for the next batch.
     ///
     /// Mirrors `InputRowSet::from_proto`: each type block is column-major and
     /// dense (one slot per row, including a placeholder for NULL cells) so the
     /// `block_base + row` indexing stays valid. The NULL bitmap is row-major.
-    pub fn to_proto(&self, meta: &[ColumnMeta]) -> ExascriptTableData {
+    ///
+    /// A `Value::String`'s buffer moves into the string block instead of being
+    /// cloned; every other variant is read in place, so a cell that owns nothing
+    /// on the heap is not moved either.
+    pub fn take_proto(&mut self, meta: &[ColumnMeta]) -> ExascriptTableData {
         let n_rows = self.rows.len();
         let n_cols = meta.len();
 
@@ -345,10 +350,9 @@ impl EmitBuffer {
         // type, not the runtime `Value` variant: a connect-back SELECT may
         // return a DECIMAL column as `Value::Int64`, but the EMITS column is
         // `ExaType::Numeric` (string block).
-        for (r, row) in self.rows.iter().enumerate() {
+        for (r, row) in self.rows.iter_mut().enumerate() {
             for (c, col) in meta.iter().enumerate() {
-                let v = row.get(c).unwrap_or(&Value::Null);
-                if matches!(v, Value::Null) {
+                let Some(v) = row.get_mut(c).filter(|v| !matches!(v, Value::Null)) else {
                     // A NULL cell is recorded only in the bitmap; it does NOT
                     // occupy a slot in its type block. Exasol's reader consumes
                     // type-block entries only for non-null cells and consults the
@@ -356,7 +360,7 @@ impl EmitBuffer {
                     // cell of that type into the wrong column.
                     data_nulls[null_index(r, c, n_cols)] = true;
                     continue;
-                }
+                };
                 match &col.typ {
                     ExaType::Numeric { .. }
                     | ExaType::Date
@@ -368,7 +372,7 @@ impl EmitBuffer {
                     | ExaType::HashType
                     | ExaType::IntervalYearToMonth
                     | ExaType::IntervalDayToSecond => {
-                        data_string.push(value_to_block_string(v));
+                        data_string.push(value_take_block_string(v));
                     }
                     ExaType::Boolean => data_bool.push(value_to_bool(v)),
                     ExaType::Int32 => data_int32.push(value_to_i64(v) as i32),
@@ -379,6 +383,9 @@ impl EmitBuffer {
             }
         }
 
+        let row_number = self.row_numbers.drain(..).collect();
+        self.clear();
+
         ExascriptTableData {
             rows: n_rows as u64,
             rows_in_group: 0,
@@ -388,7 +395,7 @@ impl EmitBuffer {
             data_int32,
             data_int64,
             data_double,
-            row_number: self.row_numbers.clone(),
+            row_number,
         }
     }
 
@@ -459,9 +466,8 @@ impl EmitBuffer {
     ) -> Result<(), UdfError> {
         // Step 1: flush any pending Value rows so we start from an empty buffer.
         if !self.is_empty() {
-            let table = self.to_proto(meta);
+            let table = self.take_proto(meta);
             flush(table)?;
-            self.clear();
         }
 
         let n_rows = batch.num_rows();
@@ -1268,6 +1274,17 @@ fn value_into_block_string(v: Value) -> String {
     }
 }
 
+/// `value_to_block_string` for a cell the caller is about to discard: a
+/// `Value::String`'s buffer moves into the block, leaving an empty string
+/// behind. Every other variant formats exactly as the borrowing form, with no
+/// move — the cell is left as it was.
+fn value_take_block_string(v: &mut Value) -> String {
+    match v {
+        Value::String(s) => std::mem::take(s),
+        other => value_to_block_string(other),
+    }
+}
+
 /// Coerce a non-null `Value` to `i64` for an INT32/INT64 EMITS column.
 fn value_to_i64(v: &Value) -> i64 {
     match v {
@@ -1579,9 +1596,8 @@ impl<'a> HostContextBridge<'a> {
         self.emit_buf.push(row, self.input.current_row_number());
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
-            let table = self.emit_buf.to_proto(self.output_meta);
+            let table = self.emit_buf.take_proto(self.output_meta);
             (self.flusher)(table)?;
-            self.emit_buf.clear();
         }
         Ok(())
     }
@@ -1775,13 +1791,13 @@ impl UdfContext for HostContextBridge<'_> {
             .ok_or_else(|| UdfError::Type(format!("column {col} out of range")))
     }
 
-    fn emit(&mut self, values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, values: Vec<Value>) -> Result<(), UdfError> {
         if self.output_iter == IterType::ExactlyOnce {
             return Err(UdfError::User(
                 "emit() is not allowed in RETURNS output context; return the value instead".into(),
             ));
         }
-        self.push_output_row(values.to_vec())
+        self.push_output_row(values)
     }
 
     fn set_return(&mut self, value: Option<Value>) -> Result<(), UdfError> {
@@ -1814,9 +1830,8 @@ impl UdfContext for HostContextBridge<'_> {
         // crosses the threshold is flushed immediately (possible if many
         // interleaved push calls accumulated bytes before this batch).
         if emit_buf.should_flush() {
-            let table = emit_buf.to_proto(meta);
+            let table = emit_buf.take_proto(meta);
             (flusher)(table)?;
-            emit_buf.clear();
         }
         Ok(())
     }
@@ -1915,7 +1930,7 @@ impl UdfContext for SingleCallContext<'_> {
         ))
     }
 
-    fn emit(&mut self, _values: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
         Err(UdfError::Unimplemented(
             "single-call mode does not emit rows".into(),
         ))

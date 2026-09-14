@@ -64,9 +64,10 @@ exaudfclient (binary)
   `load` (dlopen the `.so`, resolve `__exa_udf_entry_<NAME>`, validate ABI + fingerprint) →
   `run` loop (MT_RUN; per group: MT_NEXT input batch → UDF `run()` → MT_EMIT output) →
   `cleanup` (MT_FINISHED, then `exit(0)`).
-- **Emit path:** `ctx.emit(&row)` pushes into an `EmitBuffer` that tracks a running byte
+- **Emit path:** `ctx.emit(row)` moves the row into an `EmitBuffer` that tracks a running byte
   estimate and flushes an `MT_EMIT` at the 4,000,000-byte threshold, with a final tail
-  flush at end of `run`.
+  flush at end of `run`. The row is owned end to end, so the protobuf encode is the only
+  user-space copy of a cell.
 - **Connect-back path (optional):** `ctx.connection("NAME")` fetches CONNECTION-object
   credentials via `MT_IMPORT`, then opens a *separate* SQL login over TCP to `:8563`
   using `exarrow-rs`; reads stream one Arrow batch at a time and are converted to

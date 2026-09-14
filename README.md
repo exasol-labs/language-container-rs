@@ -55,7 +55,7 @@ pub fn double(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         Some(n) => Value::Int64(n * 2),
         None    => Value::Null,
     };
-    ctx.emit(&[out])
+    ctx.emit(vec![out])
 }
 ```
 

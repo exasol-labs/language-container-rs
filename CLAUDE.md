@@ -55,7 +55,7 @@ Project mission in: @specs/mission.md
 - For table-scale reads, use the streaming API: fetch Arrow batches one at a time, convert each batch → `Vec<Value>` chunk, yield/callback to the caller, then **drop the batch before fetching the next one**. The architect rule: "du musst resultset in batches lesen und dann gleich emitten".
 - Never accumulate all `RecordBatch`es before converting — that creates two in-memory copies (Arrow + Value) of the entire result simultaneously.
 - The `ExaConnection` trait (SDK/FFI boundary) must remain **Arrow-free**: only `Vec<Value>` chunks cross the `.so` boundary; Arrow `TypeId` is not stable across dynamic library boundaries.
-- The natural consumer pattern is emit-as-you-read: `conn.query_for_each(sql, |row| ctx.emit(&row))` — read a chunk, emit it, discard it, repeat.
+- The natural consumer pattern is emit-as-you-read: `conn.query_for_each(sql, |row| ctx.emit(row))` — read a chunk, emit it, discard it, repeat.
 
 ## Unit test layout
 

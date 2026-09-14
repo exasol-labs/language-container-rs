@@ -11,7 +11,7 @@ fn test_context_covers_scalar_set_emit_and_return_paths() {
     assert_eq!(scalar.get(0).unwrap(), &Value::Int64(7));
     assert_eq!(scalar.get_string(1).unwrap(), Some("a"));
     assert!(!scalar.next().unwrap(), "scalar input is a single row");
-    scalar.emit(&[Value::Int64(1)]).unwrap();
+    scalar.emit(vec![Value::Int64(1)]).unwrap();
     scalar.set_return(Some(Value::Int64(42))).unwrap();
     assert_eq!(scalar.emitted(), &[vec![Value::Int64(1)]]);
     assert_eq!(scalar.captured_return(), Some(&Some(Value::Int64(42))));
@@ -46,7 +46,7 @@ fn emit_policy_rejects_every_call_with_the_supplied_error() {
     ));
 
     for _ in 0..2 {
-        let err = ctx.emit(&[Value::Int64(1)]).unwrap_err();
+        let err = ctx.emit(vec![Value::Int64(1)]).unwrap_err();
         assert!(matches!(err, UdfError::Unimplemented(msg) if msg.contains("RETURNS")));
     }
     assert!(
@@ -199,6 +199,6 @@ fn defaults_ctx_reports_no_columns_and_accepts_emit() {
 
     assert_eq!(ctx.num_columns(), 0);
     assert!(matches!(ctx.get(0).unwrap_err(), UdfError::Type(_)));
-    assert!(ctx.emit(&[Value::Int64(1)]).is_ok());
+    assert!(ctx.emit(vec![Value::Int64(1)]).is_ok());
     assert!(!ctx.next().unwrap());
 }

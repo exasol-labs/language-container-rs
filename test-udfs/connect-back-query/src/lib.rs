@@ -24,7 +24,7 @@ pub fn connect_back_query(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         other => return Err(UdfError::Type(format!("unexpected value {other:?}"))),
     };
     // BIGINT EMITS columns travel as PB_NUMERIC (typed Decimal).
-    ctx.emit(&[Value::Numeric(Decimal {
+    ctx.emit(vec![Value::Numeric(Decimal {
         unscaled: val as i128,
         scale: 0,
     })])

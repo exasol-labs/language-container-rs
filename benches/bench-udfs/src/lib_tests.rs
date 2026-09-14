@@ -43,7 +43,7 @@ impl UdfContext for BatchCapture {
             .get(col)
             .ok_or_else(|| UdfError::Type(format!("column {col} out of range")))
     }
-    fn emit(&mut self, _: &[Value]) -> Result<(), UdfError> {
+    fn emit(&mut self, _: Vec<Value>) -> Result<(), UdfError> {
         Ok(())
     }
     fn next(&mut self) -> Result<bool, UdfError> {

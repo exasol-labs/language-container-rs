@@ -54,7 +54,7 @@ pub fn crunch_writeback(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     // BIGINT EMITS columns travel as PB_NUMERIC (typed Decimal); emit Numeric,
     // not Int64, or the DB's emit handler reads the wrong block and crashes.
     for _ in &vals {
-        ctx.emit(&[Value::Numeric(Decimal {
+        ctx.emit(vec![Value::Numeric(Decimal {
             unscaled: 1,
             scale: 0,
         })])?;

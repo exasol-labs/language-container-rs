@@ -22,7 +22,7 @@ pub fn numeric_temporal_ingest(ctx: &mut dyn UdfContext) -> Result<(), UdfError>
         let event_date = ctx.get_date(1)?;
         let event_ts = ctx.get_timestamp(2)?;
 
-        ctx.emit(&[
+        ctx.emit(vec![
             amount.map_or(Value::Null, Value::Numeric),
             event_date.map_or(Value::Null, Value::Date),
             event_ts.map_or(Value::Null, Value::Timestamp),
