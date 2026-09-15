@@ -2813,9 +2813,9 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
         ))
         .await?;
         let val = if case.sql_type == "DECIMAL(5,2)" {
-            "CAST(12.34 AS DECIMAL(5,2))"
+            "CAST(12.34 AS DECIMAL(5,2))".to_string()
         } else {
-            "CAST(42 AS BIGINT)"
+            format!("CAST(42 AS {})", case.sql_type)
         };
         let diag = query_single_string(
             conn,
@@ -3056,17 +3056,18 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
         ))
         .await?;
         let val = match case.sql_type {
-            "DOUBLE" => "CAST(1.0 AS DOUBLE)",
-            "BOOLEAN" => "TRUE",
-            "DATE" => "DATE '2026-01-01'",
-            "CHAR(10)" => "CAST('x' AS CHAR(10))",
-            _ => "CAST(1 AS BIGINT)",
+            "DOUBLE" => "CAST(1.0 AS DOUBLE)".to_string(),
+            "BOOLEAN" => "TRUE".to_string(),
+            "DATE" => "DATE '2026-01-01'".to_string(),
+            "CHAR(10)" => "CAST('x' AS CHAR(10))".to_string(),
+            "VARCHAR(200)" => "'hello'".to_string(),
+            t => format!("CAST(1 AS {t})"),
         };
         let diag = query_single_string(
             conn,
             &format!(
-                "SELECT diag FROM (SELECT type_probe(CAST({val} AS {}))\
-                 EMITS (y VARCHAR(200), diag VARCHAR(2000)) FROM DUAL)",
+                "SELECT diag FROM (SELECT type_probe({val})\
+                 EMITS (y {}, diag VARCHAR(2000)) FROM DUAL)",
                 case.sql_type
             ),
         )
