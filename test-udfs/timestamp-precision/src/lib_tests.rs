@@ -20,6 +20,14 @@ fn output_columns(precision: u32) -> Vec<ColumnInfo> {
             precision: None,
             scale: None,
         },
+        ColumnInfo {
+            name: "diag".into(),
+            typ: ExaType::String { size: 200 },
+            type_name: "VARCHAR(200) UTF8".into(),
+            size: Some(200),
+            precision: None,
+            scale: None,
+        },
     ]
 }
 

@@ -2007,7 +2007,7 @@ async fn timestamp_precision_probe_roundtrips(
     for p in [0u32, 3, 6, 9] {
         conn.execute(&format!(
             "CREATE OR REPLACE RUST SET SCRIPT ts_precision_probe(...) \
-             EMITS (ts TIMESTAMP({p}), prec BIGINT) AS\n\
+             EMITS (ts TIMESTAMP({p}), prec BIGINT, diag VARCHAR(200)) AS\n\
              %udf_object {udf_object};\n/"
         ))
         .await?;
@@ -2015,17 +2015,20 @@ async fn timestamp_precision_probe_roundtrips(
         let got = query_single_string(
             conn,
             "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
+             || ':' || diag \
              FROM (SELECT ts_precision_probe(1))",
         )
         .await?
         .ok_or_else(|| anyhow!("ts_precision_probe returned NULL at p={p}"))?;
 
-        let parts: Vec<&str> = got.splitn(2, ':').collect();
+        let parts: Vec<&str> = got.splitn(3, ':').collect();
         let reported_prec: u32 = parts[0].parse()?;
+        let diag = parts.get(2).unwrap_or(&"");
+        eprintln!("[it] ts_precision_probe p={p}: prec={reported_prec} diag={diag}");
         if reported_prec != p {
             bail!(
                 "ts_precision_probe at TIMESTAMP({p}): UDF reported precision {reported_prec}, \
-                 expected {p}"
+                 expected {p}; diag={diag}"
             );
         }
 
@@ -2046,7 +2049,7 @@ async fn timestamp_precision_probe_roundtrips(
 async fn timestamp_precision_probe_legacy(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT ts_precision_probe(...) \
-         EMITS (ts TIMESTAMP, prec BIGINT) AS\n\
+         EMITS (ts TIMESTAMP, prec BIGINT, diag VARCHAR(200)) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2054,17 +2057,20 @@ async fn timestamp_precision_probe_legacy(conn: &mut Connection, udf_object: &st
     let got = query_single_string(
         conn,
         "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
+         || ':' || diag \
          FROM (SELECT ts_precision_probe(1))",
     )
     .await?
     .ok_or_else(|| anyhow!("ts_precision_probe (legacy) returned NULL"))?;
 
-    let parts: Vec<&str> = got.splitn(2, ':').collect();
+    let parts: Vec<&str> = got.splitn(3, ':').collect();
     let reported_prec: u32 = parts[0].parse()?;
+    let diag = parts.get(2).unwrap_or(&"");
+    eprintln!("[it] ts_precision_probe_legacy: prec={reported_prec} diag={diag}");
     if reported_prec != 3 {
         bail!(
             "ts_precision_probe (plain TIMESTAMP): UDF reported precision {reported_prec}, \
-             expected 3"
+             expected 3; diag={diag}"
         );
     }
 

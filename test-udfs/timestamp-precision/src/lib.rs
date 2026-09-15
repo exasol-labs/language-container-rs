@@ -10,19 +10,18 @@ pub fn ts_precision_probe(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
         ExaType::Timestamp { precision } | ExaType::TimestampTz { precision } => precision,
         _ => return Err(UdfError::Type("output column 0 is not a timestamp".into())),
     };
-    let prec_col = ctx.output_column(1)?;
-    if !matches!(
-        prec_col.typ,
-        ExaType::Int32 | ExaType::Int64 | ExaType::Numeric { .. }
-    ) {
-        return Err(UdfError::Type("output column 1 is not numeric".into()));
-    }
+    let raw_type_name = ts_col.type_name.clone();
+    let raw_precision = ts_col.precision;
 
     let ts = chrono::NaiveDate::from_ymd_opt(2026, 7, 14)
         .unwrap()
         .and_hms_nano_opt(9, 30, 15, 123_456_789)
         .unwrap();
-    ctx.emit(vec![Value::Timestamp(ts), Value::Int32(precision as i32)])
+    ctx.emit(vec![
+        Value::Timestamp(ts),
+        Value::Int32(precision as i32),
+        Value::String(format!("tn={raw_type_name}|rp={raw_precision:?}")),
+    ])
 }
 
 #[cfg(test)]
