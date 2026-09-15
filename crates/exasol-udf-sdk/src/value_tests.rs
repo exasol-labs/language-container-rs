@@ -85,8 +85,8 @@ fn value_exatype_typed_variants() {
             scale: 2,
         },
         ExaType::Boolean,
-        ExaType::String { size: Some(256) },
-        ExaType::Char { size: Some(10) },
+        ExaType::String { size: 256 },
+        ExaType::Char { size: 10 },
         ExaType::Date,
         ExaType::Timestamp { precision: 3 },
         ExaType::TimestampTz { precision: 3 },
@@ -106,9 +106,6 @@ fn value_exatype_typed_variants() {
             scale: 0
         }
     );
-    assert_ne!(
-        ExaType::String { size: Some(1) },
-        ExaType::Char { size: Some(1) }
-    );
+    assert_ne!(ExaType::String { size: 1 }, ExaType::Char { size: 1 });
     assert_ne!(ExaType::Double, ExaType::Int32);
 }

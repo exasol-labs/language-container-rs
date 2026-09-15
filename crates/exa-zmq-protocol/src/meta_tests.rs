@@ -85,13 +85,13 @@ fn from_pb_refines_extended_types_via_type_name() {
             "CHAR(10) UTF8",
             ColumnType::PbString,
             Some(10),
-            ExaType::Char { size: Some(10) },
+            ExaType::Char { size: 10 },
         ),
         (
             "VARCHAR(256) UTF8",
             ColumnType::PbString,
             Some(256),
-            ExaType::String { size: Some(256) },
+            ExaType::String { size: 256 },
         ),
         ("GEOMETRY(0)", ColumnType::PbString, None, ExaType::Geometry),
         (
@@ -153,7 +153,7 @@ fn from_pb_refines_extended_types_via_type_name() {
     let unknown_string = col(ColumnType::PbString, "MYSTERY", Some(7), None, None);
     assert_eq!(
         column_from_pb(&unknown_string).typ,
-        ExaType::String { size: Some(7) }
+        ExaType::String { size: 7 }
     );
 }
 
@@ -249,11 +249,7 @@ fn from_pb_carries_maximal_memory_limit() {
 #[test]
 fn extended_exatype_roundtrips_to_pb() {
     let cases = [
-        (
-            ExaType::Char { size: Some(10) },
-            "CHAR(10)",
-            ColumnType::PbString,
-        ),
+        (ExaType::Char { size: 10 }, "CHAR(10)", ColumnType::PbString),
         (ExaType::Geometry, "GEOMETRY(0)", ColumnType::PbString),
         (ExaType::HashType, "HASHTYPE(16 BYTE)", ColumnType::PbString),
         (

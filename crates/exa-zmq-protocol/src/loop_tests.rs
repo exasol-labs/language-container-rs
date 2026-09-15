@@ -107,7 +107,7 @@ fn meta_maps_all_pb_types() {
         ),
         (ColumnType::PbTimestamp, ExaType::Timestamp { precision: 3 }),
         (ColumnType::PbDate, ExaType::Date),
-        (ColumnType::PbString, ExaType::String { size: None }),
+        (ColumnType::PbString, ExaType::String { size: 2_000_000 }),
         (ColumnType::PbBoolean, ExaType::Boolean),
     ];
     for (pb, expected) in cases {
