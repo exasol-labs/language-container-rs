@@ -67,13 +67,13 @@ pub fn column_from_pb(col: &exa_proto::exascript_metadata::ColumnDefinition) -> 
         ColumnType::PbInt32 => ExaType::Int32,
         ColumnType::PbInt64 => ExaType::Int64,
         ColumnType::PbNumeric => ExaType::Numeric {
-            precision: col.precision,
-            scale: col.scale,
+            precision: col.precision.unwrap_or(18),
+            scale: col.scale.unwrap_or(0),
         },
         ColumnType::PbDate => ExaType::Date,
         ColumnType::PbBoolean => ExaType::Boolean,
         ColumnType::PbUnsupported => ExaType::Unsupported,
-        ColumnType::PbTimestamp => refine_timestamp(&col.type_name),
+        ColumnType::PbTimestamp => refine_timestamp(&col.type_name, col.precision),
         ColumnType::PbString => refine_string(&col.type_name, col.size),
     };
     ColumnInfo {
@@ -88,9 +88,13 @@ pub fn column_from_pb(col: &exa_proto::exascript_metadata::ColumnDefinition) -> 
 
 fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
     if type_name.starts_with("CHAR") {
-        ExaType::Char { size }
+        ExaType::Char {
+            size: size.unwrap_or(1),
+        }
     } else if type_name.starts_with("VARCHAR") {
-        ExaType::String { size }
+        ExaType::String {
+            size: size.unwrap_or(2_000_000),
+        }
     } else if type_name.starts_with("GEOMETRY") {
         ExaType::Geometry
     } else if type_name.starts_with("HASHTYPE") {
@@ -100,15 +104,26 @@ fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
     } else if type_name.contains("DAY") && type_name.contains("SECOND") {
         ExaType::IntervalDayToSecond
     } else {
-        ExaType::String { size }
+        ExaType::String {
+            size: size.unwrap_or(2_000_000),
+        }
     }
 }
 
-fn refine_timestamp(type_name: &str) -> ExaType {
+fn parse_timestamp_precision(type_name: &str) -> Option<u32> {
+    let open = type_name.find('(')?;
+    let close = type_name[open..].find(')')? + open;
+    type_name[open + 1..close].parse().ok()
+}
+
+fn refine_timestamp(type_name: &str, precision: Option<u32>) -> ExaType {
+    let precision = parse_timestamp_precision(type_name)
+        .or(precision)
+        .unwrap_or(3);
     if type_name.contains("LOCAL TIME ZONE") {
-        ExaType::TimestampTz
+        ExaType::TimestampTz { precision }
     } else {
-        ExaType::Timestamp
+        ExaType::Timestamp { precision }
     }
 }
 

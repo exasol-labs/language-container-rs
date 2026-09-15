@@ -90,7 +90,8 @@ jobs:
             -p emit-k \
             -p scalar-next-illegal \
             -p returns-with-emit \
-            -p column-meta
+            -p column-meta \
+            -p timestamp-precision
 
       - name: Build IT test binary (compile once)
         run: |

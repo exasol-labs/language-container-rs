@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn describe_output_follows_the_declared_output_shape() {
         let mut ctx = TestContext::scalar(vec![Value::Int64(1)]).with_output_columns(vec![
-            column("a", ExaType::String { size: Some(10) }, "VARCHAR(10) UTF8"),
+            column("a", ExaType::String { size: 10 }, "VARCHAR(10) UTF8"),
             column("b", ExaType::Int64, "BIGINT"),
         ]);
 

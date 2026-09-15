@@ -213,7 +213,7 @@ fn mixed_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
     // Columns: [Int64, String, Double, Boolean]
     let meta = vec![
         col("a", ExaType::Int64),
-        col("b", ExaType::String { size: None }),
+        col("b", ExaType::String { size: 2_000_000 }),
         col("c", ExaType::Double),
         col("d", ExaType::Boolean),
     ];
@@ -317,7 +317,7 @@ fn emitted_rows_carry_the_input_row_number() {
 /// Successive cells of one string column land in the block in push order.
 #[test]
 fn string_block_keeps_push_order() {
-    let meta = vec![col("a", ExaType::String { size: None })];
+    let meta = vec![col("a", ExaType::String { size: 2_000_000 })];
     let mut emit = EmitBuffer::new();
     emit.push(vec![Value::String("a".into())], 0, &meta);
     emit.push(vec![Value::String("b".into())], 0, &meta);
@@ -352,7 +352,7 @@ fn bridge_typed_accessors() {
 fn emit_buffer_roundtrips_through_proto() {
     let meta = vec![
         col("a", ExaType::Int64),
-        col("b", ExaType::String { size: None }),
+        col("b", ExaType::String { size: 2_000_000 }),
         col("c", ExaType::Double),
         col("d", ExaType::Boolean),
     ];
@@ -408,12 +408,12 @@ fn emit_packs_by_declared_type_not_value_variant() {
     // the EMITS column is ExaType::Numeric (string block). to_proto must
     // place it in the string block so the DB reads it from the right block.
     let meta = vec![
-        col("region", ExaType::String { size: None }),
+        col("region", ExaType::String { size: 2_000_000 }),
         col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
     ];
@@ -453,11 +453,11 @@ fn emit_string_block_is_row_major_across_columns() {
         col(
             "a",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
-        col("b", ExaType::String { size: None }),
+        col("b", ExaType::String { size: 2_000_000 }),
     ];
     let mut emit = EmitBuffer::new();
     emit.push(
@@ -506,11 +506,11 @@ fn emit_null_cell_occupies_no_type_block_slot() {
         col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
-        col("note", ExaType::String { size: None }),
+        col("note", ExaType::String { size: 2_000_000 }),
     ];
     let mut emit = EmitBuffer::new();
     emit.push(vec![Value::Null, Value::String("AAA".into())], 0, &meta);
@@ -552,12 +552,12 @@ fn bridge_typed_getters_return_typed_options() {
         col(
             "amount",
             ExaType::Numeric {
-                precision: Some(10),
-                scale: Some(2),
+                precision: 10,
+                scale: 2,
             },
         ),
         col("d", ExaType::Date),
-        col("ts", ExaType::Timestamp),
+        col("ts", ExaType::Timestamp { precision: 3 }),
     ];
     let table = ExascriptTableData {
         rows: 1,
@@ -598,8 +598,8 @@ fn corrupt_string_block_value_decodes_to_null() {
         col(
             "amount",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
         col("d", ExaType::Date),
@@ -627,14 +627,14 @@ fn emit_buffer_byte_estimate_and_should_flush() {
     let rows_to_limit = EMIT_BUFFER_LIMIT_BYTES.div_ceil(1000 + BYTES_ROW_NUMBER);
 
     for _ in 0..(rows_to_limit - 1) {
-        emit.push(row(), 0, &[col("s", ExaType::String { size: None })]);
+        emit.push(row(), 0, &[col("s", ExaType::String { size: 2_000_000 })]);
     }
     assert!(
         !emit.should_flush(),
         "buffer just below the limit must not request a flush"
     );
 
-    emit.push(row(), 0, &[col("s", ExaType::String { size: None })]);
+    emit.push(row(), 0, &[col("s", ExaType::String { size: 2_000_000 })]);
     assert!(
         emit.should_flush(),
         "buffer at or above the limit must request a flush"
@@ -656,7 +656,7 @@ fn oversized_single_row_flushes_alone() {
     emit.push(
         vec![Value::String("y".repeat(EMIT_BUFFER_LIMIT_BYTES + 1))],
         0,
-        &[col("s", ExaType::String { size: None })],
+        &[col("s", ExaType::String { size: 2_000_000 })],
     );
     assert!(
         emit.should_flush(),
@@ -727,8 +727,8 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     // DECIMAL(p,0) column is the common case, not an error.
     assert!(column_accepts(
         &ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         },
         &Value::Int64(7)
     ));
@@ -736,8 +736,8 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     // `1e21`, `NaN` or `inf` — none of them a DECIMAL literal.
     assert!(!column_accepts(
         &ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         },
         &Value::Double(1.0)
     ));
@@ -750,7 +750,7 @@ fn bridge_exposes_input_and_output_column_metadata() {
     let input = vec![col("x", ExaType::Int64)];
     let output = vec![
         col("y", ExaType::Double),
-        col("z", ExaType::String { size: Some(10) }),
+        col("z", ExaType::String { size: 10 }),
     ];
     let empty = ExascriptTableData {
         rows: 0,
@@ -779,7 +779,7 @@ fn bridge_exposes_input_and_output_column_metadata() {
     assert_eq!(bridge.output_column_count(), 2);
     assert_eq!(
         bridge.output_column(1).unwrap().typ,
-        ExaType::String { size: Some(10) }
+        ExaType::String { size: 10 }
     );
     assert!(bridge.output_column(2).is_err());
 }
@@ -788,7 +788,7 @@ fn bridge_exposes_input_and_output_column_metadata() {
 fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
     // Pins the row path (HostContextBridge::emit) mid-run flush behavior; the
     // batch path is pinned by bridge_emit_batch_buffers_and_flushes.
-    let meta = vec![col("v", ExaType::String { size: None })];
+    let meta = vec![col("v", ExaType::String { size: 2_000_000 })];
     let empty_table = ExascriptTableData {
         rows: 0,
         ..Default::default()
@@ -862,7 +862,7 @@ fn timestamp_emit_nanosecond_roundtrip() {
         .unwrap()
         .and_hms_nano_opt(9, 30, 15, 123_456_789)
         .unwrap();
-    let meta = vec![col("ts", ExaType::Timestamp)];
+    let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
 
     // WHEN serialised via EmitBuffer -> to_proto (uses value_to_block_string).
     let mut emit = EmitBuffer::new();
@@ -1158,7 +1158,7 @@ fn telemetry_emitted_at_debug_level_only() {
                 emit.push(
                     vec![Value::String("x".repeat(1000))],
                     0,
-                    &[col("s", ExaType::String { size: None })],
+                    &[col("s", ExaType::String { size: 2_000_000 })],
                 );
                 if emit.should_flush() {
                     emit.record_flush_telemetry();
@@ -1220,7 +1220,7 @@ fn emit_flush_path_instrumented() {
         emit.push(
             vec![Value::String("hello".to_string())],
             0,
-            &[col("s", ExaType::String { size: None })],
+            &[col("s", ExaType::String { size: 2_000_000 })],
         );
     });
 
@@ -1792,20 +1792,20 @@ mod fast_string_block_tests {
             col(
                 "num_a",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(2),
+                    precision: 18,
+                    scale: 2,
                 },
             ),
             col(
                 "num_b",
                 ExaType::Numeric {
-                    precision: Some(38),
-                    scale: Some(0),
+                    precision: 38,
+                    scale: 0,
                 },
             ),
             col("d", ExaType::Date),
-            col("t", ExaType::Timestamp),
-            col("label", ExaType::String { size: Some(100) }),
+            col("t", ExaType::Timestamp { precision: 3 }),
+            col("label", ExaType::String { size: 100 }),
             col("i", ExaType::Int64),
         ];
 
@@ -1968,12 +1968,12 @@ mod fast_string_block_ingest_tests {
                 "mismatch for {s}, expected {expected:?}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block mismatch for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::TimestampTz, s),
+                decode_string_block(&ExaType::TimestampTz { precision: 3 }, s),
                 expected,
                 "decode_string_block (TimestampTz) mismatch for {s}"
             );
@@ -2023,7 +2023,7 @@ mod fast_string_block_ingest_tests {
                 "test setup: {s} should be chrono-valid"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block must still succeed via fallback for {s}"
             );
@@ -2077,7 +2077,7 @@ mod fast_string_block_ingest_tests {
                 "fast_parse_timestamp should defer/reject for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 Value::Null,
                 "decode_string_block(Timestamp) should be Null for {s}"
             );
@@ -2145,7 +2145,7 @@ mod arrow_tests {
     fn mixed_meta() -> Vec<ColumnInfo> {
         vec![
             col("a", ExaType::Int64),
-            col("b", ExaType::String { size: None }),
+            col("b", ExaType::String { size: 2_000_000 }),
             col("c", ExaType::Double),
             col("d", ExaType::Boolean),
         ]
@@ -2396,39 +2396,39 @@ mod arrow_tests {
             col("i64", ExaType::Int64),
             col("dbl", ExaType::Double),
             col("bln", ExaType::Boolean),
-            col("s", ExaType::String { size: None }),
-            col("ls", ExaType::String { size: None }),
+            col("s", ExaType::String { size: 2_000_000 }),
+            col("ls", ExaType::String { size: 2_000_000 }),
             col("dt", ExaType::Date),
-            col("ts_s", ExaType::Timestamp),
-            col("ts_ms", ExaType::Timestamp),
-            col("ts_us", ExaType::TimestampTz),
-            col("ts_ns", ExaType::Timestamp),
+            col("ts_s", ExaType::Timestamp { precision: 3 }),
+            col("ts_ms", ExaType::Timestamp { precision: 3 }),
+            col("ts_us", ExaType::TimestampTz { precision: 3 }),
+            col("ts_ns", ExaType::Timestamp { precision: 3 }),
             col(
                 "dec",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(2),
+                    precision: 18,
+                    scale: 2,
                 },
             ),
             col(
                 "n32",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
             col(
                 "n64",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
             col(
                 "nf64",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
         ];
@@ -2575,8 +2575,8 @@ mod arrow_tests {
         let batch = RecordBatch::try_new(schema, vec![a, b]).unwrap();
 
         let meta = vec![
-            col("s1", ExaType::String { size: None }),
-            col("s2", ExaType::String { size: None }),
+            col("s1", ExaType::String { size: 2_000_000 }),
+            col("s2", ExaType::String { size: 2_000_000 }),
         ];
 
         let mut buf = EmitBuffer::new();
@@ -2610,7 +2610,7 @@ mod arrow_tests {
 
         let meta = vec![
             col("a", ExaType::Int64),
-            col("b", ExaType::String { size: None }),
+            col("b", ExaType::String { size: 2_000_000 }),
             col("c", ExaType::Double),
             col("d", ExaType::Boolean),
         ];
@@ -2700,7 +2700,7 @@ mod arrow_tests {
             Arc::new(StringArray::from(vec![s.as_str(); n_rows]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
 
-        let meta = vec![col("v", ExaType::String { size: None })];
+        let meta = vec![col("v", ExaType::String { size: 2_000_000 })];
 
         let mut flush_count = 0usize;
         let mut total_flushed_rows = 0u64;
@@ -2739,7 +2739,7 @@ mod arrow_tests {
         let arr: Arc<dyn arrow::array::Array> =
             Arc::new(StringArray::from(vec![s.as_str(); n_rows]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("v", ExaType::String { size: None })];
+        let meta = vec![col("v", ExaType::String { size: 2_000_000 })];
 
         let mut buf = EmitBuffer::new();
         buf.push_batch(&batch, &meta, 0, &mut |_| Ok(())).unwrap();
@@ -2792,8 +2792,8 @@ mod arrow_tests {
         let meta = vec![col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         )];
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -3012,7 +3012,7 @@ mod arrow_tests {
             single_column_cost(
                 DataType::Timestamp(TimeUnit::Millisecond, None),
                 Arc::new(TimestampMillisecondArray::from(vec![0i64])),
-                ExaType::Timestamp
+                ExaType::Timestamp { precision: 3 }
             ),
             value_byte_cost(&Value::Timestamp(NaiveDateTime::default())),
             "Timestamp cost is a fixed width, independent of unit or value"
@@ -3042,8 +3042,8 @@ mod arrow_tests {
             let meta = vec![col(
                 "d",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(scale as u32),
+                    precision: 18,
+                    scale: scale as u32,
                 },
             )];
 
@@ -3067,7 +3067,7 @@ mod arrow_tests {
         let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, false)]));
         let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["hello world"]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("s", ExaType::String { size: None })];
+        let meta = vec![col("s", ExaType::String { size: 2_000_000 })];
         assert_eq!(
             compute_row_costs(&batch, &meta)[0],
             value_byte_cost(&Value::String("hello world".to_string())),
@@ -3083,7 +3083,7 @@ mod arrow_tests {
         )]));
         let arr2: Arc<dyn arrow::array::Array> = Arc::new(LargeStringArray::from(vec!["héllo"]));
         let batch2 = RecordBatch::try_new(schema2, vec![arr2]).unwrap();
-        let meta2 = vec![col("ls", ExaType::String { size: None })];
+        let meta2 = vec![col("ls", ExaType::String { size: 2_000_000 })];
         assert_eq!(
             compute_row_costs(&batch2, &meta2)[0],
             value_byte_cost(&Value::String("héllo".to_string())),
@@ -3114,7 +3114,7 @@ mod arrow_tests {
         let batch = RecordBatch::try_new(schema, vec![i_arr, s_arr, b_arr]).unwrap();
         let meta = vec![
             col("i", ExaType::Int32),
-            col("s", ExaType::String { size: None }),
+            col("s", ExaType::String { size: 2_000_000 }),
             col("b", ExaType::Boolean),
         ];
 
@@ -3152,7 +3152,7 @@ mod arrow_tests {
         let arr: Arc<dyn arrow::array::Array> =
             Arc::new(TimestampSecondArray::from(vec![1_700_000_000i64]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3176,7 +3176,7 @@ mod arrow_tests {
         let arr: Arc<dyn arrow::array::Array> =
             Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_123i64]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3201,7 +3201,7 @@ mod arrow_tests {
             1_700_000_000_123_456i64,
         ]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3225,7 +3225,7 @@ mod arrow_tests {
         let ns = 1_700_000_000_123_456_789i64;
         let arr: Arc<dyn arrow::array::Array> = Arc::new(TimestampNanosecondArray::from(vec![ns]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3260,7 +3260,7 @@ mod arrow_tests {
             -1_000_000_000i64,
         ]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let last_nanosecond_of_1969 = NaiveDate::from_ymd_opt(1969, 12, 31)
@@ -3317,8 +3317,8 @@ mod arrow_tests {
             vec![col(
                 "n",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             )]
         };
@@ -3429,7 +3429,7 @@ mod arrow_tests {
         let s = "x".repeat(EMIT_BUFFER_LIMIT_BYTES + 1);
         let arr: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec![s.as_str()]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("v", ExaType::String { size: None })];
+        let meta = vec![col("v", ExaType::String { size: 2_000_000 })];
 
         let mut flush_count = 0usize;
         let mut buf = EmitBuffer::new();

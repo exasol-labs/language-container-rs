@@ -44,11 +44,11 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
         col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
-        col("label", ExaType::String { size: Some(1) }),
+        col("label", ExaType::String { size: 1 }),
     ];
 
     let rc = {

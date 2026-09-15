@@ -81,15 +81,15 @@ fn value_exatype_typed_variants() {
         ExaType::Int32,
         ExaType::Int64,
         ExaType::Numeric {
-            precision: Some(18),
-            scale: Some(2),
+            precision: 18,
+            scale: 2,
         },
         ExaType::Boolean,
-        ExaType::String { size: Some(256) },
-        ExaType::Char { size: Some(10) },
+        ExaType::String { size: 256 },
+        ExaType::Char { size: 10 },
         ExaType::Date,
-        ExaType::Timestamp,
-        ExaType::TimestampTz,
+        ExaType::Timestamp { precision: 3 },
+        ExaType::TimestampTz { precision: 3 },
         ExaType::Geometry,
         ExaType::HashType,
         ExaType::IntervalYearToMonth,
@@ -98,17 +98,14 @@ fn value_exatype_typed_variants() {
     assert_eq!(types.len(), 15);
     assert_eq!(
         ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         },
         ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         }
     );
-    assert_ne!(
-        ExaType::String { size: Some(1) },
-        ExaType::Char { size: Some(1) }
-    );
+    assert_ne!(ExaType::String { size: 1 }, ExaType::Char { size: 1 });
     assert_ne!(ExaType::Double, ExaType::Int32);
 }
