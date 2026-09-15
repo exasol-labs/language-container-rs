@@ -185,6 +185,33 @@ Every UDF receives `&mut dyn UdfContext`. The four core operations are:
 
 `next()` is for SET UDFs only — call it before the first `get()` on each row; it walks every row of the group across all `MT_NEXT` batches transparently. SCALAR UDFs start with the single input row already loaded and must not call `next()`. See §6 for the full RETURNS/EMITS × SCALAR/SET matrix.
 
+### Supported types and wire mapping
+
+The declared precision of a `DECIMAL` column decides which wire block it arrives in:
+
+| Declared column | Wire type | `Value` variant |
+|-----------------|-----------|-----------------|
+| `DECIMAL(1..9, 0)` / `TINYINT` / `SMALLINT` | `PB_INT32` | `Int32` |
+| `DECIMAL(10..18, 0)` / `INTEGER` | `PB_INT64` | `Int64` |
+| `DECIMAL(19..36, 0)` / `BIGINT`, or any scale > 0 | `PB_NUMERIC` | `Numeric` |
+| `DOUBLE` / `FLOAT` / `REAL` | `PB_DOUBLE` | `Double` |
+| `BOOLEAN` | `PB_BOOLEAN` | `Bool` |
+| `VARCHAR(n)` / `CHAR(n)` | `PB_STRING` | `String` |
+| `DATE` | `PB_DATE` (string block) | `Date` |
+| `TIMESTAMP(p)` | `PB_TIMESTAMP` (string block) | `Timestamp` |
+
+`TIMESTAMP WITH LOCAL TIME ZONE` is accepted as input (`TimestampTz`) but
+rejected as an output column by the DB (SQL state 22002). `GEOMETRY`, `HASHTYPE`,
+interval types, `TIME`, and `ARRAY` are rejected in both directions.
+
+Input timestamps arrive at microsecond precision regardless of the column's
+declared `TIMESTAMP(p)`; emitted timestamps carry nanoseconds and the engine
+truncates to the declared precision on receipt.
+
+`VARCHAR` max 2,000,000 characters, `CHAR` max 2,000. Emitting a longer value is
+rejected by the DB. Emitting an empty string yields NULL (Exasol treats `''` as
+NULL). Maximum `DECIMAL` precision is 36.
+
 ### Emitted rows are validated
 
 `emit()` (and the macro's RETURNS return value) is checked against the declared
@@ -199,7 +226,7 @@ declared column can carry, fails the query with a `Type` error naming the column
 | `DECIMAL(p,s)`, `BIGINT` | `Int32`, `Int64`, `Numeric` |
 | `DOUBLE` | `Double` |
 | `BOOLEAN` | `Bool` |
-| `VARCHAR`, `CHAR`, `GEOMETRY`, `HASHTYPE`, intervals | `String` |
+| `VARCHAR`, `CHAR` | `String` |
 | `DATE` | `Date` |
 | `TIMESTAMP` | `Timestamp` |
 
@@ -276,7 +303,9 @@ println!("{d}");   // "3.14"
 
 ### `ExaType`
 
-`ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The full variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp`, `TimestampTz`, `Geometry`, `HashType`, `IntervalYearToMonth`, `IntervalDayToSecond`, and `Unsupported`.
+`ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp { precision }`, `TimestampTz { precision }`, and `Unsupported`.
+
+`TimestampTz` is ingest-only: the DB delivers `TIMESTAMP WITH LOCAL TIME ZONE` as input, but rejects it as an output column type. The SDK enforces this at emit time.
 
 Most UDFs do not need `ExaType` — the `Value` variant and typed getters carry enough information.
 

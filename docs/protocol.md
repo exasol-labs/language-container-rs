@@ -137,10 +137,11 @@ loop is blocked inside `run()`, so the socket is idle and the round-trip is safe
 
 Input/output batches are columnar (`ExascriptTableData`): per-type blocks
 (`data_int64`, `data_double`, `data_string`, `data_bool`, …) plus a `data_nulls`
-bitmap. The runtime maps these to the SDK `Value` enum. **Exasol `BIGINT` and
-`DECIMAL` travel in the *string* block as `PB_NUMERIC`** — emit them as
-`Value::Numeric` (now carrying a `Decimal`), not `Value::Int64` (see the
-write-back guide's Pitfalls).
+bitmap. The runtime maps these to the SDK `Value` enum. The declared precision decides the wire block a `DECIMAL` column arrives in:
+`DECIMAL(1..9,0)` → `PB_INT32`, `DECIMAL(10..18,0)` → `PB_INT64`,
+`DECIMAL(19..36,0)` or any scale > 0 → `PB_NUMERIC` (string block).
+`BIGINT` is `DECIMAL(36,0)`, so it lands in `PB_NUMERIC`; emit it as
+`Value::Numeric`, not `Value::Int64`.
 
 The wire delivers each column as one of eight proto column types.
 `column_from_pb` refines those using the SQL-level `type_name` field into

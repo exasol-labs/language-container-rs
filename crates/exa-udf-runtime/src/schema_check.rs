@@ -96,11 +96,7 @@ fn exatype_name(typ: &ExaType) -> &'static str {
         ExaType::Date => "Date",
         ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => "Timestamp",
         ExaType::String { .. }
-        | ExaType::Char { .. }
-        | ExaType::Geometry
-        | ExaType::HashType
-        | ExaType::IntervalYearToMonth
-        | ExaType::IntervalDayToSecond => "String",
+        | ExaType::Char { .. } => "String",
         ExaType::Unsupported => "Unsupported",
     }
 }

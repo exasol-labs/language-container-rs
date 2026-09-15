@@ -91,7 +91,8 @@ jobs:
             -p scalar-next-illegal \
             -p returns-with-emit \
             -p column-meta \
-            -p timestamp-precision
+            -p timestamp-precision \
+            -p type-probe
 
       - name: Build IT test binary (compile once)
         run: |

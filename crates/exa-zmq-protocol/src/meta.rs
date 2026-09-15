@@ -91,18 +91,6 @@ fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
         ExaType::Char {
             size: size.unwrap_or(1),
         }
-    } else if type_name.starts_with("VARCHAR") {
-        ExaType::String {
-            size: size.unwrap_or(2_000_000),
-        }
-    } else if type_name.starts_with("GEOMETRY") {
-        ExaType::Geometry
-    } else if type_name.starts_with("HASHTYPE") {
-        ExaType::HashType
-    } else if type_name.contains("YEAR") && type_name.contains("MONTH") {
-        ExaType::IntervalYearToMonth
-    } else if type_name.contains("DAY") && type_name.contains("SECOND") {
-        ExaType::IntervalDayToSecond
     } else {
         ExaType::String {
             size: size.unwrap_or(2_000_000),
