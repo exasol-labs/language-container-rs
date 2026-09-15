@@ -2693,7 +2693,7 @@ async fn timestamp_p_rejected_on_8x(conn: &mut Connection, udf_object: &str) -> 
     let result = conn
         .execute(&format!(
             "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-             EMITS (ts TIMESTAMP(6), diag VARCHAR(200)) AS\n\
+             EMITS (...) AS\n\
              %udf_object {udf_object};\n/"
         ))
         .await;
@@ -2708,7 +2708,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // DOUBLE
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y DOUBLE, diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2736,7 +2736,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // BOOLEAN
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y BOOLEAN, diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2755,7 +2755,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // CHAR(10) — CHAR values are blank-padded
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y CHAR(10), diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2808,9 +2808,8 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     for case in &decimal_cases {
         conn.execute(&format!(
             "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-             EMITS (y {}, diag VARCHAR(2000)) AS\n\
-             %udf_object {udf_object};\n/",
-            case.sql_type
+             EMITS (...) AS\n\
+             %udf_object {udf_object};\n/"
         ))
         .await?;
         let val = if case.sql_type == "DECIMAL(5,2)" {
@@ -2846,7 +2845,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     .await?;
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y DECIMAL(36,0), diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2863,7 +2862,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // VARCHAR empty string → NULL
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y VARCHAR(200), diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2893,7 +2892,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // DATE edges
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y DATE, diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -2921,7 +2920,7 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     // TIMESTAMP WITH LOCAL TIME ZONE as input (ingest-only type)
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y TIMESTAMP, diag VARCHAR(2000)) AS\n\
+         EMITS (...) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
@@ -3052,7 +3051,7 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
     for case in &cases {
         conn.execute(&format!(
             "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-             EMITS (y VARCHAR(200), diag VARCHAR(2000)) AS\n\
+             EMITS (...) AS\n\
              %udf_object {udf_object};\n/"
         ))
         .await?;
