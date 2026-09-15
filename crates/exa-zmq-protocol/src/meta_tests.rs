@@ -10,8 +10,7 @@ pub(crate) fn column_to_pb(col: &ColumnInfo) -> exa_proto::exascript_metadata::C
         ExaType::Numeric { .. } => ColumnType::PbNumeric,
         ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => ColumnType::PbTimestamp,
         ExaType::Date => ColumnType::PbDate,
-        ExaType::String { .. }
-        | ExaType::Char { .. } => ColumnType::PbString,
+        ExaType::String { .. } | ExaType::Char { .. } => ColumnType::PbString,
         ExaType::Boolean => ColumnType::PbBoolean,
         ExaType::Unsupported => ColumnType::PbUnsupported,
     };
@@ -93,33 +92,25 @@ fn from_pb_refines_extended_types_via_type_name() {
             "GEOMETRY(0)",
             ColumnType::PbString,
             None,
-            ExaType::String {
-                size: 2_000_000,
-            },
+            ExaType::String { size: 2_000_000 },
         ),
         (
             "HASHTYPE(16 BYTE)",
             ColumnType::PbString,
             None,
-            ExaType::String {
-                size: 2_000_000,
-            },
+            ExaType::String { size: 2_000_000 },
         ),
         (
             "INTERVAL YEAR(2) TO MONTH",
             ColumnType::PbString,
             None,
-            ExaType::String {
-                size: 2_000_000,
-            },
+            ExaType::String { size: 2_000_000 },
         ),
         (
             "INTERVAL DAY(2) TO SECOND(3)",
             ColumnType::PbString,
             None,
-            ExaType::String {
-                size: 2_000_000,
-            },
+            ExaType::String { size: 2_000_000 },
         ),
         (
             "TIMESTAMP(3) WITH LOCAL TIME ZONE",

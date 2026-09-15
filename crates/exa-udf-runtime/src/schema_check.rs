@@ -95,8 +95,7 @@ fn exatype_name(typ: &ExaType) -> &'static str {
         ExaType::Boolean => "Boolean",
         ExaType::Date => "Date",
         ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => "Timestamp",
-        ExaType::String { .. }
-        | ExaType::Char { .. } => "String",
+        ExaType::String { .. } | ExaType::Char { .. } => "String",
         ExaType::Unsupported => "Unsupported",
     }
 }

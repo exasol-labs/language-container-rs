@@ -2776,13 +2776,34 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
         expected_variant: &'static str,
     }
     let decimal_cases = [
-        DecCase { sql_type: "DECIMAL(9,0)", expected_variant: "Int32" },
-        DecCase { sql_type: "DECIMAL(10,0)", expected_variant: "Int64" },
-        DecCase { sql_type: "DECIMAL(18,0)", expected_variant: "Int64" },
-        DecCase { sql_type: "DECIMAL(19,0)", expected_variant: "Numeric" },
-        DecCase { sql_type: "DECIMAL(36,0)", expected_variant: "Numeric" },
-        DecCase { sql_type: "BIGINT", expected_variant: "Numeric" },
-        DecCase { sql_type: "DECIMAL(5,2)", expected_variant: "Numeric" },
+        DecCase {
+            sql_type: "DECIMAL(9,0)",
+            expected_variant: "Int32",
+        },
+        DecCase {
+            sql_type: "DECIMAL(10,0)",
+            expected_variant: "Int64",
+        },
+        DecCase {
+            sql_type: "DECIMAL(18,0)",
+            expected_variant: "Int64",
+        },
+        DecCase {
+            sql_type: "DECIMAL(19,0)",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "BIGINT",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "DECIMAL(5,2)",
+            expected_variant: "Numeric",
+        },
     ];
     for case in &decimal_cases {
         conn.execute(&format!(
@@ -2792,7 +2813,11 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
             case.sql_type
         ))
         .await?;
-        let val = if case.sql_type == "DECIMAL(5,2)" { "CAST(12.34 AS DECIMAL(5,2))" } else { "CAST(42 AS BIGINT)" };
+        let val = if case.sql_type == "DECIMAL(5,2)" {
+            "CAST(12.34 AS DECIMAL(5,2))"
+        } else {
+            "CAST(42 AS BIGINT)"
+        };
         let diag = query_single_string(
             conn,
             &format!(
@@ -2806,7 +2831,8 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
         if !diag.contains(case.expected_variant) {
             bail!(
                 "type_probe {}: diag={diag:?}, expected variant {}",
-                case.sql_type, case.expected_variant
+                case.sql_type,
+                case.expected_variant
             );
         }
     }
@@ -2908,7 +2934,9 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
     .await?
     .ok_or_else(|| anyhow!("type_probe TIMESTAMP WITH LOCAL TIME ZONE returned NULL"))?;
     if !ts_ltz.contains("Timestamp") {
-        bail!("type_probe TIMESTAMP WITH LOCAL TIME ZONE: diag={ts_ltz:?}, expected Timestamp variant");
+        bail!(
+            "type_probe TIMESTAMP WITH LOCAL TIME ZONE: diag={ts_ltz:?}, expected Timestamp variant"
+        );
     }
 
     Ok(())
@@ -2965,17 +2993,61 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
         expected_variant: &'static str,
     }
     let cases = [
-        MetaCase { sql_type: "DECIMAL(9,0)", expected_type_prefix: "DECIMAL(9,0)", expected_variant: "Int32" },
-        MetaCase { sql_type: "DECIMAL(10,0)", expected_type_prefix: "DECIMAL(10,0)", expected_variant: "Int64" },
-        MetaCase { sql_type: "DECIMAL(18,0)", expected_type_prefix: "DECIMAL(18,0)", expected_variant: "Int64" },
-        MetaCase { sql_type: "DECIMAL(19,0)", expected_type_prefix: "DECIMAL(19,0)", expected_variant: "Numeric" },
-        MetaCase { sql_type: "DECIMAL(36,0)", expected_type_prefix: "DECIMAL(36,0)", expected_variant: "Numeric" },
-        MetaCase { sql_type: "BIGINT", expected_type_prefix: "DECIMAL(36,0)", expected_variant: "Numeric" },
-        MetaCase { sql_type: "DOUBLE", expected_type_prefix: "DOUBLE", expected_variant: "Double" },
-        MetaCase { sql_type: "BOOLEAN", expected_type_prefix: "BOOLEAN", expected_variant: "Bool" },
-        MetaCase { sql_type: "DATE", expected_type_prefix: "DATE", expected_variant: "Date" },
-        MetaCase { sql_type: "VARCHAR(200)", expected_type_prefix: "VARCHAR(200)", expected_variant: "String" },
-        MetaCase { sql_type: "CHAR(10)", expected_type_prefix: "CHAR(10)", expected_variant: "String" },
+        MetaCase {
+            sql_type: "DECIMAL(9,0)",
+            expected_type_prefix: "DECIMAL(9,0)",
+            expected_variant: "Int32",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(10,0)",
+            expected_type_prefix: "DECIMAL(10,0)",
+            expected_variant: "Int64",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(18,0)",
+            expected_type_prefix: "DECIMAL(18,0)",
+            expected_variant: "Int64",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(19,0)",
+            expected_type_prefix: "DECIMAL(19,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(36,0)",
+            expected_type_prefix: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "BIGINT",
+            expected_type_prefix: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "DOUBLE",
+            expected_type_prefix: "DOUBLE",
+            expected_variant: "Double",
+        },
+        MetaCase {
+            sql_type: "BOOLEAN",
+            expected_type_prefix: "BOOLEAN",
+            expected_variant: "Bool",
+        },
+        MetaCase {
+            sql_type: "DATE",
+            expected_type_prefix: "DATE",
+            expected_variant: "Date",
+        },
+        MetaCase {
+            sql_type: "VARCHAR(200)",
+            expected_type_prefix: "VARCHAR(200)",
+            expected_variant: "String",
+        },
+        MetaCase {
+            sql_type: "CHAR(10)",
+            expected_type_prefix: "CHAR(10)",
+            expected_variant: "String",
+        },
     ];
     for case in &cases {
         conn.execute(&format!(
@@ -3004,13 +3076,15 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
         if !diag.contains(case.expected_variant) {
             bail!(
                 "type_metadata_probe {}: variant mismatch in diag={diag:?}, expected {}",
-                case.sql_type, case.expected_variant
+                case.sql_type,
+                case.expected_variant
             );
         }
         if !diag.contains(case.expected_type_prefix) {
             bail!(
                 "type_metadata_probe {}: type_name mismatch in diag={diag:?}, expected prefix {}",
-                case.sql_type, case.expected_type_prefix
+                case.sql_type,
+                case.expected_type_prefix
             );
         }
     }

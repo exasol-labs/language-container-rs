@@ -66,8 +66,7 @@ impl InputRowSet {
                     | ExaType::Timestamp { .. }
                     | ExaType::TimestampTz { .. }
                     | ExaType::String { .. }
-                    | ExaType::Char { .. }
- => {
+                    | ExaType::Char { .. } => {
                         let s = table.data_string.get(string_idx).map_or("", String::as_str);
                         string_idx += 1;
                         decode_string_block(&col.typ, s)
@@ -311,8 +310,7 @@ impl EmitBuffer {
             | ExaType::Timestamp { .. }
             | ExaType::TimestampTz { .. }
             | ExaType::String { .. }
-            | ExaType::Char { .. }
- => self.strings.push(value_take_block_string(v)),
+            | ExaType::Char { .. } => self.strings.push(value_take_block_string(v)),
             ExaType::Boolean => self.bools.push(value_to_bool(v)),
             ExaType::Int32 => self.int32.push(value_to_i64(v) as i32),
             ExaType::Int64 => self.int64.push(value_to_i64(v)),
@@ -1196,11 +1194,7 @@ fn column_accepts(typ: &ExaType, v: &Value) -> bool {
         (ExaType::Date, Value::Date(_)) => true,
         (ExaType::TimestampTz { .. }, _) => false,
         (ExaType::Timestamp { .. }, Value::Timestamp(_)) => true,
-        (
-            ExaType::String { .. }
-            | ExaType::Char { .. },
-            Value::String(_),
-        ) => true,
+        (ExaType::String { .. } | ExaType::Char { .. }, Value::String(_)) => true,
         _ => false,
     }
 }
