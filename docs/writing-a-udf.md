@@ -200,9 +200,8 @@ The declared precision of a `DECIMAL` column decides which wire block it arrives
 | `DATE` | `PB_DATE` (string block) | `Date` |
 | `TIMESTAMP(p)` | `PB_TIMESTAMP` (string block) | `Timestamp` |
 
-`TIMESTAMP WITH LOCAL TIME ZONE` is accepted as input (`TimestampTz`) but
-rejected as an output column by the DB (SQL state 22002). `GEOMETRY`, `HASHTYPE`,
-interval types, `TIME`, and `ARRAY` are rejected in both directions.
+`GEOMETRY`, `HASHTYPE`, interval types, `TIMESTAMP WITH LOCAL TIME ZONE`,
+`TIME`, and `ARRAY` are rejected by the DB as UDF column types.
 
 Input timestamps arrive at microsecond precision regardless of the column's
 declared `TIMESTAMP(p)`; emitted timestamps carry nanoseconds and the engine
@@ -305,7 +304,7 @@ println!("{d}");   // "3.14"
 
 `ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp { precision }`, `TimestampTz { precision }`, and `Unsupported`.
 
-`TimestampTz` is ingest-only: the DB delivers `TIMESTAMP WITH LOCAL TIME ZONE` as input, but rejects it as an output column type. The SDK enforces this at emit time.
+`TimestampTz` exists for forward-compatibility; the DB currently rejects `TIMESTAMP WITH LOCAL TIME ZONE` as a UDF column in both directions.
 
 Most UDFs do not need `ExaType` — the `Value` variant and typed getters carry enough information.
 

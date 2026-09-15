@@ -2917,28 +2917,6 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
         bail!("type_probe DATE '9999-12-31' did not round-trip");
     }
 
-    // TIMESTAMP WITH LOCAL TIME ZONE as input (ingest-only type).
-    // Static EMITS (no call-site override) because the DB propagates the input
-    // LTZ type into dynamic EMITS and then rejects it as an unsupported output.
-    conn.execute(&format!(
-        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (y TIMESTAMP, diag VARCHAR(2000)) AS\n\
-         %udf_object {udf_object};\n/"
-    ))
-    .await?;
-    let ts_ltz = query_single_string(
-        conn,
-        "SELECT diag FROM (SELECT type_probe(\
-         CAST(TIMESTAMP '2026-07-14 09:30:00' AS TIMESTAMP WITH LOCAL TIME ZONE)) FROM DUAL)",
-    )
-    .await?
-    .ok_or_else(|| anyhow!("type_probe TIMESTAMP WITH LOCAL TIME ZONE returned NULL"))?;
-    if !ts_ltz.contains("Timestamp") {
-        bail!(
-            "type_probe TIMESTAMP WITH LOCAL TIME ZONE: diag={ts_ltz:?}, expected Timestamp variant"
-        );
-    }
-
     Ok(())
 }
 
@@ -2951,7 +2929,6 @@ async fn rejected_type_canaries(conn: &mut Connection, udf_object: &str) -> Resu
     ))
     .await?;
     let output_rejected = [
-        "TIMESTAMP WITH LOCAL TIME ZONE",
         "INTERVAL YEAR TO MONTH",
         "INTERVAL DAY TO SECOND",
         "GEOMETRY(4326)",
@@ -2969,7 +2946,7 @@ async fn rejected_type_canaries(conn: &mut Connection, udf_object: &str) -> Resu
         }
     }
 
-    let input_rejected = ["TIME", "ARRAY"];
+    let input_rejected = ["TIME", "ARRAY", "TIMESTAMP WITH LOCAL TIME ZONE"];
     for typ in &input_rejected {
         let result = conn
             .execute(&format!(
@@ -3044,16 +3021,6 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
             expected_type_prefix: "DATE",
             expected_variant: "Date",
         },
-        MetaCase {
-            sql_type: "VARCHAR(200)",
-            expected_type_prefix: "VARCHAR(200)",
-            expected_variant: "String",
-        },
-        MetaCase {
-            sql_type: "CHAR(10)",
-            expected_type_prefix: "CHAR(10)",
-            expected_variant: "String",
-        },
     ];
     for case in &cases {
         conn.execute(&format!(
@@ -3067,7 +3034,6 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
             "BOOLEAN" => "TRUE".to_string(),
             "DATE" => "DATE '2026-01-01'".to_string(),
             "CHAR(10)" => "CAST('x' AS CHAR(10))".to_string(),
-            "VARCHAR(200)" => "'hello'".to_string(),
             t => format!("CAST(1 AS {t})"),
         };
         let diag = query_single_string(

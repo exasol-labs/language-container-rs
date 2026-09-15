@@ -11,7 +11,7 @@ D010 added `ExaType` variants for `Geometry`, `HashType`, `IntervalYearToMonth`,
 
 ## Decision
 
-Remove `Geometry`, `HashType`, `IntervalYearToMonth`, and `IntervalDayToSecond` from `ExaType`. Any `PB_STRING` column with a `type_name` that is not `CHAR…` or `VARCHAR…` maps to `ExaType::String`. `TimestampTz` stays (ingest-only); the SDK rejects it as an output column at emit validation time.
+Remove `Geometry`, `HashType`, `IntervalYearToMonth`, and `IntervalDayToSecond` from `ExaType`. Any `PB_STRING` column with a `type_name` that is not `CHAR…` or `VARCHAR…` maps to `ExaType::String`. `TimestampTz` stays for forward-compatibility; the DB currently rejects `TIMESTAMP WITH LOCAL TIME ZONE` as a UDF column in both directions, and the SDK rejects it as an output column at emit validation time.
 
 ## Consequences
 
