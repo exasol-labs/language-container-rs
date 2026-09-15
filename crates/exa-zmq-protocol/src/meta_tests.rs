@@ -132,6 +132,26 @@ fn from_pb_refines_extended_types_via_type_name() {
         ExaType::Timestamp { precision: 3 }
     );
 
+    // 8.29.x sends type_name="TIMESTAMP" with precision=Some(0) for plain TIMESTAMP.
+    let legacy_ts = col(ColumnType::PbTimestamp, "TIMESTAMP", None, Some(0), None);
+    assert_eq!(
+        column_from_pb(&legacy_ts).typ,
+        ExaType::Timestamp { precision: 3 }
+    );
+
+    // Same for the TZ variant.
+    let legacy_tz = col(
+        ColumnType::PbTimestamp,
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        None,
+        Some(0),
+        None,
+    );
+    assert_eq!(
+        column_from_pb(&legacy_tz).typ,
+        ExaType::TimestampTz { precision: 3 }
+    );
+
     let ts6 = col(ColumnType::PbTimestamp, "TIMESTAMP(6)", None, Some(6), None);
     assert_eq!(
         column_from_pb(&ts6).typ,

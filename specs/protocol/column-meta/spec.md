@@ -22,7 +22,7 @@ Defines `ColumnInfo` construction and serialization: mapping proto column types 
 * *WHEN* `column_from_pb` builds the column descriptor
 * *THEN* a `PB_STRING` column MUST resolve to `ExaType::Char { size }` when `type_name` begins with `CHAR` (`size` defaults to 1 when the proto field is absent), and to `ExaType::String { size }` for `VARCHAR` (`size` defaults to 2,000,000 when absent)
 * *AND* a `PB_STRING` column MUST resolve to `ExaType::Geometry`, `ExaType::HashType`, `ExaType::IntervalYearToMonth`, or `ExaType::IntervalDayToSecond` when `type_name` names `GEOMETRY`, `HASHTYPE`, `INTERVAL YEAR ... TO MONTH`, or `INTERVAL DAY ... TO SECOND` respectively
-* *AND* a `PB_TIMESTAMP` column MUST resolve to `ExaType::TimestampTz { precision }` when `type_name` is `TIMESTAMP WITH LOCAL TIME ZONE`, and to `ExaType::Timestamp { precision }` otherwise, where `precision` is `col.precision.unwrap_or(3)` (plain `TIMESTAMP` defaults to millisecond precision 3)
+* *AND* a `PB_TIMESTAMP` column MUST resolve to `ExaType::TimestampTz { precision }` when `type_name` contains `LOCAL TIME ZONE`, and to `ExaType::Timestamp { precision }` otherwise; when `type_name` is exactly `TIMESTAMP` or `TIMESTAMP WITH LOCAL TIME ZONE` (the unparameterized form), `precision` MUST be 3 regardless of `col.precision` (8.29.x sends `0` for unparameterized timestamps); otherwise `precision` comes from `col.precision` (default 3 when absent)
 * *AND* refinement MUST examine `type_name` only when the proto `column_type` is ambiguous; unambiguous proto types (`PB_INT32`, `PB_INT64`, `PB_DOUBLE`, `PB_BOOLEAN`, `PB_DATE`) MUST map directly without consulting `type_name`
 
 ### Scenario: Extended ExaType variants round-trip back to proto column types

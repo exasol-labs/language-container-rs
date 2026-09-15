@@ -111,7 +111,11 @@ fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
 }
 
 fn refine_timestamp(type_name: &str, precision: Option<u32>) -> ExaType {
-    let precision = precision.unwrap_or(3);
+    let precision = if type_name == "TIMESTAMP" || type_name == "TIMESTAMP WITH LOCAL TIME ZONE" {
+        3
+    } else {
+        precision.unwrap_or(3)
+    };
     if type_name.contains("LOCAL TIME ZONE") {
         ExaType::TimestampTz { precision }
     } else {
