@@ -110,12 +110,16 @@ fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
     }
 }
 
+fn parse_timestamp_precision(type_name: &str) -> Option<u32> {
+    let open = type_name.find('(')?;
+    let close = type_name[open..].find(')')? + open;
+    type_name[open + 1..close].parse().ok()
+}
+
 fn refine_timestamp(type_name: &str, precision: Option<u32>) -> ExaType {
-    let precision = if type_name == "TIMESTAMP" || type_name == "TIMESTAMP WITH LOCAL TIME ZONE" {
-        3
-    } else {
-        precision.unwrap_or(3)
-    };
+    let precision = parse_timestamp_precision(type_name)
+        .or(precision)
+        .unwrap_or(3);
     if type_name.contains("LOCAL TIME ZONE") {
         ExaType::TimestampTz { precision }
     } else {

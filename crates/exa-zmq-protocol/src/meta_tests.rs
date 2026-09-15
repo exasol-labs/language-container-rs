@@ -132,23 +132,43 @@ fn from_pb_refines_extended_types_via_type_name() {
         ExaType::Timestamp { precision: 3 }
     );
 
-    // 8.29.x sends type_name="TIMESTAMP" with precision=Some(0) for plain TIMESTAMP.
-    let legacy_ts = col(ColumnType::PbTimestamp, "TIMESTAMP", None, Some(0), None);
+    // 8.29.x sends type_name="TIMESTAMP(3)" with precision=Some(0); type_name wins.
+    let legacy_ts = col(ColumnType::PbTimestamp, "TIMESTAMP(3)", None, Some(0), None);
     assert_eq!(
         column_from_pb(&legacy_ts).typ,
         ExaType::Timestamp { precision: 3 }
     );
 
-    // Same for the TZ variant.
+    // Bare "TIMESTAMP" (no parens) falls back to col.precision, then default 3.
+    let bare_ts = col(ColumnType::PbTimestamp, "TIMESTAMP", None, None, None);
+    assert_eq!(
+        column_from_pb(&bare_ts).typ,
+        ExaType::Timestamp { precision: 3 }
+    );
+
+    // Same for the TZ variant with parens.
     let legacy_tz = col(
         ColumnType::PbTimestamp,
-        "TIMESTAMP WITH LOCAL TIME ZONE",
+        "TIMESTAMP(3) WITH LOCAL TIME ZONE",
         None,
         Some(0),
         None,
     );
     assert_eq!(
         column_from_pb(&legacy_tz).typ,
+        ExaType::TimestampTz { precision: 3 }
+    );
+
+    // Bare TZ without parens.
+    let bare_tz = col(
+        ColumnType::PbTimestamp,
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        None,
+        None,
+        None,
+    );
+    assert_eq!(
+        column_from_pb(&bare_tz).typ,
         ExaType::TimestampTz { precision: 3 }
     );
 

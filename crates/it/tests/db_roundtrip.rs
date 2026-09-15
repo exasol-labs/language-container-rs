@@ -2014,14 +2014,16 @@ async fn timestamp_precision_probe_roundtrips(
 
         let got = query_single_string(
             conn,
-            "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
-             || ':' || diag \
-             FROM (SELECT ts_precision_probe(1))",
+            &format!(
+                "SELECT TO_CHAR(prec) || '|' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF{p}') \
+                 || '|' || diag \
+                 FROM (SELECT ts_precision_probe(1))"
+            ),
         )
         .await?
         .ok_or_else(|| anyhow!("ts_precision_probe returned NULL at p={p}"))?;
 
-        let parts: Vec<&str> = got.splitn(3, ':').collect();
+        let parts: Vec<&str> = got.splitn(3, '|').collect();
         let reported_prec: u32 = parts[0].parse()?;
         let diag = parts.get(2).unwrap_or(&"");
         eprintln!("[it] ts_precision_probe p={p}: prec={reported_prec} diag={diag}");
@@ -2033,14 +2035,22 @@ async fn timestamp_precision_probe_roundtrips(
         }
 
         let ts_str = parts[1];
-        let frac = ts_str.rsplit_once('.').map(|(_, f)| f).unwrap_or("");
-        let expected_frac = &"123456789"[..p as usize];
-        let padded_expected = format!("{expected_frac:0<9}");
-        if frac != padded_expected {
-            bail!(
-                "ts_precision_probe at TIMESTAMP({p}): fractional = {frac:?}, \
-                 expected {padded_expected:?} (the engine truncates to {p} digits)"
-            );
+        if p == 0 {
+            if ts_str.contains('.') {
+                bail!(
+                    "ts_precision_probe at TIMESTAMP(0): expected no fractional part, \
+                     got {ts_str:?}"
+                );
+            }
+        } else {
+            let frac = ts_str.rsplit_once('.').map(|(_, f)| f).unwrap_or("");
+            let expected_frac = &"123456789"[..p as usize];
+            if frac != expected_frac {
+                bail!(
+                    "ts_precision_probe at TIMESTAMP({p}): fractional = {frac:?}, \
+                     expected {expected_frac:?} (the engine truncates to {p} digits)"
+                );
+            }
         }
     }
     Ok(())
@@ -2056,14 +2066,14 @@ async fn timestamp_precision_probe_legacy(conn: &mut Connection, udf_object: &st
 
     let got = query_single_string(
         conn,
-        "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
-         || ':' || diag \
+        "SELECT TO_CHAR(prec) || '|' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF3') \
+         || '|' || diag \
          FROM (SELECT ts_precision_probe(1))",
     )
     .await?
     .ok_or_else(|| anyhow!("ts_precision_probe (legacy) returned NULL"))?;
 
-    let parts: Vec<&str> = got.splitn(3, ':').collect();
+    let parts: Vec<&str> = got.splitn(3, '|').collect();
     let reported_prec: u32 = parts[0].parse()?;
     let diag = parts.get(2).unwrap_or(&"");
     eprintln!("[it] ts_precision_probe_legacy: prec={reported_prec} diag={diag}");
@@ -2075,10 +2085,10 @@ async fn timestamp_precision_probe_legacy(conn: &mut Connection, udf_object: &st
     }
 
     let frac = parts[1].rsplit_once('.').map(|(_, f)| f).unwrap_or("");
-    if !frac.starts_with("123") {
+    if frac != "123" {
         bail!(
             "ts_precision_probe (plain TIMESTAMP): fractional = {frac:?}, \
-             expected to start with '123' (millisecond truncation)"
+             expected \"123\" (millisecond truncation)"
         );
     }
     Ok(())
