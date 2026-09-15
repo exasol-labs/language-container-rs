@@ -89,9 +89,8 @@ fn value_exatype_typed_variants() {
         ExaType::Char { size: 10 },
         ExaType::Date,
         ExaType::Timestamp { precision: 3 },
-        ExaType::TimestampTz { precision: 3 },
     ];
-    assert_eq!(types.len(), 11);
+    assert_eq!(types.len(), 10);
     assert_eq!(
         ExaType::Numeric {
             precision: 18,

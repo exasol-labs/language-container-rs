@@ -64,7 +64,6 @@ impl InputRowSet {
                     ExaType::Numeric { .. }
                     | ExaType::Date
                     | ExaType::Timestamp { .. }
-                    | ExaType::TimestampTz { .. }
                     | ExaType::String { .. }
                     | ExaType::Char { .. } => {
                         let s = table.data_string.get(string_idx).map_or("", String::as_str);
@@ -308,7 +307,6 @@ impl EmitBuffer {
             ExaType::Numeric { .. }
             | ExaType::Date
             | ExaType::Timestamp { .. }
-            | ExaType::TimestampTz { .. }
             | ExaType::String { .. }
             | ExaType::Char { .. } => self.strings.push(value_take_block_string(v)),
             ExaType::Boolean => self.bools.push(value_to_bool(v)),
@@ -584,10 +582,7 @@ fn build_accessors<'a>(
             (DataType::Date32, ExaType::Date) => {
                 ColAccessor::Date32(col.as_any().downcast_ref::<Date32Array>().unwrap())
             }
-            (
-                DataType::Timestamp(unit, _),
-                ExaType::Timestamp { .. } | ExaType::TimestampTz { .. },
-            ) => match unit {
+            (DataType::Timestamp(unit, _), ExaType::Timestamp { .. }) => match unit {
                 TimeUnit::Second => ColAccessor::TsSecond(
                     col.as_any().downcast_ref::<TimestampSecondArray>().unwrap(),
                 ),
@@ -641,7 +636,6 @@ fn is_string_family_exatype(typ: &ExaType) -> bool {
         ExaType::Numeric { .. }
             | ExaType::Date
             | ExaType::Timestamp { .. }
-            | ExaType::TimestampTz { .. }
             | ExaType::String { .. }
             | ExaType::Char { .. }
     )
@@ -969,7 +963,7 @@ fn decode_string_block(typ: &ExaType, s: &str) -> Value {
                 None => Value::Null,
             }
         }
-        ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => {
+        ExaType::Timestamp { .. } => {
             match fast_parse_timestamp(s)
                 .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_PARSE).ok())
                 .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT_ISO).ok())
@@ -1192,7 +1186,7 @@ fn column_accepts(typ: &ExaType, v: &Value) -> bool {
         (ExaType::Double, Value::Double(_)) => true,
         (ExaType::Boolean, Value::Bool(_)) => true,
         (ExaType::Date, Value::Date(_)) => true,
-        (ExaType::TimestampTz { .. }, _) => false,
+
         (ExaType::Timestamp { .. }, Value::Timestamp(_)) => true,
         (ExaType::String { .. } | ExaType::Char { .. }, Value::String(_)) => true,
         _ => false,

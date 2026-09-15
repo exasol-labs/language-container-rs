@@ -37,7 +37,7 @@ UDF authors add this to `[dependencies]`. It provides:
 - **`UdfContext` trait** — `get`, `emit`, `next`, `cluster_ip`, `connection`, `connect_back`, plus the typed getters `get_i64` / `get_f64` / `get_str` / `get_bool` / `get_decimal` / `get_date` / `get_datetime` (each returns `Option<_>`, `None` for SQL NULL; `get_i64` also accepts a scale-0 `Numeric`)
 - **`Value` enum** — `Int64`, `Float64`, `String`, `Bool`, `Null`, and the now strongly-typed `Numeric(Decimal)`, `Date(NaiveDate)`, `Timestamp(NaiveDateTime)`
 - **`Decimal`** — `{ unscaled: i128, scale: u8 }` newtype (38-digit, no allocation) backing `Value::Numeric`
-- **`ExaType`** — the canonical Exasol-type enum, living in `exasol_udf_sdk::value` (re-exported by `exa-zmq-protocol`); covers the SQL types the DB delivers to a UDF (`Char`, `TimestampTz`, …)
+- **`ExaType`** — the canonical Exasol-type enum, living in `exasol_udf_sdk::value` (re-exported by `exa-zmq-protocol`); covers the SQL types the DB delivers to a UDF (`Char`, `Timestamp { precision }`, …)
 - **`UdfError`** — typed error variants (`Type`, `User`, `Unimplemented`, …)
 - **`ConnectionObject`** — credentials fetched from a named `CONNECTION` object
 

@@ -8,7 +8,7 @@ pub(crate) fn column_to_pb(col: &ColumnInfo) -> exa_proto::exascript_metadata::C
         ExaType::Int32 => ColumnType::PbInt32,
         ExaType::Int64 => ColumnType::PbInt64,
         ExaType::Numeric { .. } => ColumnType::PbNumeric,
-        ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => ColumnType::PbTimestamp,
+        ExaType::Timestamp { .. } => ColumnType::PbTimestamp,
         ExaType::Date => ColumnType::PbDate,
         ExaType::String { .. } | ExaType::Char { .. } => ColumnType::PbString,
         ExaType::Boolean => ColumnType::PbBoolean,
@@ -116,7 +116,7 @@ fn from_pb_refines_extended_types_via_type_name() {
             "TIMESTAMP(3) WITH LOCAL TIME ZONE",
             ColumnType::PbTimestamp,
             None,
-            ExaType::TimestampTz { precision: 3 },
+            ExaType::Timestamp { precision: 3 },
         ),
     ];
 
@@ -156,7 +156,7 @@ fn from_pb_refines_extended_types_via_type_name() {
     );
     assert_eq!(
         column_from_pb(&legacy_tz).typ,
-        ExaType::TimestampTz { precision: 3 }
+        ExaType::Timestamp { precision: 3 }
     );
 
     // Bare TZ without parens.
@@ -169,7 +169,7 @@ fn from_pb_refines_extended_types_via_type_name() {
     );
     assert_eq!(
         column_from_pb(&bare_tz).typ,
-        ExaType::TimestampTz { precision: 3 }
+        ExaType::Timestamp { precision: 3 }
     );
 
     let ts6 = col(ColumnType::PbTimestamp, "TIMESTAMP(6)", None, Some(6), None);
@@ -187,7 +187,7 @@ fn from_pb_refines_extended_types_via_type_name() {
     );
     assert_eq!(
         column_from_pb(&ts9_tz).typ,
-        ExaType::TimestampTz { precision: 9 }
+        ExaType::Timestamp { precision: 9 }
     );
 
     let unknown_string = col(ColumnType::PbString, "MYSTERY", Some(7), None, None);
@@ -291,7 +291,7 @@ fn extended_exatype_roundtrips_to_pb() {
     let cases = [
         (ExaType::Char { size: 10 }, "CHAR(10)", ColumnType::PbString),
         (
-            ExaType::TimestampTz { precision: 3 },
+            ExaType::Timestamp { precision: 3 },
             "TIMESTAMP WITH LOCAL TIME ZONE",
             ColumnType::PbTimestamp,
         ),

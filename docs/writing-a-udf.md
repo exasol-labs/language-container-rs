@@ -302,9 +302,7 @@ println!("{d}");   // "3.14"
 
 ### `ExaType`
 
-`ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp { precision }`, `TimestampTz { precision }`, and `Unsupported`.
-
-`TimestampTz` exists for forward-compatibility; the DB currently rejects `TIMESTAMP WITH LOCAL TIME ZONE` as a UDF column in both directions.
+`ExaType` is the column-level SQL type, independent of the wire value. It surfaces in typed `#[exasol_udf]` annotations and validation. The variant set covers `Double`, `Int32`, `Int64`, `Numeric { precision, scale }`, `Boolean`, `String { size }`, `Char { size }`, `Date`, `Timestamp { precision }`, and `Unsupported`.
 
 Most UDFs do not need `ExaType` — the `Value` variant and typed getters carry enough information.
 

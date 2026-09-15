@@ -7,7 +7,7 @@ use exasol_udf_sdk::value::{ExaType, Value};
 pub fn ts_precision_probe(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let ts_col = ctx.output_column(0)?;
     let precision = match ts_col.typ {
-        ExaType::Timestamp { precision } | ExaType::TimestampTz { precision } => precision,
+        ExaType::Timestamp { precision } => precision,
         _ => return Err(UdfError::Type("output column 0 is not a timestamp".into())),
     };
     let raw_type_name = ts_col.type_name.clone();

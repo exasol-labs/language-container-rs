@@ -108,11 +108,7 @@ fn refine_timestamp(type_name: &str, precision: Option<u32>) -> ExaType {
     let precision = parse_timestamp_precision(type_name)
         .or(precision)
         .unwrap_or(3);
-    if type_name.contains("LOCAL TIME ZONE") {
-        ExaType::TimestampTz { precision }
-    } else {
-        ExaType::Timestamp { precision }
-    }
+    ExaType::Timestamp { precision }
 }
 
 fn iter_from_pb(iter: PbIterType) -> IterType {
