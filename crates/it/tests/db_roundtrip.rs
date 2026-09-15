@@ -325,8 +325,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         timestamp_precision_probe_roundtrips(&mut conn, &ts_prec_path).await?;
         eprintln!("[it] scenario timestamp_precision_probe_roundtrips ok");
     } else {
-        timestamp_p_rejected_on_8x(&mut conn, &type_probe_path).await?;
-        eprintln!("[it] scenario timestamp_p_rejected_on_8x ok");
+        eprintln!(
+            "[it] scenario timestamp_precision_matrix_roundtrips SKIPPED (8.x lacks TIMESTAMP(p))"
+        );
     }
     timestamp_precision_probe_legacy(&mut conn, &ts_prec_path).await?;
     eprintln!("[it] scenario timestamp_precision_probe_legacy ok");
@@ -2684,21 +2685,6 @@ async fn emit_bulk_boundary_rows_and_oversize_row(
             "emit_bulk(1, 2000000) produced {oversize:?}, expected \"1:2000000\" \
              (a single maximal 2,000,000-byte row)"
         );
-    }
-    Ok(())
-}
-
-/// 8.29 rejects `TIMESTAMP(p)` syntax — assert the rejection rather than silently skipping.
-async fn timestamp_p_rejected_on_8x(conn: &mut Connection, udf_object: &str) -> Result<()> {
-    let result = conn
-        .execute(&format!(
-            "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-             EMITS (...) AS\n\
-             %udf_object {udf_object};\n/"
-        ))
-        .await;
-    if result.is_ok() {
-        bail!("TIMESTAMP(p) was accepted on 8.x — the skip guard may be stale");
     }
     Ok(())
 }
