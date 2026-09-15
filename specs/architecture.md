@@ -134,7 +134,7 @@ SDK; `exa-zmq-protocol` re-exports them, and UDF code reads the descriptor throu
 | `PB_INT64` | `DECIMAL(p,0)` fitting `i64` | none | `Int64` | `Int64(i64)` |
 | `PB_NUMERIC` | `DECIMAL(p,s)`, `BIGINT`, `NUMBER` | none | `Numeric { precision, scale }` | `Numeric(Decimal)` |
 | `PB_DATE` | `DATE` | none | `Date` | `Date(NaiveDate)` |
-| `PB_TIMESTAMP` | `TIMESTAMP`, `TIMESTAMP WITH LOCAL TIME ZONE` | `WITH LOCAL TIME ZONE` → `TimestampTz`, else `Timestamp` | `Timestamp { precision }` / `TimestampTz { precision }` | `Timestamp(NaiveDateTime)` / `String` (TZ) |
+| `PB_TIMESTAMP` | `TIMESTAMP` | parse precision from `type_name` parentheses, fallback to `col.precision`, default 3 | `Timestamp { precision }` | `Timestamp(NaiveDateTime)` |
 | `PB_STRING` | `VARCHAR`, `CHAR` (and any unrecognised `type_name`) | `CHAR…` → `Char`; everything else → `String` | `String { size }` / `Char { size }` | `String` |
 | `PB_BOOLEAN` | `BOOLEAN` | none | `Boolean` | `Bool(bool)` |
 
