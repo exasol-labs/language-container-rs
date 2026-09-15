@@ -1,6 +1,6 @@
 error[E0428]: the name `__exa_write_c_string_DUP` is defined multiple times
- --> tests/trybuild/dup_entry.rs:12:1
-  |
+  --> tests/trybuild/dup_entry.rs:12:1
+   |
  7 | #[exasol_udf(name = "DUP")]
    | --------------------------- previous definition of the value `__exa_write_c_string_DUP` here
 ...
@@ -11,8 +11,8 @@ error[E0428]: the name `__exa_write_c_string_DUP` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__exa_run_shim_DUP` is defined multiple times
- --> tests/trybuild/dup_entry.rs:12:1
-  |
+  --> tests/trybuild/dup_entry.rs:12:1
+   |
  7 | #[exasol_udf(name = "DUP")]
    | --------------------------- previous definition of the value `__exa_run_shim_DUP` here
 ...
@@ -23,8 +23,8 @@ error[E0428]: the name `__exa_run_shim_DUP` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__exa_destroy_shim_DUP` is defined multiple times
- --> tests/trybuild/dup_entry.rs:12:1
-  |
+  --> tests/trybuild/dup_entry.rs:12:1
+   |
  7 | #[exasol_udf(name = "DUP")]
    | --------------------------- previous definition of the value `__exa_destroy_shim_DUP` here
 ...
@@ -35,8 +35,8 @@ error[E0428]: the name `__exa_destroy_shim_DUP` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__EXA_VTABLE_DUP` is defined multiple times
- --> tests/trybuild/dup_entry.rs:12:1
-  |
+  --> tests/trybuild/dup_entry.rs:12:1
+   |
  7 | #[exasol_udf(name = "DUP")]
    | --------------------------- previous definition of the value `__EXA_VTABLE_DUP` here
 ...
@@ -47,8 +47,8 @@ error[E0428]: the name `__EXA_VTABLE_DUP` is defined multiple times
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0428]: the name `__exa_udf_entry_DUP` is defined multiple times
- --> tests/trybuild/dup_entry.rs:12:1
-  |
+  --> tests/trybuild/dup_entry.rs:12:1
+   |
  7 | #[exasol_udf(name = "DUP")]
    | --------------------------- previous definition of the value `__exa_udf_entry_DUP` here
 ...

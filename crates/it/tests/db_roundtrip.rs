@@ -41,6 +41,7 @@ const SCALAR_NEXT_ILLEGAL_LIB: &str = "libscalar_next_illegal.so";
 const RETURNS_WITH_EMIT_LIB: &str = "libreturns_with_emit.so";
 const COLUMN_META_LIB: &str = "libcolumn_meta.so";
 const TS_PREC_LIB: &str = "libtimestamp_precision.so";
+const TYPE_PROBE_LIB: &str = "libtype_probe.so";
 
 /// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
 /// cross-joined five times. Large enough that a scalar input or a single SET
@@ -172,6 +173,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         .await?;
     let ts_prec_path = harness
         .upload_udf(TS_PREC_LIB, read_udf_artifact(TS_PREC_LIB)?)
+        .await?;
+    let type_probe_path = harness
+        .upload_udf(TYPE_PROBE_LIB, read_udf_artifact(TYPE_PROBE_LIB)?)
         .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
@@ -315,7 +319,6 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario udf_local_time_matches_session_tz ok");
-    // TIMESTAMP(p) parameterized precision is not supported on Exasol 8.x.
     if it::db_series() != "8-29" {
         timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
         eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
@@ -367,6 +370,13 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario null_handling_across_types_scalar_and_set ok");
     emit_bulk_boundary_rows_and_oversize_row(&mut conn, &emit_bulk_path).await?;
     eprintln!("[it] scenario emit_bulk_boundary_rows_and_oversize_row ok");
+
+    type_coverage_roundtrips(&mut conn, &type_probe_path).await?;
+    eprintln!("[it] scenario type_coverage_roundtrips ok");
+    rejected_type_canaries(&mut conn, &type_probe_path).await?;
+    eprintln!("[it] scenario rejected_type_canaries ok");
+    type_metadata_probe(&mut conn, &type_probe_path).await?;
+    eprintln!("[it] scenario type_metadata_probe ok");
 
     conn.close().await?;
     Ok(())
@@ -2676,5 +2686,367 @@ async fn emit_bulk_boundary_rows_and_oversize_row(
              (a single maximal 2,000,000-byte row)"
         );
     }
+    Ok(())
+}
+
+/// Round-trip every supported SQL type through the type-probe UDF.
+async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    // DOUBLE
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) || '|' || diag \
+         FROM (SELECT type_probe(CAST(3.14 AS DOUBLE)) EMITS (y DOUBLE, diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe DOUBLE returned NULL"))?;
+    if !got.contains("|") || !got.contains("Double") {
+        bail!("type_probe DOUBLE: got {got:?}, expected value and Double variant");
+    }
+    let null_got = query_single_string(
+        conn,
+        "SELECT CASE WHEN y IS NULL THEN 'null' ELSE 'notnull' END \
+         FROM (SELECT type_probe(CAST(NULL AS DOUBLE)) EMITS (y DOUBLE, diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe DOUBLE NULL returned nothing"))?;
+    if null_got != "null" {
+        bail!("type_probe DOUBLE NULL: y was not NULL");
+    }
+
+    // BOOLEAN
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let bools = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(TO_CHAR(y) || ':' || diag ORDER BY y) \
+         FROM (SELECT type_probe(b) EMITS (y BOOLEAN, diag VARCHAR(2000)) \
+               FROM (SELECT TRUE AS b FROM DUAL UNION ALL SELECT FALSE FROM DUAL))",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe BOOLEAN returned NULL"))?;
+    if !bools.contains("Bool") || !bools.contains("TRUE") || !bools.contains("FALSE") {
+        bail!("type_probe BOOLEAN: got {bools:?}, expected TRUE/FALSE with Bool variant");
+    }
+
+    // CHAR(10) — CHAR values are blank-padded
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let char_got = query_single_string(
+        conn,
+        "SELECT TRIM(y) || '|' || diag \
+         FROM (SELECT type_probe(CAST('hello' AS CHAR(10))) EMITS (y CHAR(10), diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe CHAR returned NULL"))?;
+    if !char_got.starts_with("hello|") || !char_got.contains("String") {
+        bail!("type_probe CHAR(10): got {char_got:?}");
+    }
+
+    // DECIMAL precision boundary: the wire type depends on declared precision.
+    struct DecCase {
+        sql_type: &'static str,
+        expected_variant: &'static str,
+    }
+    let decimal_cases = [
+        DecCase {
+            sql_type: "DECIMAL(9,0)",
+            expected_variant: "Int32",
+        },
+        DecCase {
+            sql_type: "DECIMAL(10,0)",
+            expected_variant: "Int64",
+        },
+        DecCase {
+            sql_type: "DECIMAL(18,0)",
+            expected_variant: "Int64",
+        },
+        DecCase {
+            sql_type: "DECIMAL(19,0)",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "BIGINT",
+            expected_variant: "Numeric",
+        },
+        DecCase {
+            sql_type: "DECIMAL(5,2)",
+            expected_variant: "Numeric",
+        },
+    ];
+    for case in &decimal_cases {
+        conn.execute(&format!(
+            "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+             EMITS (...) AS\n\
+             %udf_object {udf_object};\n/"
+        ))
+        .await?;
+        let val = if case.sql_type == "DECIMAL(5,2)" {
+            "CAST(12.34 AS DECIMAL(5,2))".to_string()
+        } else {
+            format!("CAST(42 AS {})", case.sql_type)
+        };
+        let diag = query_single_string(
+            conn,
+            &format!(
+                "SELECT diag FROM (SELECT type_probe({val}) \
+                 EMITS (y {}, diag VARCHAR(2000)) FROM DUAL)",
+                case.sql_type
+            ),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("type_probe {} returned NULL", case.sql_type))?;
+        if !diag.contains(case.expected_variant) {
+            bail!(
+                "type_probe {}: diag={diag:?}, expected variant {}",
+                case.sql_type,
+                case.expected_variant
+            );
+        }
+    }
+
+    // BIGINT and DECIMAL(36,0) must agree
+    let bigint_val = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT type_probe(CAST(42 AS BIGINT)) \
+         EMITS (y BIGINT, diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let dec36_val = query_single_string(
+        conn,
+        "SELECT TO_CHAR(y) FROM (SELECT type_probe(CAST(42 AS DECIMAL(36,0))) \
+         EMITS (y DECIMAL(36,0), diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?;
+    if bigint_val != dec36_val {
+        bail!("BIGINT ({bigint_val:?}) vs DECIMAL(36,0) ({dec36_val:?}) disagree");
+    }
+
+    // VARCHAR empty string → NULL
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let empty = query_single_string(
+        conn,
+        "SELECT CASE WHEN y IS NULL THEN 'null' ELSE 'notnull' END \
+         FROM (SELECT type_probe('') EMITS (y VARCHAR(200), diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe VARCHAR('') returned nothing"))?;
+    if empty != "null" {
+        bail!("type_probe empty string: y was {empty:?}, expected NULL");
+    }
+
+    // VARCHAR multi-byte UTF-8
+    let utf8 = query_single_string(
+        conn,
+        "SELECT y FROM (SELECT type_probe('ñ日本語🦀') \
+         EMITS (y VARCHAR(200), diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe VARCHAR UTF-8 returned NULL"))?;
+    if utf8 != "ñ日本語🦀" {
+        bail!("type_probe UTF-8: got {utf8:?}");
+    }
+
+    // DATE edges
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let date_min = query_single_string(
+        conn,
+        "SELECT CASE WHEN y = DATE '0001-01-01' THEN 'eq' ELSE 'ne' END \
+         FROM (SELECT type_probe(DATE '0001-01-01') EMITS (y DATE, diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe DATE min returned NULL"))?;
+    if date_min != "eq" {
+        bail!("type_probe DATE '0001-01-01' did not round-trip");
+    }
+    let date_max = query_single_string(
+        conn,
+        "SELECT CASE WHEN y = DATE '9999-12-31' THEN 'eq' ELSE 'ne' END \
+         FROM (SELECT type_probe(DATE '9999-12-31') EMITS (y DATE, diag VARCHAR(2000)) FROM DUAL)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("type_probe DATE max returned NULL"))?;
+    if date_max != "eq" {
+        bail!("type_probe DATE '9999-12-31' did not round-trip");
+    }
+
+    Ok(())
+}
+
+/// Canaries: assert that currently rejected types stay rejected.
+async fn rejected_type_canaries(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let output_rejected = [
+        "INTERVAL YEAR TO MONTH",
+        "INTERVAL DAY TO SECOND",
+        "GEOMETRY(4326)",
+        "HASHTYPE(16 BYTE)",
+    ];
+    for typ in &output_rejected {
+        let result = conn
+            .query(&format!(
+                "SELECT y FROM (SELECT type_probe(1) \
+                 EMITS (y {typ}, diag VARCHAR(200)) FROM DUAL)"
+            ))
+            .await;
+        if result.is_ok() {
+            bail!("{typ} as output column was accepted; expected rejection");
+        }
+    }
+
+    let input_rejected = ["TIME", "ARRAY", "TIMESTAMP WITH LOCAL TIME ZONE"];
+    for typ in &input_rejected {
+        let result = conn
+            .execute(&format!(
+                "CREATE OR REPLACE RUST SET SCRIPT type_probe_canary(x {typ}) \
+                 EMITS (diag VARCHAR(200)) AS\n\
+                 %udf_object {udf_object};\n/"
+            ))
+            .await;
+        if result.is_ok() {
+            let query_result = conn
+                .query("SELECT diag FROM (SELECT type_probe_canary(NULL) FROM DUAL)")
+                .await;
+            if query_result.is_ok() {
+                bail!("{typ} as input was accepted; expected rejection");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Lock down the DECIMAL precision rule via the type-probe diagnostic.
+async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    struct MetaCase {
+        sql_type: &'static str,
+        expected_type_prefix: &'static str,
+        expected_variant: &'static str,
+    }
+    let cases = [
+        MetaCase {
+            sql_type: "DECIMAL(9,0)",
+            expected_type_prefix: "DECIMAL(9,0)",
+            expected_variant: "Int32",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(10,0)",
+            expected_type_prefix: "DECIMAL(10,0)",
+            expected_variant: "Int64",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(18,0)",
+            expected_type_prefix: "DECIMAL(18,0)",
+            expected_variant: "Int64",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(19,0)",
+            expected_type_prefix: "DECIMAL(19,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "DECIMAL(36,0)",
+            expected_type_prefix: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "BIGINT",
+            expected_type_prefix: "DECIMAL(36,0)",
+            expected_variant: "Numeric",
+        },
+        MetaCase {
+            sql_type: "DOUBLE",
+            expected_type_prefix: "DOUBLE",
+            expected_variant: "Double",
+        },
+        MetaCase {
+            sql_type: "BOOLEAN",
+            expected_type_prefix: "BOOLEAN",
+            expected_variant: "Bool",
+        },
+        MetaCase {
+            sql_type: "DATE",
+            expected_type_prefix: "DATE",
+            expected_variant: "Date",
+        },
+    ];
+    for case in &cases {
+        conn.execute(&format!(
+            "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+             EMITS (...) AS\n\
+             %udf_object {udf_object};\n/"
+        ))
+        .await?;
+        let val = match case.sql_type {
+            "DOUBLE" => "CAST(1.0 AS DOUBLE)".to_string(),
+            "BOOLEAN" => "TRUE".to_string(),
+            "DATE" => "DATE '2026-01-01'".to_string(),
+            "CHAR(10)" => "CAST('x' AS CHAR(10))".to_string(),
+            t => format!("CAST(1 AS {t})"),
+        };
+        let diag = query_single_string(
+            conn,
+            &format!(
+                "SELECT diag FROM (SELECT type_probe({val})\
+                 EMITS (y {}, diag VARCHAR(2000)) FROM DUAL)",
+                case.sql_type
+            ),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("type_metadata_probe {} returned NULL", case.sql_type))?;
+        if !diag.contains(case.expected_variant) {
+            bail!(
+                "type_metadata_probe {}: variant mismatch in diag={diag:?}, expected {}",
+                case.sql_type,
+                case.expected_variant
+            );
+        }
+        if !diag.contains(case.expected_type_prefix) {
+            bail!(
+                "type_metadata_probe {}: type_name mismatch in diag={diag:?}, expected prefix {}",
+                case.sql_type,
+                case.expected_type_prefix
+            );
+        }
+    }
+
     Ok(())
 }

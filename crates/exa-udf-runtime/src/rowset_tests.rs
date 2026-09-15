@@ -743,6 +743,26 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     ));
 }
 
+#[test]
+fn column_accepts_timestamp_string_char() {
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    assert!(column_accepts(
+        &ExaType::Timestamp { precision: 3 },
+        &Value::Timestamp(ts)
+    ));
+    assert!(column_accepts(
+        &ExaType::String { size: 200 },
+        &Value::String("x".into())
+    ));
+    assert!(column_accepts(
+        &ExaType::Char { size: 10 },
+        &Value::String("x".into())
+    ));
+}
+
 /// The bridge surfaces the handshake column metadata for both sides; a UDF whose
 /// output shape comes from the call-site EMITS list reads it here.
 #[test]
@@ -1973,9 +1993,9 @@ mod fast_string_block_ingest_tests {
                 "decode_string_block mismatch for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::TimestampTz { precision: 3 }, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
-                "decode_string_block (TimestampTz) mismatch for {s}"
+                "decode_string_block (Timestamp/LTZ) mismatch for {s}"
             );
         }
     }
@@ -2401,7 +2421,7 @@ mod arrow_tests {
             col("dt", ExaType::Date),
             col("ts_s", ExaType::Timestamp { precision: 3 }),
             col("ts_ms", ExaType::Timestamp { precision: 3 }),
-            col("ts_us", ExaType::TimestampTz { precision: 3 }),
+            col("ts_us", ExaType::Timestamp { precision: 3 }),
             col("ts_ns", ExaType::Timestamp { precision: 3 }),
             col(
                 "dec",

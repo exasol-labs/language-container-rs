@@ -42,7 +42,7 @@ Project mission in: @specs/mission.md
 
 ## Emit buffering and wire limits
 
-- `MT_EMIT` messages have a wire limit of **exactly 4,000,000 bytes** — `EMIT_BUFFER_LIMIT_BYTES = 4_000_000`, matching the reference C++ SLC's `SWIG_MAX_VAR_DATASIZE = 4_000_000`. This is 4 *million* bytes, NOT 4 MiB (4,194,304). The C++ launcher flushes after every row that crosses it.
+- `EMIT_BUFFER_LIMIT_BYTES = 4_000_000` is a **flush target**, not a DB-enforced wire limit. The value matches the reference C++ SLC's `SWIG_MAX_VAR_DATASIZE = 4_000_000` (4 million bytes, not 4 MiB). The DB accepts larger `MT_EMIT` messages.
 - Every emitted row carries the `row_number` of the input row it came from; the engine needs it to place pass-through select-list columns (`SELECT id, f(x) FROM t`). An `MT_EMIT` without it makes the DB read out of range and closes the session.
 - `ctx.emit` must **not** send a message per call. Buffer rows and flush to `MT_EMIT` only when the byte estimate reaches 4,000,000 bytes.
 - **Always flush at end of `run()`** — even if the threshold was not reached. The architect rule: "beim buffern ist auch wichtig, das man flushed, wenn die Run Methode durch ist".
