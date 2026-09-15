@@ -101,11 +101,11 @@ fn meta_maps_all_pb_types() {
         (
             ColumnType::PbNumeric,
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
-        (ColumnType::PbTimestamp, ExaType::Timestamp),
+        (ColumnType::PbTimestamp, ExaType::Timestamp { precision: 3 }),
         (ColumnType::PbDate, ExaType::Date),
         (ColumnType::PbString, ExaType::String { size: None }),
         (ColumnType::PbBoolean, ExaType::Boolean),

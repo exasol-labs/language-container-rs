@@ -40,6 +40,7 @@ const EMIT_K_LIB: &str = "libemit_k.so";
 const SCALAR_NEXT_ILLEGAL_LIB: &str = "libscalar_next_illegal.so";
 const RETURNS_WITH_EMIT_LIB: &str = "libreturns_with_emit.so";
 const COLUMN_META_LIB: &str = "libcolumn_meta.so";
+const TS_PREC_LIB: &str = "libtimestamp_precision.so";
 
 /// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
 /// cross-joined five times. Large enough that a scalar input or a single SET
@@ -168,6 +169,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         .await?;
     let column_meta_path = harness
         .upload_udf(COLUMN_META_LIB, read_udf_artifact(COLUMN_META_LIB)?)
+        .await?;
+    let ts_prec_path = harness
+        .upload_udf(TS_PREC_LIB, read_udf_artifact(TS_PREC_LIB)?)
         .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
@@ -315,11 +319,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     if it::db_series() != "8-29" {
         timestamp_precision_matrix_roundtrips(&mut conn, &ts_pass_path).await?;
         eprintln!("[it] scenario timestamp_precision_matrix_roundtrips ok");
+        timestamp_precision_probe_roundtrips(&mut conn, &ts_prec_path).await?;
+        eprintln!("[it] scenario timestamp_precision_probe_roundtrips ok");
     } else {
         eprintln!(
             "[it] scenario timestamp_precision_matrix_roundtrips SKIPPED (8.x lacks TIMESTAMP(p))"
         );
     }
+    timestamp_precision_probe_legacy(&mut conn, &ts_prec_path).await?;
+    eprintln!("[it] scenario timestamp_precision_probe_legacy ok");
 
     // Group F: run-dispatch iteration-type conformance suite (plan tasks 9.2-9.10).
     // 9.1 baseline is already covered above by `scalar_double_returns_42` (SCALAR
@@ -1988,6 +1996,84 @@ async fn timestamp_precision_matrix_roundtrips(
                  (the DB delivers UDF inputs at FF6/microsecond precision)"
             );
         }
+    }
+    Ok(())
+}
+
+async fn timestamp_precision_probe_roundtrips(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    for p in [0u32, 3, 6, 9] {
+        conn.execute(&format!(
+            "CREATE OR REPLACE RUST SET SCRIPT ts_precision_probe(...) \
+             EMITS (ts TIMESTAMP({p}), prec BIGINT) AS\n\
+             %udf_object {udf_object};\n/"
+        ))
+        .await?;
+
+        let got = query_single_string(
+            conn,
+            "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
+             FROM (SELECT ts_precision_probe(1))",
+        )
+        .await?
+        .ok_or_else(|| anyhow!("ts_precision_probe returned NULL at p={p}"))?;
+
+        let parts: Vec<&str> = got.splitn(2, ':').collect();
+        let reported_prec: u32 = parts[0].parse()?;
+        if reported_prec != p {
+            bail!(
+                "ts_precision_probe at TIMESTAMP({p}): UDF reported precision {reported_prec}, \
+                 expected {p}"
+            );
+        }
+
+        let ts_str = parts[1];
+        let frac = ts_str.rsplit_once('.').map(|(_, f)| f).unwrap_or("");
+        let expected_frac = &"123456789"[..p as usize];
+        let padded_expected = format!("{expected_frac:0<9}");
+        if frac != padded_expected {
+            bail!(
+                "ts_precision_probe at TIMESTAMP({p}): fractional = {frac:?}, \
+                 expected {padded_expected:?} (the engine truncates to {p} digits)"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn timestamp_precision_probe_legacy(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT ts_precision_probe(...) \
+         EMITS (ts TIMESTAMP, prec BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        "SELECT TO_CHAR(prec) || ':' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF9') \
+         FROM (SELECT ts_precision_probe(1))",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("ts_precision_probe (legacy) returned NULL"))?;
+
+    let parts: Vec<&str> = got.splitn(2, ':').collect();
+    let reported_prec: u32 = parts[0].parse()?;
+    if reported_prec != 3 {
+        bail!(
+            "ts_precision_probe (plain TIMESTAMP): UDF reported precision {reported_prec}, \
+             expected 3"
+        );
+    }
+
+    let frac = parts[1].rsplit_once('.').map(|(_, f)| f).unwrap_or("");
+    if !frac.starts_with("123") {
+        bail!(
+            "ts_precision_probe (plain TIMESTAMP): fractional = {frac:?}, \
+             expected to start with '123' (millisecond truncation)"
+        );
     }
     Ok(())
 }

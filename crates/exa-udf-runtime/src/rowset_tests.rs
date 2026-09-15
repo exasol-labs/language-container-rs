@@ -412,8 +412,8 @@ fn emit_packs_by_declared_type_not_value_variant() {
         col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
     ];
@@ -453,8 +453,8 @@ fn emit_string_block_is_row_major_across_columns() {
         col(
             "a",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
         col("b", ExaType::String { size: None }),
@@ -506,8 +506,8 @@ fn emit_null_cell_occupies_no_type_block_slot() {
         col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
         col("note", ExaType::String { size: None }),
@@ -552,12 +552,12 @@ fn bridge_typed_getters_return_typed_options() {
         col(
             "amount",
             ExaType::Numeric {
-                precision: Some(10),
-                scale: Some(2),
+                precision: 10,
+                scale: 2,
             },
         ),
         col("d", ExaType::Date),
-        col("ts", ExaType::Timestamp),
+        col("ts", ExaType::Timestamp { precision: 3 }),
     ];
     let table = ExascriptTableData {
         rows: 1,
@@ -598,8 +598,8 @@ fn corrupt_string_block_value_decodes_to_null() {
         col(
             "amount",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         ),
         col("d", ExaType::Date),
@@ -727,8 +727,8 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     // DECIMAL(p,0) column is the common case, not an error.
     assert!(column_accepts(
         &ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         },
         &Value::Int64(7)
     ));
@@ -736,8 +736,8 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     // `1e21`, `NaN` or `inf` — none of them a DECIMAL literal.
     assert!(!column_accepts(
         &ExaType::Numeric {
-            precision: None,
-            scale: None
+            precision: 18,
+            scale: 0
         },
         &Value::Double(1.0)
     ));
@@ -862,7 +862,7 @@ fn timestamp_emit_nanosecond_roundtrip() {
         .unwrap()
         .and_hms_nano_opt(9, 30, 15, 123_456_789)
         .unwrap();
-    let meta = vec![col("ts", ExaType::Timestamp)];
+    let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
 
     // WHEN serialised via EmitBuffer -> to_proto (uses value_to_block_string).
     let mut emit = EmitBuffer::new();
@@ -1792,19 +1792,19 @@ mod fast_string_block_tests {
             col(
                 "num_a",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(2),
+                    precision: 18,
+                    scale: 2,
                 },
             ),
             col(
                 "num_b",
                 ExaType::Numeric {
-                    precision: Some(38),
-                    scale: Some(0),
+                    precision: 38,
+                    scale: 0,
                 },
             ),
             col("d", ExaType::Date),
-            col("t", ExaType::Timestamp),
+            col("t", ExaType::Timestamp { precision: 3 }),
             col("label", ExaType::String { size: Some(100) }),
             col("i", ExaType::Int64),
         ];
@@ -1968,12 +1968,12 @@ mod fast_string_block_ingest_tests {
                 "mismatch for {s}, expected {expected:?}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block mismatch for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::TimestampTz, s),
+                decode_string_block(&ExaType::TimestampTz { precision: 3 }, s),
                 expected,
                 "decode_string_block (TimestampTz) mismatch for {s}"
             );
@@ -2023,7 +2023,7 @@ mod fast_string_block_ingest_tests {
                 "test setup: {s} should be chrono-valid"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block must still succeed via fallback for {s}"
             );
@@ -2077,7 +2077,7 @@ mod fast_string_block_ingest_tests {
                 "fast_parse_timestamp should defer/reject for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp, s),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 Value::Null,
                 "decode_string_block(Timestamp) should be Null for {s}"
             );
@@ -2399,36 +2399,36 @@ mod arrow_tests {
             col("s", ExaType::String { size: None }),
             col("ls", ExaType::String { size: None }),
             col("dt", ExaType::Date),
-            col("ts_s", ExaType::Timestamp),
-            col("ts_ms", ExaType::Timestamp),
-            col("ts_us", ExaType::TimestampTz),
-            col("ts_ns", ExaType::Timestamp),
+            col("ts_s", ExaType::Timestamp { precision: 3 }),
+            col("ts_ms", ExaType::Timestamp { precision: 3 }),
+            col("ts_us", ExaType::TimestampTz { precision: 3 }),
+            col("ts_ns", ExaType::Timestamp { precision: 3 }),
             col(
                 "dec",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(2),
+                    precision: 18,
+                    scale: 2,
                 },
             ),
             col(
                 "n32",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
             col(
                 "n64",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
             col(
                 "nf64",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             ),
         ];
@@ -2792,8 +2792,8 @@ mod arrow_tests {
         let meta = vec![col(
             "id",
             ExaType::Numeric {
-                precision: None,
-                scale: None,
+                precision: 18,
+                scale: 0,
             },
         )];
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -3012,7 +3012,7 @@ mod arrow_tests {
             single_column_cost(
                 DataType::Timestamp(TimeUnit::Millisecond, None),
                 Arc::new(TimestampMillisecondArray::from(vec![0i64])),
-                ExaType::Timestamp
+                ExaType::Timestamp { precision: 3 }
             ),
             value_byte_cost(&Value::Timestamp(NaiveDateTime::default())),
             "Timestamp cost is a fixed width, independent of unit or value"
@@ -3042,8 +3042,8 @@ mod arrow_tests {
             let meta = vec![col(
                 "d",
                 ExaType::Numeric {
-                    precision: Some(18),
-                    scale: Some(scale as u32),
+                    precision: 18,
+                    scale: scale as u32,
                 },
             )];
 
@@ -3152,7 +3152,7 @@ mod arrow_tests {
         let arr: Arc<dyn arrow::array::Array> =
             Arc::new(TimestampSecondArray::from(vec![1_700_000_000i64]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3176,7 +3176,7 @@ mod arrow_tests {
         let arr: Arc<dyn arrow::array::Array> =
             Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_123i64]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3201,7 +3201,7 @@ mod arrow_tests {
             1_700_000_000_123_456i64,
         ]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3225,7 +3225,7 @@ mod arrow_tests {
         let ns = 1_700_000_000_123_456_789i64;
         let arr: Arc<dyn arrow::array::Array> = Arc::new(TimestampNanosecondArray::from(vec![ns]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let value = accessor_value(&accessors[0], 0);
@@ -3260,7 +3260,7 @@ mod arrow_tests {
             -1_000_000_000i64,
         ]));
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
-        let meta = vec![col("ts", ExaType::Timestamp)];
+        let meta = vec![col("ts", ExaType::Timestamp { precision: 3 })];
         let accessors = build_accessors(&batch, &meta).unwrap();
 
         let last_nanosecond_of_1969 = NaiveDate::from_ymd_opt(1969, 12, 31)
@@ -3317,8 +3317,8 @@ mod arrow_tests {
             vec![col(
                 "n",
                 ExaType::Numeric {
-                    precision: None,
-                    scale: None,
+                    precision: 18,
+                    scale: 0,
                 },
             )]
         };

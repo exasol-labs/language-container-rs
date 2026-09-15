@@ -35,6 +35,7 @@ members = [
     "test-udfs/scalar-next-illegal",
     "test-udfs/returns-with-emit",
     "test-udfs/column-meta",
+    "test-udfs/timestamp-precision",
     "benches/bench-schema",
     "benches/bench-udfs",
     "benches/udf-bench",
@@ -75,6 +76,7 @@ default-members = [
     "test-udfs/scalar-next-illegal",
     "test-udfs/returns-with-emit",
     "test-udfs/column-meta",
+    "test-udfs/timestamp-precision",
 ]
 
 [workspace.package]

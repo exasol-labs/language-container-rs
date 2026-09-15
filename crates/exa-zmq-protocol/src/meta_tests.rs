@@ -8,7 +8,7 @@ pub(crate) fn column_to_pb(col: &ColumnInfo) -> exa_proto::exascript_metadata::C
         ExaType::Int32 => ColumnType::PbInt32,
         ExaType::Int64 => ColumnType::PbInt64,
         ExaType::Numeric { .. } => ColumnType::PbNumeric,
-        ExaType::Timestamp | ExaType::TimestampTz => ColumnType::PbTimestamp,
+        ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => ColumnType::PbTimestamp,
         ExaType::Date => ColumnType::PbDate,
         ExaType::String { .. }
         | ExaType::Char { .. }
@@ -72,8 +72,8 @@ fn from_pb_uses_sdk_exatype() {
     assert_eq!(
         meta.typ,
         ExaType::Numeric {
-            precision: Some(18),
-            scale: Some(2)
+            precision: 18,
+            scale: 2
         }
     );
 }
@@ -116,7 +116,7 @@ fn from_pb_refines_extended_types_via_type_name() {
             "TIMESTAMP(3) WITH LOCAL TIME ZONE",
             ColumnType::PbTimestamp,
             None,
-            ExaType::TimestampTz,
+            ExaType::TimestampTz { precision: 3 },
         ),
     ];
 
@@ -127,7 +127,28 @@ fn from_pb_refines_extended_types_via_type_name() {
     }
 
     let plain_ts = col(ColumnType::PbTimestamp, "TIMESTAMP(3)", None, None, None);
-    assert_eq!(column_from_pb(&plain_ts).typ, ExaType::Timestamp);
+    assert_eq!(
+        column_from_pb(&plain_ts).typ,
+        ExaType::Timestamp { precision: 3 }
+    );
+
+    let ts6 = col(ColumnType::PbTimestamp, "TIMESTAMP(6)", None, Some(6), None);
+    assert_eq!(
+        column_from_pb(&ts6).typ,
+        ExaType::Timestamp { precision: 6 }
+    );
+
+    let ts9_tz = col(
+        ColumnType::PbTimestamp,
+        "TIMESTAMP(9) WITH LOCAL TIME ZONE",
+        None,
+        Some(9),
+        None,
+    );
+    assert_eq!(
+        column_from_pb(&ts9_tz).typ,
+        ExaType::TimestampTz { precision: 9 }
+    );
 
     let unknown_string = col(ColumnType::PbString, "MYSTERY", Some(7), None, None);
     assert_eq!(
@@ -156,8 +177,8 @@ fn unambiguous_types_ignore_type_name() {
     assert_eq!(
         column_from_pb(&numeric).typ,
         ExaType::Numeric {
-            precision: Some(5),
-            scale: Some(1)
+            precision: 5,
+            scale: 1
         }
     );
 }
@@ -246,7 +267,7 @@ fn extended_exatype_roundtrips_to_pb() {
             ColumnType::PbString,
         ),
         (
-            ExaType::TimestampTz,
+            ExaType::TimestampTz { precision: 3 },
             "TIMESTAMP WITH LOCAL TIME ZONE",
             ColumnType::PbTimestamp,
         ),

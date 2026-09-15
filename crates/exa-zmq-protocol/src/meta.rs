@@ -67,13 +67,13 @@ pub fn column_from_pb(col: &exa_proto::exascript_metadata::ColumnDefinition) -> 
         ColumnType::PbInt32 => ExaType::Int32,
         ColumnType::PbInt64 => ExaType::Int64,
         ColumnType::PbNumeric => ExaType::Numeric {
-            precision: col.precision,
-            scale: col.scale,
+            precision: col.precision.unwrap_or(18),
+            scale: col.scale.unwrap_or(0),
         },
         ColumnType::PbDate => ExaType::Date,
         ColumnType::PbBoolean => ExaType::Boolean,
         ColumnType::PbUnsupported => ExaType::Unsupported,
-        ColumnType::PbTimestamp => refine_timestamp(&col.type_name),
+        ColumnType::PbTimestamp => refine_timestamp(&col.type_name, col.precision),
         ColumnType::PbString => refine_string(&col.type_name, col.size),
     };
     ColumnInfo {
@@ -104,11 +104,12 @@ fn refine_string(type_name: &str, size: Option<u32>) -> ExaType {
     }
 }
 
-fn refine_timestamp(type_name: &str) -> ExaType {
+fn refine_timestamp(type_name: &str, precision: Option<u32>) -> ExaType {
+    let precision = precision.unwrap_or(3);
     if type_name.contains("LOCAL TIME ZONE") {
-        ExaType::TimestampTz
+        ExaType::TimestampTz { precision }
     } else {
-        ExaType::Timestamp
+        ExaType::Timestamp { precision }
     }
 }
 
