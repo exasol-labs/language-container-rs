@@ -20,7 +20,7 @@ Defines `ColumnInfo` construction and serialization: mapping proto column types 
 
 * *GIVEN* an `MT_META` column whose proto `column_type` collapses several SQL types into one wire type
 * *WHEN* `column_from_pb` builds the column descriptor
-* *THEN* a `PB_STRING` column MUST resolve to `ExaType::Char { size }` when `type_name` begins with `CHAR`, and to `ExaType::String { size }` for `VARCHAR`
+* *THEN* a `PB_STRING` column MUST resolve to `ExaType::Char { size }` when `type_name` begins with `CHAR` (`size` defaults to 1 when the proto field is absent), and to `ExaType::String { size }` for `VARCHAR` (`size` defaults to 2,000,000 when absent)
 * *AND* a `PB_STRING` column MUST resolve to `ExaType::Geometry`, `ExaType::HashType`, `ExaType::IntervalYearToMonth`, or `ExaType::IntervalDayToSecond` when `type_name` names `GEOMETRY`, `HASHTYPE`, `INTERVAL YEAR ... TO MONTH`, or `INTERVAL DAY ... TO SECOND` respectively
 * *AND* a `PB_TIMESTAMP` column MUST resolve to `ExaType::TimestampTz { precision }` when `type_name` is `TIMESTAMP WITH LOCAL TIME ZONE`, and to `ExaType::Timestamp { precision }` otherwise, where `precision` is `col.precision.unwrap_or(3)` (plain `TIMESTAMP` defaults to millisecond precision 3)
 * *AND* refinement MUST examine `type_name` only when the proto `column_type` is ambiguous; unambiguous proto types (`PB_INT32`, `PB_INT64`, `PB_DOUBLE`, `PB_BOOLEAN`, `PB_DATE`) MUST map directly without consulting `type_name`
