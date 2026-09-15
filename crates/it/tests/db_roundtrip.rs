@@ -2917,18 +2917,19 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
         bail!("type_probe DATE '9999-12-31' did not round-trip");
     }
 
-    // TIMESTAMP WITH LOCAL TIME ZONE as input (ingest-only type)
+    // TIMESTAMP WITH LOCAL TIME ZONE as input (ingest-only type).
+    // Static EMITS (no call-site override) because the DB propagates the input
+    // LTZ type into dynamic EMITS and then rejects it as an unsupported output.
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
-         EMITS (...) AS\n\
+         EMITS (y TIMESTAMP, diag VARCHAR(2000)) AS\n\
          %udf_object {udf_object};\n/"
     ))
     .await?;
     let ts_ltz = query_single_string(
         conn,
         "SELECT diag FROM (SELECT type_probe(\
-         CAST(TIMESTAMP '2026-07-14 09:30:00' AS TIMESTAMP WITH LOCAL TIME ZONE)) \
-         EMITS (y TIMESTAMP, diag VARCHAR(2000)) FROM DUAL)",
+         CAST(TIMESTAMP '2026-07-14 09:30:00' AS TIMESTAMP WITH LOCAL TIME ZONE)) FROM DUAL)",
     )
     .await?
     .ok_or_else(|| anyhow!("type_probe TIMESTAMP WITH LOCAL TIME ZONE returned NULL"))?;
@@ -2943,6 +2944,12 @@ async fn type_coverage_roundtrips(conn: &mut Connection, udf_object: &str) -> Re
 
 /// Canaries: assert that currently rejected types stay rejected.
 async fn rejected_type_canaries(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT type_probe(...) \
+         EMITS (...) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
     let output_rejected = [
         "TIMESTAMP WITH LOCAL TIME ZONE",
         "INTERVAL YEAR TO MONTH",
