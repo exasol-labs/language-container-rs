@@ -42,3 +42,7 @@ pub fn type_probe(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
