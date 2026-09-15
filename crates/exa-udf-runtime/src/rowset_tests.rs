@@ -743,6 +743,26 @@ fn column_accepts_integer_widths_and_range_checks_int32() {
     ));
 }
 
+#[test]
+fn column_accepts_timestamp_string_char() {
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap();
+    assert!(column_accepts(
+        &ExaType::Timestamp { precision: 3 },
+        &Value::Timestamp(ts)
+    ));
+    assert!(column_accepts(
+        &ExaType::String { size: 200 },
+        &Value::String("x".into())
+    ));
+    assert!(column_accepts(
+        &ExaType::Char { size: 10 },
+        &Value::String("x".into())
+    ));
+}
+
 /// The bridge surfaces the handshake column metadata for both sides; a UDF whose
 /// output shape comes from the call-site EMITS list reads it here.
 #[test]

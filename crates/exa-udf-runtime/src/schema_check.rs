@@ -99,3 +99,7 @@ fn exatype_name(typ: &ExaType) -> &'static str {
         ExaType::Unsupported => "Unsupported",
     }
 }
+
+#[cfg(test)]
+#[path = "schema_check_tests.rs"]
+mod tests;
