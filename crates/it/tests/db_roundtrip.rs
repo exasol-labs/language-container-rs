@@ -2012,10 +2012,15 @@ async fn timestamp_precision_probe_roundtrips(
         ))
         .await?;
 
+        let ts_fmt = if p == 0 {
+            "YYYY-MM-DD HH24:MI:SS".to_string()
+        } else {
+            format!("YYYY-MM-DD HH24:MI:SS.FF{p}")
+        };
         let got = query_single_string(
             conn,
             &format!(
-                "SELECT TO_CHAR(prec) || '|' || TO_CHAR(ts, 'YYYY-MM-DD HH24:MI:SS.FF{p}') \
+                "SELECT TO_CHAR(prec) || '|' || TO_CHAR(ts, '{ts_fmt}') \
                  || '|' || diag \
                  FROM (SELECT ts_precision_probe(1))"
             ),
