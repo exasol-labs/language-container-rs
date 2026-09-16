@@ -166,11 +166,6 @@ pub enum ExaType {
     Char { size: u32 },
     Date,
     Timestamp { precision: u32 },
-    TimestampTz { precision: u32 },
-    Geometry,
-    HashType,
-    IntervalYearToMonth,
-    IntervalDayToSecond,
 }
 
 /// Declared metadata of one input or output column, as the database reported it

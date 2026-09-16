@@ -94,13 +94,12 @@ fn exatype_name(typ: &ExaType) -> &'static str {
         ExaType::Double => "Double",
         ExaType::Boolean => "Boolean",
         ExaType::Date => "Date",
-        ExaType::Timestamp { .. } | ExaType::TimestampTz { .. } => "Timestamp",
-        ExaType::String { .. }
-        | ExaType::Char { .. }
-        | ExaType::Geometry
-        | ExaType::HashType
-        | ExaType::IntervalYearToMonth
-        | ExaType::IntervalDayToSecond => "String",
+        ExaType::Timestamp { .. } => "Timestamp",
+        ExaType::String { .. } | ExaType::Char { .. } => "String",
         ExaType::Unsupported => "Unsupported",
     }
 }
+
+#[cfg(test)]
+#[path = "schema_check_tests.rs"]
+mod tests;

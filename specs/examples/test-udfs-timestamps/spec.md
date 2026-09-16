@@ -4,7 +4,7 @@ Provides the timestamp fixture UDF crates that prove timestamp arithmetic, named
 
 ## Background
 
-Each fixture is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. The three crates exercise the `Value::Timestamp` / `Value::TimestampTz` handling end-to-end and are consumed by the live-DB integration suite. All three are SCALAR `RETURNS TIMESTAMP` UDFs, so they produce output by returning `Result<Option<Value>, UdfError>` (the value-return channel), not by calling `ctx.emit`.
+Each fixture is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. The three crates exercise the `Value::Timestamp` handling end-to-end and are consumed by the live-DB integration suite. All three are SCALAR `RETURNS TIMESTAMP` UDFs, so they produce output by returning `Result<Option<Value>, UdfError>` (the value-return channel), not by calling `ctx.emit`.
 
 ## Scenarios
 
