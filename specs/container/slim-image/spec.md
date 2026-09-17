@@ -6,11 +6,7 @@ Packages the `exaudfclient` binary into a slim, Debian-staged SLC root filesyste
 
 The SLC is a three-stage build from a single root `Dockerfile`. A `rust:1.94-trixie` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`). `exaudfclient` links no bzip2 at all: `exarrow-rs`'s bzip2 usage lives entirely behind its CSV `IMPORT`/`EXPORT` local-file-compression feature, a code path the client's `ExaConnection` usage never reaches, so the linker drops the dependency. The builder also derives the two architecture-dependent values — the Debian multiarch triplet and the built binary's own `PT_INTERP` loader path — and records them for the next stage, because the runtime donor image carries neither `binutils` nor `dpkg-architecture`. A `debian:trixie-slim` stage is then both donor and packager: it reproduces its own usr-merge symlink layout inside a staged `/slc` tree, copies the glibc runtime, the dlopen-only NSS/resolver modules and the documented UDF library surface out of itself with `cp -L`, adds the binary, the language-definition file and the notice bundles, and tars `/slc` into `lc-rs.tar.gz`. A final `FROM scratch` artifact stage exposes the tarball for `docker build --output`. Nothing outside that curated set ships: the staged tree carries no shell, no package manager, no coreutils, no Rust toolchain and no vendored Cargo registry, so it supports precompiled `.so` UDFs only. Every architecture-dependent path is derived rather than hardcoded, so a native build on x86_64 or aarch64 produces the matching-architecture SLC with no cross-compilation.
 
-The staged tree is the UDF's entire root filesystem at run time, so what it provides beyond the client's own link closure is a deliberate, documented contract rather than an accident of `cp -L`. That contract — the fixed library surface and the glibc version floor it publishes to authors — is specified in `container/slc-platform-contract`, not here; this feature covers only the build mechanics that produce and package the staged tree. The shape of the packaged `build_info/language_definitions.json` document itself — the schema the database validates during Engine/Nano initialization — is specified in `container/language-definitions`, not here.
-
-The Exasol engine sets `TZ` from the session timezone for every UDF (via `NSEXEC_ENV_TZ` → `TZ`), commonly as an IANA name such as `Europe/Berlin`. The staged tree must carry the IANA zoneinfo database so `chrono::Local`/`time` resolve named zones instead of silently falling back to UTC; the runtime never reads `TZ` itself.
-
-The SLC is distributed as a flattened root-filesystem tarball that Exasol extracts after BucketFS upload, with the executable at `/exaudf/exaudfclient`. For DNS to work inside the UDF sandbox, the tarball must present `/etc/hosts` and `/etc/resolv.conf` as symlinks into `/conf/`, which the database populates at runtime. These symlinks cannot be baked as live symlinks in the image layers (`COPY` dereferences a dangling symlink into a 0-byte file; `RUN ln -sf` hits Docker's build-time bind-mount of those two paths), so they are created in a staging directory and tarred inside the Docker build itself.
+The staged tree is the UDF's entire root filesystem at run time, so what it provides beyond the client's own link closure is a deliberate, documented contract rather than an accident of `cp -L`. That contract — the fixed library surface and the glibc version floor it publishes to authors — is specified in `container/slc-platform-contract`, not here; this feature covers only the build mechanics that produce and package the staged tree. The shape of the packaged `build_info/language_definitions.json` document itself — the schema the database validates during Engine/Nano initialization — is specified in `container/language-definitions`, not here. What the packaged tarball actually contains — the curated runtime surface, the `/conf` resolver symlinks, the zoneinfo database and the sandbox mount-point skeleton — is specified in `container/slim-image-contents`, not here.
 
 ## Scenarios
 
@@ -68,27 +64,3 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *WHEN* the db-roundtrip integration harness registers the SLC, uploads the UDF artifacts and runs every roundtrip scenario
 * *THEN* the scalar, set/EMITS, statically-linked-dependency, UDF-error, single-call, name-resolution and session-timezone scenarios MUST all pass against the Debian-staged SLC
 * *AND* replacing the runtime base MUST require no change to the `language_definitions.json` contract and no change to how `SCRIPT_LANGUAGES` names the executable
-
-### Scenario: Staged tarball carries only the curated runtime surface
-
-* *GIVEN* the SLC tarball
-* *WHEN* its entries are enumerated
-* *THEN* it MUST NOT contain a shell, a package manager or a coreutils binary — no `bin/sh`, no `usr/bin/apt`, no `usr/bin/dpkg`
-* *AND* the compressed tarball MUST stay under a committed size ceiling, so accidentally staging the donor's whole root filesystem or its full library surface fails the pipeline instead of shipping
-* *AND* the check that enforces the ceiling MUST also report the measured compressed and uncompressed sizes, so any deliberate growth is a visible, reviewed number rather than a silent drift
-
-### Scenario: SLC tarball ships the /conf resolver symlinks
-
-* *GIVEN* the SLC distribution tarball produced from the root `Dockerfile` by the Docker build alone, without any host-side post-processing step
-* *WHEN* the entries for `etc/hosts` and `etc/resolv.conf` are inspected
-* *THEN* `etc/hosts` MUST be a symbolic-link entry pointing to `/conf/hosts`
-* *AND* `etc/resolv.conf` MUST be a symbolic-link entry pointing to `/conf/resolv.conf`
-* *AND* producing the tarball MUST NOT require any interpreter or tool outside the Docker build environment (no host `python3`)
-* *AND* the tarball MUST be produced with GNU `tar --hard-dereference`, so no shipped path depends on BucketFS extraction recreating a hard link
-
-### Scenario: Runtime image bundles the IANA zoneinfo database
-
-* *GIVEN* the SLC tarball and that the database always sends the session timezone as `TZ` for every UDF
-* *WHEN* the tarball is inspected for the zoneinfo database
-* *THEN* `usr/share/zoneinfo/Europe/Berlin` MUST be present as a readable, non-empty regular file, not a link whose target could be lost in extraction
-* *AND* the fix MUST remain packaging only (an `apt-get install` of `tzdata`), since `chrono`/`time` consult the zoneinfo database implicitly and the runtime MUST NOT read `TZ` itself
