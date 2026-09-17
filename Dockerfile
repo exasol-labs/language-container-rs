@@ -120,6 +120,18 @@ RUN TRIPLET="$(cat /slc-meta/triplet)" && \
 
 RUN mkdir -p /slc/exaudf /slc/build_info
 
+# The Exasol UDF sandbox creates these mount points inside the SLC root before
+# the client starts. An official SLC (exported from a full distribution image)
+# already contains them; this FROM-scratch tree does not. On a writable mount
+# the sandbox creates the missing directory itself and the gap stays invisible;
+# on a read-only mount (e.g. Exasol Personal's custom-SLC install) it instead
+# fails with "cannot create directories: Read-only file system", surfaced as
+# "22002 VM crashed" (issue #110). Pre-staging the standard skeleton here closes
+# that gap regardless of the mount's writability.
+RUN mkdir -p /slc/conf /slc/proc /slc/sys /slc/dev /slc/run \
+             /slc/var/tmp /slc/home /slc/root /slc/media /slc/mnt \
+             /slc/opt /slc/srv /slc/boot /slc/buckets
+
 COPY --from=builder /build/target/release/exaudfclient /slc/exaudf/exaudfclient
 RUN chmod +x /slc/exaudf/exaudfclient
 
