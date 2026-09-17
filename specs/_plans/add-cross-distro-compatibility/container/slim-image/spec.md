@@ -6,7 +6,7 @@ Packages the `exaudfclient` binary into a slim, Debian-staged SLC root filesyste
 
 The SLC is a three-stage build from a single root `Dockerfile`. A `rust:1.94-trixie` builder compiles `exaudfclient` with zmq statically linked (no `libzmq3-dev` — `zmq-sys` falls back to `zeromq-src`). `exaudfclient` links no bzip2 at all: `exarrow-rs`'s bzip2 usage lives entirely behind its CSV `IMPORT`/`EXPORT` local-file-compression feature, a code path the client's `ExaConnection` usage never reaches, so the linker drops the dependency. The builder also derives the two architecture-dependent values — the Debian multiarch triplet and the built binary's own `PT_INTERP` loader path — and records them for the next stage, because the runtime donor image carries neither `binutils` nor `dpkg-architecture`. A `debian:trixie-slim` stage is then both donor and packager: it reproduces its own usr-merge symlink layout inside a staged `/slc` tree, copies the glibc runtime, the dlopen-only NSS/resolver modules and the documented UDF library surface out of itself with `cp -L`, adds the binary, the language-definition file and the notice bundles, and tars `/slc` into `lc-rs.tar.gz`. A final `FROM scratch` artifact stage exposes the tarball for `docker build --output`. Nothing outside that curated set ships: the staged tree carries no shell, no package manager, no coreutils, no Rust toolchain and no vendored Cargo registry, so it supports precompiled `.so` UDFs only. Every architecture-dependent path is derived rather than hardcoded, so a native build on x86_64 or aarch64 produces the matching-architecture SLC with no cross-compilation.
 
-The builder image reference is a build argument rather than a literal `FROM` tag, because the same reference is the value `cargo exasol-udf build --container` runs, and one committed record must own it. The staged tree also carries the sandbox directory skeleton, a set of empty directories the Exasol UDF sandbox otherwise creates itself and cannot create when the extracted root is read-only. Both the reference and the skeleton are recorded in `container/slc-platform-contract`, not here; this feature covers only the build mechanics that read those records and stage the result.
+The builder `FROM` reference stays a literal tag, pinned to the exact toolchain patch version the committed builder record names and checked against that record rather than injected from it. A Dockerfile `ARG` before `FROM` cannot take its default from a file, so a build argument would duplicate the literal instead of removing the duplication, and the record would still need a check to stay true. The staged tree also carries the sandbox directory skeleton, a set of empty directories the Exasol UDF sandbox otherwise creates itself and cannot create when the extracted root is read-only. Both the reference and the skeleton are recorded in `container/slc-platform-contract`, not here; this feature covers only the build mechanics that read those records and stage the result.
 
 The staged tree is the UDF's entire root filesystem at run time, so what it provides beyond the client's own link closure is a deliberate, documented contract rather than an accident of `cp -L`. That contract — the fixed library surface and the glibc version floor it publishes to authors — is specified in `container/slc-platform-contract`, not here; this feature covers only the build mechanics that produce and package the staged tree. The shape of the packaged `build_info/language_definitions.json` document itself — the schema the database validates during Engine/Nano initialization — is specified in `container/language-definitions`, not here.
 
@@ -26,12 +26,12 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 <!-- DELTA:CHANGED -->
 ### Scenario: Builder toolchain and glibc runtime
 
-* *GIVEN* the Dockerfile builder stage, whose image reference is a build argument defaulting to the value the committed builder record names
+* *GIVEN* the Dockerfile builder stage, whose literal `FROM` reference is verified against the committed builder record
 * *WHEN* the SLC is built
 * *THEN* the builder MUST install `protobuf-compiler` and `pkg-config` but NOT `libzmq3-dev` and NOT `libbz2-dev`, so zmq is statically linked via `zeromq-src`; the builder installs no bzip2 development package because `exaudfclient` links no bzip2 at all
 * *AND* the builder MUST derive the Debian multiarch triplet and the built binary's own `PT_INTERP` loader path at build time rather than hardcoding `x86_64-linux-gnu`, and MUST record both for the staging stage, which carries neither `binutils` nor `dpkg-architecture` of its own
 * *AND* an empty derived triplet or an empty derived loader path MUST fail the build with an error naming the command that produced nothing, rather than a cryptic downstream `cp` failure
-* *AND* the builder image reference MUST match the channel pinned in `rust-toolchain.toml` (`1.94`); the spec MUST NOT name a stale builder tag that no longer matches the toolchain pin
+* *AND* the builder image reference MUST match the channel pinned in `rust-toolchain.toml` (`1.94`) and MUST pin an exact toolchain patch version rather than a moving minor-version tag, so an upstream patch release cannot change the rustc identity the builder record publishes, and so the spec cannot name a stale builder tag that no longer matches the toolchain pin
 <!-- /DELTA:CHANGED -->
 
 ### Scenario: SLC builds natively for the host architecture
@@ -56,7 +56,7 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *GIVEN* the committed sandbox skeleton record and the staged `/slc` tree
 * *WHEN* the `/slc` tree is staged
 * *THEN* the stage MUST create one empty directory for every path the record names, reading the set from that record rather than from a list repeated in the Dockerfile
-* *AND* it MUST create them after the usr-merge symlinks and the staged library tree, so a recorded path that already exists fails the build instead of shadowing or re-moding what is there
+* *AND* it MUST create them in recorded order with a command that creates no parent of its own, and after the usr-merge symlinks and the staged library tree, so a recorded path that already exists fails the build instead of shadowing what is there, and a recorded entry whose parent is neither recorded on an earlier line nor already staged fails the build rather than gaining a parent as a side effect
 * *AND* the tar step MUST preserve each as its own empty-directory entry, so BucketFS extraction recreates the skeleton without any file inside it
 * *AND* a recorded entry that names an absolute path, a parent traversal, an unparseable mode, or a duplicate MUST fail the build, because the record is the only place the set is decided
 <!-- /DELTA:NEW -->
@@ -69,13 +69,16 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *AND* it MUST set `ENV LANG=C.UTF-8` and MUST also stage `/usr/lib/locale/C.utf8` into the tree, because the image-level `ENV` does not survive tarball extraction — the staged locale data is what makes `C.UTF-8` resolvable inside the UDF sandbox — and no `locale-gen` MUST be run and no locale package installed
 * *AND* the staged tree MUST NOT contain a Rust toolchain, a vendored Cargo registry, a shell, a package manager or coreutils
 
+<!-- DELTA:CHANGED -->
 ### Scenario: Staged tree passes an in-build chroot self-test
 
 * *GIVEN* the staged `/slc` tree, before it is tarred
 * *WHEN* the build runs `chroot /slc /exaudf/exaudfclient` with no further arguments
 * *THEN* the client MUST report a wrong-argument-count error and exit non-zero, and the build MUST fail if it does not
 * *AND* a `/slc` tree missing the loader or a usr-merge symlink MUST therefore fail the build as a `chroot` failure, instead of passing the build and surfacing downstream as a bare `22002 VM crashed`
+* *AND* the build MUST run the same self-test a second time against an unwritable staged tree with the client dropped to an unprivileged user, after the tarball is produced so that making the tree unwritable cannot change the modes the tarball records, MUST fail when that run does not report the same wrong-argument-count error, and MUST NOT publish that run as evidence that the sandbox directory skeleton is complete, because it starts `exaudfclient` directly rather than through `nschroot` and therefore prepares none of the sandbox mount points
 * *AND* on `aarch64`, where CI has no live Exasol database, this self-test together with the tarball's structural assertions MUST remain the structural coverage and MUST NOT be removed
+<!-- /DELTA:CHANGED -->
 
 ### Scenario: Debian-staged SLC passes the db-roundtrip integration suite
 

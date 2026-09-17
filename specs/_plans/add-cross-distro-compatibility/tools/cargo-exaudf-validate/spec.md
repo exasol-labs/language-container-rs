@@ -8,26 +8,33 @@ Provides `cargo exasol-udf validate`, which checks a built `.so`'s ABI compatibi
 
 The ABI fingerprint covers the SDK version and the compiling rustc, not the platform, so it cannot catch the two remaining ways a well-formed `.so` still fails at `dlopen` inside the container: a glibc symbol-version reference newer than the SLC's bundled glibc, and a dynamic dependency on a library the SLC does not stage. `validate` therefore reads the artifact's ELF dynamic section once and derives all three facts from that single read — the exported entry symbols, the `DT_NEEDED` sonames, and the highest referenced `GLIBC_x.y` version. The SLC's library surface and its glibc floor are container facts, specified in `container/slc-platform-contract`, not CLI facts: the floor is a single committed value the container build verifies against the shipped `libc.so.6`, so the number the CLI reports can never drift from what ships.
 
-The CLI's own `EXA_SDK_FINGERPRINT` is baked when the author installs the CLI, so it carries the author's rustc identity, not the SLC's. Comparing an artifact against it therefore passes on every host and catches no toolchain skew against the container. The SLC's builder rustc identity is a third committed container fact in the same builder record, and `validate` compares the artifact against that record. The CLI release and the SLC release are published from one commit, so the recorded identity describes the SLC an author installs alongside that CLI version.
+A fingerprint is two parts joined by a colon: an SDK version and a rustc identity. Each part has a different source of truth, so `validate` compares them separately. The SDK-version part belongs to the crate the artifact was built against, and the CLI's own `EXA_SDK_FINGERPRINT` carries the right value for it. The rustc-identity part belongs to the container, and the CLI's own value is wrong for it: `cargo install cargo-exasol-udf` bakes the author's rustc into the CLI, so comparing the whole string passes whenever the artifact and the CLI share a toolchain and fails whenever they do not, in both cases telling the author nothing about the container. The SLC's builder rustc identity is a third committed container fact in the same builder record, and `validate` reads that part from there. A container build therefore produces an artifact that validates on any Linux host, whatever rustc that host runs. The CLI release and the SLC release are published from one commit, so the recorded identity describes the SLC an author installs alongside that CLI version.
+
+`validate` runs on a Linux host only, because confirming a vtable requires `dlopen`ing the artifact. An author on macOS builds through `cargo exasol-udf build --container`, which satisfies both recorded properties by construction, and validates on a Linux host or not at all.
 
 ## Scenarios
 
 <!-- DELTA:CHANGED -->
 ### Scenario: validate accepts a compatible .so
 
-* *GIVEN* a `.so` built against the current `exasol-udf-sdk` exporting one or more `__exa_udf_entry_<NAME>` symbols
+* *GIVEN* a `.so` built against the current `exasol-udf-sdk` exporting one or more `__exa_udf_entry_<NAME>` symbols, on a Linux host
 * *WHEN* the author runs `cargo exasol-udf validate <path.so>`
 * *THEN* the CLI MUST discover every exported `__exa_udf_entry_<NAME>` symbol by reading the artifact's own ELF dynamic symbol table, without shelling out to `nm` or requiring binutils on the author's host
-* *AND* for each discovered entry point it MUST dlopen the `.so` and confirm the vtable `abi_version` equals `EXA_UDF_ABI_VERSION` and the `sdk_fingerprint` matches the current SDK
+* *AND* for each discovered entry point it MUST dlopen the `.so` and confirm the vtable `abi_version` equals `EXA_UDF_ABI_VERSION` and the `sdk_fingerprint`'s SDK-version part matches the current SDK
 * *AND* it MUST report each discovered UDF name, the artifact's highest referenced `GLIBC_x.y` version against the SLC floor, the artifact's rustc identity against the SLC's recorded builder rustc identity, and its dynamic dependencies, then exit zero
+* *AND* an artifact produced by `cargo exasol-udf build --container` MUST exit zero here on any Linux host, including a host whose own rustc differs from the recorded builder rustc, because no comparison this scenario makes reads the host's rustc
 <!-- /DELTA:CHANGED -->
 
+<!-- DELTA:CHANGED -->
 ### Scenario: validate rejects an ABI or fingerprint mismatch
 
-* *GIVEN* a `.so` with a `__exa_udf_entry_<NAME>` symbol whose vtable `abi_version` or `sdk_fingerprint` differs from the current SDK
+* *GIVEN* a `.so` with a `__exa_udf_entry_<NAME>` symbol whose vtable `abi_version` differs from the current SDK, or whose `sdk_fingerprint` carries an SDK-version part differing from the current SDK or a rustc-identity part differing from the recorded builder identity
 * *WHEN* the author runs `cargo exasol-udf validate <path.so>`
 * *THEN* the CLI MUST exit non-zero
-* *AND* it MUST report which UDF name and which of `abi_version` or `sdk_fingerprint` mismatched, showing expected and actual values
+* *AND* it MUST report which UDF name and which of `abi_version`, the fingerprint's SDK-version part or the fingerprint's rustc-identity part mismatched, showing expected and actual values
+* *AND* it MUST compare the SDK-version part against the CLI's own `EXA_SDK_FINGERPRINT` and the rustc-identity part against the committed builder record, because only the first of those two values is a property of the SDK the CLI ships with
+* *AND* it MUST NOT compare the fingerprint as one whole string against the CLI's own `EXA_SDK_FINGERPRINT`, because that comparison rejects every artifact a container build produces on a host whose rustc differs from the recorded builder rustc
+<!-- /DELTA:CHANGED -->
 
 ### Scenario: validate rejects a .so missing any entry symbol
 
