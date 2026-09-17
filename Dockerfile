@@ -120,6 +120,15 @@ RUN TRIPLET="$(cat /slc-meta/triplet)" && \
 
 RUN mkdir -p /slc/exaudf /slc/build_info
 
+# Every mount point a UDF sandbox may bind-mount over must already exist, or
+# the mount fails outside the sandbox's control and the UDF never starts.
+COPY dist/slc-sandbox-skeleton.txt /slc-meta/sandbox-skeleton
+RUN while IFS= read -r dir; do \
+        if [ -n "$dir" ]; then \
+            mkdir -p "/slc/$dir" || exit 1; \
+        fi; \
+    done < /slc-meta/sandbox-skeleton
+
 COPY --from=builder /build/target/release/exaudfclient /slc/exaudf/exaudfclient
 RUN chmod +x /slc/exaudf/exaudfclient
 

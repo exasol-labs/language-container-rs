@@ -26,6 +26,10 @@ GLIBC_FLOOR_FILE="$ROOT/crates/cargo-exasol-udf/slc-glibc-floor.txt"
 # every soname from the staged files themselves.
 LIBRARY_SURFACE_FILE="$ROOT/crates/cargo-exasol-udf/slc-library-surface.txt"
 
+# Mount-point directories a UDF's sandbox may bind-mount over. The same
+# committed file drives the Dockerfile staging loop.
+SANDBOX_SKELETON_FILE="$ROOT/dist/slc-sandbox-skeleton.txt"
+
 CLIENT_REL="exaudf/exaudfclient"
 
 # exaudfclient's own dynamic dependencies, excluding the loader (which is
@@ -623,6 +627,37 @@ slc_tarball_os_notice_has_no_apk_references() {
     pass "slc_tarball_os_notice_has_no_apk_references"
 }
 
+slc_tarball_ships_sandbox_skeleton() {
+    local name entries
+    local -a skeleton=()
+    if [[ ! -f "$SANDBOX_SKELETON_FILE" ]]; then
+        fail "slc_tarball_ships_sandbox_skeleton: committed skeleton file $SANDBOX_SKELETON_FILE is missing"
+        return
+    fi
+    while IFS= read -r name; do
+        name="${name//[[:space:]]/}"
+        [[ -n "$name" ]] && skeleton+=("$name")
+    done <"$SANDBOX_SKELETON_FILE"
+    if [[ "${#skeleton[@]}" -eq 0 ]]; then
+        fail "slc_tarball_ships_sandbox_skeleton: $SANDBOX_SKELETON_FILE names no directory"
+        return
+    fi
+
+    for name in "${skeleton[@]}"; do
+        if [[ ! -d "$TREE/$name" ]]; then
+            fail "slc_tarball_ships_sandbox_skeleton: $name is not a directory in the tarball"
+            return
+        fi
+        entries="$(find "$TREE/$name" \( -type f -o -type l -o -type b -o -type c -o -type p -o -type s \) 2>/dev/null)"
+        if [[ -n "$entries" ]]; then
+            fail "slc_tarball_ships_sandbox_skeleton: $name holds non-directory entries:
+$entries"
+            return
+        fi
+    done
+    pass "slc_tarball_ships_sandbox_skeleton"
+}
+
 # --- runner ------------------------------------------------------------------
 
 if [[ $# -ne 1 ]]; then
@@ -672,6 +707,7 @@ slc_tarball_tmp_is_empty_and_world_writable
 slc_tarball_zoneinfo_is_regular_file
 slc_tarball_carries_notice_bundles
 slc_tarball_os_notice_has_no_apk_references
+slc_tarball_ships_sandbox_skeleton
 
 if [[ "$failures" -gt 0 ]]; then
     echo "$failures test(s) failed"

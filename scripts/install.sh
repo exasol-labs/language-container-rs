@@ -10,10 +10,11 @@
 #     backends, discriminated at runtime by the deployment directory's
 #     deployment.json .backend field:
 #       - "local": Personal publishes only the SQL port from its VM and exposes
-#         no BucketFS HTTP endpoint, so the tarball travels over SSH and is
-#         extracted straight into the VM's BucketFS directory; the engine
-#         reconciles a real bucket from it. The SSH port is reassigned on every
-#         `exasol start`, so re-running after `exasol stop && exasol start`
+#         no BucketFS HTTP endpoint, so the tarball is placed where the engine
+#         reconciles a real bucket from the filesystem, either over SSH into
+#         the VM or by extracting into the deployment's shared host directory,
+#         chosen by what the deployment directory publishes. The SSH port is
+#         reassigned on every `exasol start`, so re-running after `exasol stop && exasol start`
 #         picks it up. The SQL port is assigned per deployment via
 #         `exasol config set --ports db:<port>`, so it is read fresh from
 #         connection.dbPort rather than hardcoded — a hardcoded value would
@@ -37,6 +38,12 @@ DEPLOYMENT_DESCRIPTOR="deployment.json"
 SECRETS_DESCRIPTOR="secrets.json"
 NODE_KEY_RELATIVE_PATH="local/node_access.pem"
 VM_BUCKETFS_ROOT="/var/lib/exa/bucketfs"
+VM_SHARED_RELATIVE_PATH="local/runtime/vm-shared"
+BUCKETFS_MAPPING_RELATIVE_PATH="$VM_SHARED_RELATIVE_PATH/exa/bucketfs.conf"
+# deployment_bucketfs_dir exit statuses; only BUCKETFS_MAPPING_ABSENT is
+# branched on by name (see personal_local_mechanism).
+BUCKETFS_MAPPING_ABSENT=2
+BUCKETFS_PAIR_UNSERVED=3
 SCRIPT_LANGUAGES_COLUMN="CURRENT_SCRIPT_LANGUAGES"
 RECONCILE_SECONDS=3
 PERSONAL_DB_HOST_DEFAULT=127.0.0.1
@@ -77,7 +84,9 @@ Transport is chosen by --deployment:
   * without it — upload over the BucketFS HTTP API (normal cluster / SaaS);
   * with it    — Exasol Personal, local OR cloud, discriminated at runtime by
                  the deployment directory's deployment.json .backend field:
-                   - "local": copy over SSH into the deployment's VM.
+                   - "local": place the SLC where the engine reconciles BucketFS
+                     from the filesystem, by whichever mechanism the deployment
+                     directory supports (see --deployment below).
                    - any other backend (cloud): resolve host/port/user/DB
                      password from the deployment directory and use the same
                      HTTP transport as the default (no --deployment) path.
@@ -96,6 +105,21 @@ Required (Personal transport, local backend):
                              ${PERSONAL_DB_PORT_DEFAULT}, and no BucketFS
                              password is needed. --host, --port, --user, and
                              --password override the resolved values.
+                             The deployment directory also chooses how the SLC
+                             is placed; everything after placement, including
+                             the ALTER SYSTEM registration, is the same either
+                             way:
+                               - SSH: needs a numeric .connection.sshPort in
+                                 deployment.json plus a readable
+                                 $NODE_KEY_RELATIVE_PATH;
+                                 copies the tarball into the VM. Chosen
+                                 whenever both are present.
+                               - shared directory: needs a BucketFS mapping at
+                                 $BUCKETFS_MAPPING_RELATIVE_PATH
+                                 naming the requested --bfs-service/--bucket
+                                 pair; extracts into the host directory that
+                                 mapping serves, replacing only <slc-name>
+                                 under it.
 
 Required (Personal transport, cloud backend):
   -D, --deployment NAME      Personal deployment name (a directory under
@@ -112,7 +136,7 @@ Options:
       --bfs-service NAME     BucketFS service name   (default: bfsdefault)
       --slc-name NAME        SLC name in BucketFS    (default: rustslc)
       --scope SESSION|SYSTEM ALTER scope             (default: SESSION; local --deployment forces SYSTEM, cloud --deployment honors --scope)
-      --ssh-user USER        VM SSH user             (default: root; local Personal transport only)
+      --ssh-user USER        VM SSH user             (default: root; local Personal SSH mechanism only)
       --skip-build           Skip docker build; use SLC_TARBALL if set
   -h, --help                 Show this help
 
@@ -122,8 +146,9 @@ Environment:
 
 The default build path needs Docker plus cargo-about (with network access for
 the GCC-exception fetch), used by dist/generate-licenses.sh; the local Personal
-transport additionally needs jq and ssh/scp; the cloud Personal transport
-additionally needs jq. exapump is always required.
+transport additionally needs jq, plus ssh/scp on the SSH mechanism or tar on
+the shared-directory mechanism; the cloud Personal transport additionally needs
+jq. exapump is always required.
 
 Examples:
   # Docker-db with default credentials:
@@ -150,6 +175,21 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found on PATH"
 }
 
+# A `/`, `.`, `..` or leading `-` here would widen or redirect the `rm -rf`
+# this value is later interpolated into.
+require_path_segment() {
+  local flag="$1" value="$2"
+
+  case "$value" in
+    "")   echo "error: $flag must not be empty" >&2; return 1 ;;
+    */*)  echo "error: $flag must be a single path component, but got '$value'" >&2; return 1 ;;
+    .|..) echo "error: $flag must name a directory, but got '$value'" >&2; return 1 ;;
+    -*)   echo "error: $flag must not start with '-', but got '$value'" >&2; return 1 ;;
+  esac
+
+  return 0
+}
+
 # ── Personal: deployment descriptor (read fresh on every run) ─────────────────
 deployment_ssh_port() {
   local descriptor="$1/$DEPLOYMENT_DESCRIPTOR" port
@@ -170,6 +210,91 @@ deployment_ssh_port() {
 
 deployment_key_path() {
   printf '%s\n' "$1/$NODE_KEY_RELATIVE_PATH"
+}
+
+# ── Personal: shared host directory the deployment mounts into its VM ─────────
+# Prints the host directory serving <service>/<bucket>, read from the
+# deployment's own BucketFS mapping rather than a hard-coded layout.
+deployment_bucketfs_dir() {
+  local dir="$1" service="$2" bucket="$3"
+  local mapping="$dir/$BUCKETFS_MAPPING_RELATIVE_PATH"
+  local line_path="" line_service line_bucket served="" vm_path=""
+  local host_dir resolved_host resolved_dir
+
+  if [[ ! -r "$mapping" ]]; then
+    echo "error: no readable BucketFS mapping at $mapping" >&2
+    return "$BUCKETFS_MAPPING_ABSENT"
+  fi
+
+  # `|| [[ -n ... ]]`: still process a last line with no trailing newline.
+  while read -r line_path line_service line_bucket _ || [[ -n "$line_path" ]]; do
+    [[ -z "$line_path" ]] && continue
+    served="$served $line_service/$line_bucket"
+    if [[ "$line_service" == "$service" && "$line_bucket" == "$bucket" ]]; then
+      vm_path="$line_path"
+    fi
+  done <"$mapping"
+
+  if [[ -z "$vm_path" ]]; then
+    echo "error: $mapping serves no $service/$bucket bucket; it serves:$served" >&2
+    return "$BUCKETFS_PAIR_UNSERVED"
+  fi
+
+  host_dir="$dir/$VM_SHARED_RELATIVE_PATH/${vm_path#/}"
+  if [[ ! -d "$host_dir" ]]; then
+    echo "error: $mapping serves $service/$bucket from $host_dir, which is not an existing directory" >&2
+    return 1
+  fi
+
+  # Physically resolved: a symlink could otherwise pass this string-prefix check.
+  resolved_host="$(cd "$host_dir" && pwd -P)" || return 1
+  resolved_dir="$(cd "$dir" && pwd -P)" || return 1
+  if [[ "$resolved_host" != "$resolved_dir" && "$resolved_host" != "$resolved_dir"/* ]]; then
+    echo "error: $mapping serves $service/$bucket from $resolved_host, which is outside the deployment directory $resolved_dir" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$host_dir"
+}
+
+# ── Personal: which local placement mechanism the deployment supports ─────────
+deployment_supports_ssh_transport() {
+  local dir="$1" key
+
+  deployment_ssh_port "$dir" >/dev/null 2>&1 || return 1
+  key="$(deployment_key_path "$dir")"
+  [[ -r "$key" ]]
+}
+
+# Prints the placement mechanism a local deployment supports: "ssh" or
+# "shared". Reads no Personal version string; the SSH inputs win wherever
+# present, so no deployment that installs today changes mechanism.
+#
+# The stderr capture below deliberately carries a non-zero status, so this
+# must be invoked from a command-substitution/condition context (as main
+# does) or errexit aborts before the message is re-emitted.
+personal_local_mechanism() {
+  local dir="$1" service="$2" bucket="$3" err rc
+
+  if deployment_supports_ssh_transport "$dir"; then
+    printf '%s\n' ssh
+    return 0
+  fi
+
+  err="$(deployment_bucketfs_dir "$dir" "$service" "$bucket" 2>&1 >/dev/null)"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    printf '%s\n' shared
+    return 0
+  fi
+
+  if [[ "$rc" -eq "$BUCKETFS_MAPPING_ABSENT" ]]; then
+    echo "error: the deployment at $dir supports neither local install mechanism: the SSH mechanism needs a numeric .connection.sshPort in $DEPLOYMENT_DESCRIPTOR and a readable $NODE_KEY_RELATIVE_PATH, and the shared-directory mechanism needs a BucketFS mapping at $BUCKETFS_MAPPING_RELATIVE_PATH" >&2
+  else
+    printf '%s\n' "$err" >&2
+  fi
+
+  return 1
 }
 
 # ── Cloud: deployment descriptor field access ─────────────────────────────────
@@ -319,9 +444,9 @@ csv_unquote() {
   printf '%s\n' "$field"
 }
 
-# Read the current parameter value out of the CSV result of the query below.
-# An unrecognized shape is an error rather than an empty value: silently
-# treating it as empty would drop every language the database already has.
+# Reads the current parameter value out of the CSV result below. An absent
+# data line (a query that never ran) is an error, not an empty value — an
+# actually-empty parameter still arrives as a quoted empty field.
 parse_script_languages() {
   local output="$1" candidate line="" value token
   local -a tokens
@@ -331,6 +456,11 @@ parse_script_languages() {
     [[ "$candidate" == "$SCRIPT_LANGUAGES_COLUMN" ]] && continue
     line="$candidate"
   done <<<"$output"
+
+  if [[ -z "$line" ]]; then
+    echo "error: the SCRIPT_LANGUAGES query returned no value; refusing to register, which would drop every existing language" >&2
+    return 1
+  fi
 
   value="$(csv_unquote "$line")"
   read -ra tokens <<<"$value"
@@ -363,12 +493,17 @@ script_languages_with_rust_entry() {
   printf '%s\n' "${kept[*]}"
 }
 
+# Status captured explicitly: callers read this via command substitution,
+# which suspends errexit, so a failed exapump would otherwise fall through.
 current_script_languages() {
   local dsn="$1" output
 
   output="$(exapump sql -f csv \
     "SELECT SYSTEM_VALUE AS ${SCRIPT_LANGUAGES_COLUMN} FROM EXA_PARAMETERS WHERE PARAMETER_NAME = 'SCRIPT_LANGUAGES'" \
-    -d "$dsn")"
+    -d "$dsn")" || {
+    echo "error: cannot read the current SCRIPT_LANGUAGES value from $HOST:$PORT" >&2
+    return 1
+  }
   parse_script_languages "$output"
 }
 
@@ -382,6 +517,37 @@ extract_slc_into_bucketfs() {
   scp "${SSH_OPTIONS[@]}" -i "$key" -P "$ssh_port" "$tarball" "${remote}:${staged}"
   ssh "${SSH_OPTIONS[@]}" -i "$key" -p "$ssh_port" "$remote" \
     "set -e; rm -rf '${dest}'; mkdir -p '${dest}'; tar -xzf '${staged}' -C '${dest}'; rm -f '${staged}'; test -x '${dest}/exaudf/exaudfclient'"
+}
+
+# ── Personal: extraction into the deployment's shared host directory ──────────
+# Replaces only <slc-name> under the bucket directory, never the bucket
+# directory itself (it also carries the operator's own udf/*.so artifacts).
+# The destination is checked back against the resolved bucket directory
+# before the `rm -rf`, so it can only ever be a direct child of it.
+extract_slc_into_shared_bucketfs() {
+  local dir="$1" tarball="$2"
+  local bucket_dir dest resolved_parent resolved_bucket
+
+  require_path_segment --slc-name "$SLC_NAME" || return 1
+
+  bucket_dir="$(deployment_bucketfs_dir "$dir" "$BFS_SERVICE" "$BUCKET")" || return 1
+  dest="$bucket_dir/$SLC_NAME"
+
+  resolved_parent="$(cd "$(dirname "$dest")" && pwd -P)" || return 1
+  resolved_bucket="$(cd "$bucket_dir" && pwd -P)" || return 1
+  if [[ "$resolved_parent" != "$resolved_bucket" || "$(basename "$dest")" != "$SLC_NAME" ]]; then
+    echo "error: $dest is not a direct child of the BucketFS directory $bucket_dir" >&2
+    return 1
+  fi
+
+  echo "==> Extracting the SLC into $dest (shared deployment directory) …"
+  rm -rf "$dest" || return 1
+  mkdir -p "$dest" || return 1
+  tar -xzf "$tarball" -C "$dest" || return 1
+  if [[ ! -x "$dest/exaudf/exaudfclient" ]]; then
+    echo "error: $dest/exaudf/exaudfclient is missing or not executable after extraction" >&2
+    return 1
+  fi
 }
 
 # ── argument parsing ───────────────────────────────────────────────────────────
@@ -407,11 +573,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── validation ─────────────────────────────────────────────────────────────────
-# Interpolated into BucketFS paths (an `rm -rf` on the VM for Personal) — an
-# empty component would widen the destination.
-[[ -z "$BFS_SERVICE" ]] && die "--bfs-service must not be empty"
-[[ -z "$BUCKET" ]]      && die "--bucket must not be empty"
-[[ -z "$SLC_NAME" ]]    && die "--slc-name must not be empty"
+# Interpolated into BucketFS paths (an `rm -rf` for both Personal local
+# mechanisms) — a bad component would widen or relocate the destination.
+require_path_segment --bfs-service "$BFS_SERVICE" || exit 1
+require_path_segment --bucket "$BUCKET"           || exit 1
+require_path_segment --slc-name "$SLC_NAME"       || exit 1
 
 # ── transport selection ────────────────────────────────────────────────────────
 # --deployment routes on the descriptor's .backend: "local" keeps the Exasol
@@ -421,6 +587,7 @@ done
 # and falls through to the default upload-and-register path. Without
 # --deployment the default path handles a normal cluster / SaaS.
 LOCAL_TRANSPORT=0
+LOCAL_MECHANISM=""
 DEPLOYMENT_DIR=""
 SSH_PORT=""
 NODE_KEY=""
@@ -437,9 +604,8 @@ if [[ -n "$DEPLOYMENT" ]]; then
     || die "cannot determine the deployment backend from $DEPLOYMENT_DIR/$DEPLOYMENT_DESCRIPTOR"
 
   if [[ "$backend" == "local" ]]; then
-    # Personal-local always talks to the VM's local SQL port; ALTER SYSTEM so the
-    # registration survives a restart. Fresh SSH port + node key on every run
-    # (the port is reassigned on every `exasol start`).
+    # Personal-local always talks to the VM's local SQL port; ALTER SYSTEM so
+    # the registration survives a restart. Only placement differs by mechanism.
     LOCAL_TRANSPORT=1
     resolve_deployment_connection "$DEPLOYMENT_DIR" "$PERSONAL_DB_HOST_DEFAULT" \
       || die "cannot resolve the local deployment connection from $DEPLOYMENT_DIR"
@@ -451,9 +617,12 @@ if [[ -n "$DEPLOYMENT" ]]; then
       fi
     fi
     SCOPE=SYSTEM
-    SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
-    NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
-    [[ -r "$NODE_KEY" ]] || die "no readable node key at $NODE_KEY"
+    LOCAL_MECHANISM="$(personal_local_mechanism "$DEPLOYMENT_DIR" "$BFS_SERVICE" "$BUCKET")" \
+      || exit 1
+    if [[ "$LOCAL_MECHANISM" == "ssh" ]]; then
+      SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
+      NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
+    fi
   else
     # Cloud reaches the DB over the network and exposes the ordinary BucketFS
     # HTTP endpoint; the BucketFS write-password check lives in
@@ -511,13 +680,18 @@ if [[ "$LOCAL_TRANSPORT" -eq 1 ]]; then
   DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
   SLC_PATH="$SLC_NAME"
 
-  echo "==> Copying the SLC into ${VM_BUCKETFS_ROOT}/${BFS_SERVICE}/${BUCKET}/${SLC_NAME} (ssh port ${SSH_PORT}) …"
-  extract_slc_into_bucketfs "$NODE_KEY" "$SSH_PORT" "$TMP_TAR"
+  if [[ "$LOCAL_MECHANISM" == "ssh" ]]; then
+    echo "==> Copying the SLC into ${VM_BUCKETFS_ROOT}/${BFS_SERVICE}/${BUCKET}/${SLC_NAME} (ssh port ${SSH_PORT}) …"
+    extract_slc_into_bucketfs "$NODE_KEY" "$SSH_PORT" "$TMP_TAR"
+  else
+    extract_slc_into_shared_bucketfs "$DEPLOYMENT_DIR" "$TMP_TAR"
+  fi
   echo "==> Waiting ${RECONCILE_SECONDS}s for the engine to reconcile the bucket …"
   sleep "$RECONCILE_SECONDS"
 
   ENTRY="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
-  EXISTING="$(current_script_languages "$DSN")"
+  EXISTING="$(current_script_languages "$DSN")" \
+    || die "cannot read the current SCRIPT_LANGUAGES value; refusing to register"
   SCRIPT_LANGUAGES="$(script_languages_with_rust_entry "$EXISTING" "$ENTRY")"
 
   echo "==> Registering RUST at ${HOST}:${PORT} (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"

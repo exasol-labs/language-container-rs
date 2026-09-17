@@ -715,7 +715,8 @@ cargo exasol-udf build
 
 # Upload to BucketFS, then register. Transport depends on the target:
 #   * normal cluster / SaaS — the BucketFS HTTP API or your admin tooling
-#   * Exasol Personal       — no HTTP endpoint; copy over SSH (see note below)
+#   * Exasol Personal       — no HTTP endpoint; copy into its BucketFS directory
+#                             (see the note below)
 ```
 
 ```sql
@@ -729,7 +730,7 @@ RETURNS BIGINT AS
 
 The SQL script name must match the UDF's exported entry point. A plain `fn run` exports `__exa_udf_entry_RUN`, so it registers as `... SCRIPT run ...`; `#[exasol_udf(name = "SCALAR_DOUBLE")]` sets the name explicitly (the example above assumes an entry named `SCALAR_DOUBLE`). A mismatch fails at query time with `no entry point found for script '<NAME>'`.
 
-On **Exasol Personal** there is no BucketFS HTTP endpoint, so the upload step above does not apply. Copy the `.so` into the deployment VM over SSH — the same transport the SLC install uses — as described in [Deploying a UDF `.so` on Personal](installation.md#exasol-personal-install).
+On **Exasol Personal** there is no BucketFS HTTP endpoint, so the upload step above does not apply. Copy the `.so` into the deployment's BucketFS directory by the same mechanism the SLC install uses — over SSH into the VM, or into the host directory the deployment shares into it — as described in [Deploying a UDF `.so` on Personal](installation.md#exasol-personal-install).
 
 ## 14. Unit testing
 

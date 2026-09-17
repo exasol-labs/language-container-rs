@@ -7,7 +7,7 @@ There are three ways to get the `RUST` script language registered in an Exasol d
 | Path | When to use |
 |------|-------------|
 | [Automated](#automated-install-scriptsinstallsh) | `exapump` has direct network access to both BucketFS and the DB SQL port (e.g. a local Docker-db). One command does everything. |
-| [Exasol Personal](#exasol-personal-install) | An Exasol Personal deployment. It publishes no BucketFS endpoint at all, so the container travels over SSH into the VM's BucketFS directory instead of being uploaded. |
+| [Exasol Personal](#exasol-personal-install) | An Exasol Personal deployment. It publishes no BucketFS endpoint at all, so the container is placed in the BucketFS directory the engine reconciles from the filesystem instead of being uploaded. |
 | [Manual](#manual-install) | No `exapump`/BucketFS network access — e.g. Exasol SaaS, or any hosted platform that only exposes a BucketFS upload UI or REST API. Every step is a `curl`/SQL command or a UI action, no Docker or Rust toolchain required. |
 
 ## Release assets
@@ -59,14 +59,20 @@ defaults to `127.0.0.1` (`connection.host` in `deployment.json`) at a
 port assigned per deployment (`connection.dbPort`, defaulting to `8563`
 when absent) — there is no BucketFS HTTP endpoint to
 upload to, so the [automated path](#automated-install-scriptsinstallsh)
-dead-ends at its upload step. Personal's engine reconciles BucketFS from the VM
-filesystem instead: extracting the container into
-`/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` on the VM creates a real
-bucket within about a second, visible to UDFs at
-`/buckets/<service>/<bucket>/<slc-name>/`.
+dead-ends at its upload step. Personal's engine reconciles BucketFS from the
+filesystem instead: extracting the container into the deployment's
+`<service>/<bucket>/<slc-name>/` BucketFS directory creates a real bucket within
+about a second, visible to UDFs at `/buckets/<service>/<bucket>/<slc-name>/`.
 
-`scripts/install.sh` switches to this SSH transport when you pass `--deployment`;
-it copies the container over SSH, extracts it, then registers the language:
+Two mechanisms reach that directory, chosen by the deployment directory itself.
+A `deployment.json` carrying `connection.sshPort` plus a readable
+`local/node_access.pem` selects the SSH mechanism, which copies the container
+into the VM's `/var/lib/exa/bucketfs/`; otherwise the container is extracted
+into the host directory the deployment's own BucketFS mapping
+(`local/runtime/vm-shared/exa/bucketfs.conf`) serves. Placement is the only step
+that differs: every option below, and the registration, is the same on both.
+
+`scripts/install.sh` switches to this transport when you pass `--deployment`:
 
 ```bash
 scripts/install.sh --deployment my-db
@@ -80,7 +86,8 @@ SLC_TARBALL=/path/to/lc-rs.tar.gz \
   scripts/install.sh --deployment my-db
 ```
 
-The `--deployment` path needs `jq`, `ssh`/`scp`, `exapump`, and Docker unless
+The `--deployment` path needs `jq`, `exapump`, either `ssh`/`scp` (SSH
+mechanism) or `tar` (shared-directory mechanism), and Docker unless
 `SLC_TARBALL` is set; it resolves the SQL host, port, user, and DB password
 from the deployment descriptor, registers with `ALTER SYSTEM`, and needs no
 BucketFS password. The host defaults to `127.0.0.1`, overridden by the
@@ -103,15 +110,29 @@ reference: `scripts/install.sh --help`.
 
 > **Deploying a UDF `.so` on Personal:** Personal has no BucketFS HTTP endpoint,
 > so `writing-a-udf.md` §13's "upload via the HTTP API" step does not apply. Copy
-> the built `.so` into the VM's BucketFS directory over the same SSH transport the
-> install script uses — the `udf/` prefix maps to `/buckets/<service>/<bucket>/udf/`:
+> the built `.so` into the deployment's BucketFS directory by the mechanism the
+> install uses — the `udf/` prefix maps to `/buckets/<service>/<bucket>/udf/`. On
+> a fresh deployment the bucket holds only the SLC dir, so create `udf/` first.
+>
+> Shared host directory — no SSH inputs published, and no tool beyond `cp`:
+>
+> The path below is the usual one; the authoritative host directory for a given
+> `<service>`/`<bucket>` is the one the deployment's own
+> `local/runtime/vm-shared/exa/bucketfs.conf` names, which is where
+> `scripts/install.sh` reads it from.
+>
+> ```bash
+> bucket=~/.exasol/personal/deployments/<name>/local/runtime/vm-shared/exa/bucketfs/bfsdefault/default
+> mkdir -p "$bucket/udf" && cp libmy_udf.so "$bucket/udf/"
+> ```
+>
+> Over SSH — `connection.sshPort` and `local/node_access.pem` published:
 >
 > ```bash
 > # sshPort is reassigned on every `exasol start`; read it fresh each time.
 > ssh_port="$(jq -r '.connection.sshPort' \
 >   ~/.exasol/personal/deployments/<name>/deployment.json)"
-> # On a fresh deployment the bucket holds only the SLC dir; create udf/ first,
-> # or scp dead-ends with an opaque `dest open ".../udf/": Failure`.
+> # Without the mkdir, scp dead-ends with an opaque `dest open ".../udf/": Failure`.
 > ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 >   -i ~/.exasol/personal/deployments/<name>/local/node_access.pem -p "$ssh_port" \
 >   root@127.0.0.1 'mkdir -p /var/lib/exa/bucketfs/bfsdefault/default/udf'
@@ -125,8 +146,8 @@ reference: `scripts/install.sh --help`.
 
 | Step | What it does, and why |
 |------|-----------------------|
-| Read the connection details | Takes `connection.host`, `connection.username`, `connection.sshPort`, `connection.dbPort`, and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. A descriptor with no `connection.dbPort` is malformed and produces a warning naming the fallback port (`8563`) it registers over instead. |
-| Copy and extract | `scp` over the SSH port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` and confirm `exaudf/exaudfclient` landed executable. |
+| Read the connection details | Takes `connection.host`, `connection.username`, `connection.dbPort`, and — on the SSH mechanism — `connection.sshPort` and the node key from `~/.exasol/personal/deployments/<name>/` on **every** run. `exasol start` reassigns the SSH port, so a remembered one is wrong after the first restart. A descriptor with no `connection.dbPort` is malformed and produces a warning naming the fallback port (`8563`) it registers over instead. |
+| Place the container | SSH mechanism: `scp` over the SSH port, then extract into `/var/lib/exa/bucketfs/<service>/<bucket>/<slc-name>/` in the VM. Shared-directory mechanism: extract into the host directory the deployment's BucketFS mapping serves, printing it first and replacing `<slc-name>/` alone, so your own `udf/` artifacts in the same bucket survive. A `--bfs-service`/`--bucket` pair that mapping does not serve fails instead of writing a directory the engine never reconciles. Both confirm `exaudf/exaudfclient` landed executable. |
 | Register | `ALTER SYSTEM SET SCRIPT_LANGUAGES` over the resolved SQL port (`connection.dbPort`, default `8563`), so the registration survives a restart. The resolved `host:port` is printed before the `ALTER` runs. The current value is read first and the `RUST` entry appended to it, so entries added by `exasol slc install` are preserved. |
 
 Re-running after `exasol stop && exasol start` is the supported way to recover:
@@ -138,13 +159,13 @@ disturbing the others.
 The steps above cover a **local** Personal deployment (a VM on this machine).
 Personal can also run on a cloud backend (`aws`/`azure`/`exoscale`/`stackit`):
 that VM reaches the DB over the network and exposes the ordinary BucketFS HTTP
-endpoint, so the SSH transport above does not apply to it — it uses the same
+endpoint, so the local transport above does not apply to it — it uses the same
 HTTP upload-and-register path as the [automated install](#automated-install-scriptsinstallsh).
 
 `scripts/install.sh --deployment` handles both cases from the same flag: it
 reads `deployment.json`'s `.backend` field in
 `~/.exasol/personal/deployments/<name>/` and picks the transport at runtime —
-`"local"` keeps the SSH path above unchanged; any other value resolves the DB
+`"local"` keeps the local path above unchanged; any other value resolves the DB
 host, port, and user from `deployment.json`'s `.connection` object and the DB
 password from the sibling `secrets.json`'s `.dbPassword`, then uploads over
 HTTP exactly as the automated path does.
