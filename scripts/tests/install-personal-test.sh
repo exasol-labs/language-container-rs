@@ -271,10 +271,6 @@ some unexpected banner" >/dev/null 2>&1
   check "output that is not a list of ALIAS=… entries fails loudly" "1" "$?"
 }
 
-# ALTER SYSTEM replaces the whole parameter, so the value written is only ever
-# as trustworthy as the value read. A read that did not happen must never read
-# as "no languages registered": that would register RUST as the only language
-# on the whole system.
 refuses_to_register_when_the_current_value_cannot_be_read() {
   local stub_dir saved_path
 
@@ -484,9 +480,6 @@ cloud_leaves_scope_untouched() {
 }
 
 # ── shared-directory mechanism fixtures ───────────────────────────────────────
-# A deployment's own BucketFS mapping, in the shape a live local deployment
-# carries: one __builtin__ SLC line and one service/bucket line, each naming the
-# VM-side path that serves it.
 write_bucketfs_mapping() { # write_bucketfs_mapping <dir> [<vm-path> <service> <bucket>]
   local dir="$1" vm_path="${2:-/exa/bucketfs/bfsdefault/default}"
   local service="${3:-bfsdefault}" bucket="${4:-default}"
@@ -515,8 +508,6 @@ reset_bucketfs_globals() {
 rejects_path_unsafe_name_components() {
   local value err names_flag
 
-  # Each of these walks the `rm -rf` destination out of the SLC subtree, or
-  # turns the path into an option for the command that receives it.
   for value in "" "slc/rustslc" "." ".." "-rustslc"; do
     require_path_segment --slc-name "$value" >/dev/null 2>&1
     check "--slc-name [$value] is rejected as a path component" "1" "$?"
@@ -541,7 +532,6 @@ resolves_shared_bucketfs_dir_from_mapping() {
     "$dir/local/runtime/vm-shared/exa/bucketfs/bfsdefault/default" \
     "$(deployment_bucketfs_dir "$dir" bfsdefault default)"
 
-  # The pair is named by the last line, which a mapping file need not terminate.
   printf '/exa/slc __builtin__ slc /exa/slc dDE= P\n/exa/bucketfs/bfsdefault/default bfsdefault default /buckets/bfsdefault/default - P' \
     >"$dir/local/runtime/vm-shared/exa/bucketfs.conf"
   check "an unterminated last mapping line is still read" \
@@ -574,8 +564,6 @@ resolves_shared_bucketfs_dir_from_mapping() {
   fi
   check "the absent-directory error names the resolved host directory" "1" "$names_it"
 
-  # A symlinked bucket directory pointing out of the deployment: only a
-  # physically resolved comparison catches this, a string prefix does not.
   outside="$(mktemp -d)"
   mkdir -p "$outside/escaped"
   write_bucketfs_mapping "$dir" /exa/bucketfs/bfsdefault/escape bfsdefault escape
@@ -594,8 +582,6 @@ extracts_slc_into_shared_bucketfs() {
   dir="$(mktemp -d)"
   write_bucketfs_mapping "$dir"
   bucket="$dir/local/runtime/vm-shared/exa/bucketfs/bfsdefault/default"
-  # An earlier install's leftovers, and an artifact the operator put in the same
-  # bucket outside the SLC tree.
   mkdir -p "$bucket/rustslc" "$bucket/udf"
   : >"$bucket/rustslc/stale-from-an-earlier-install"
   : >"$bucket/udf/libother.so"
@@ -652,8 +638,6 @@ selects_local_mechanism_from_deployment_directory() {
   write_bucketfs_mapping "$dir"
   mkdir -p "$dir/local/runtime/vm-shared/exa/bucketfs/bfsdefault/default"
 
-  # Both mechanisms' inputs are present here: SSH keeps priority, so no
-  # deployment that installs today changes mechanism.
   check "a deployment publishing both SSH inputs selects the SSH mechanism" \
     "ssh" "$(personal_local_mechanism "$dir" bfsdefault default)"
 
@@ -678,8 +662,6 @@ selects_local_mechanism_from_deployment_directory() {
   fi
   check "that failure names the requested pair and the pairs the mapping serves" "1" "$names_it"
 
-  # A host directory the deployment has not created is a normal state, so the
-  # failure names that directory rather than reporting the flags as wrong.
   write_bucketfs_mapping "$dir" /exa/bucketfs/bfsdefault/uncreated bfsdefault uncreated
   err="$(personal_local_mechanism "$dir" bfsdefault uncreated 2>&1 >/dev/null)"
   rc=$?
@@ -717,7 +699,6 @@ local_mechanisms_share_the_registration_inputs() {
   mkdir -p "$ssh_dir/local"
   : >"$ssh_dir/local/node_access.pem"
 
-  # Same connection fields, no SSH inputs: only the placement step differs.
   shared_dir="$(mktemp -d)"
   printf '{"backend":"local","connection":{"host":"127.0.0.1","dbPort":52164,"username":"dbadmin"}}\n' \
     >"$shared_dir/deployment.json"
@@ -730,9 +711,6 @@ local_mechanisms_share_the_registration_inputs() {
   check "the shared-directory fixture selects the shared-directory mechanism" \
     "shared" "$(personal_local_mechanism "$shared_dir" bfsdefault default)"
 
-  # The two mechanisms write into different trees, so what has to agree is where
-  # each tree ends: the <service>/<bucket>/<slc-name> path the one registration
-  # entry names. Both destinations are assembled from those three values alone.
   bucket_path="$BFS_SERVICE/$BUCKET/$SLC_NAME"
   ssh_dest="$VM_BUCKETFS_ROOT/$BFS_SERVICE/$BUCKET/$SLC_NAME"
   shared_dest="$(deployment_bucketfs_dir "$shared_dir" "$BFS_SERVICE" "$BUCKET")/$SLC_NAME"

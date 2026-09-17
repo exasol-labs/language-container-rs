@@ -26,10 +26,8 @@ GLIBC_FLOOR_FILE="$ROOT/crates/cargo-exasol-udf/slc-glibc-floor.txt"
 # every soname from the staged files themselves.
 LIBRARY_SURFACE_FILE="$ROOT/crates/cargo-exasol-udf/slc-library-surface.txt"
 
-# The mount-point directories a UDF's sandbox may bind-mount over or otherwise
-# expect to already exist as a directory (e.g. BucketFS at /buckets, the
-# script's own /scripts). The same committed file drives the Dockerfile
-# staging loop, so this test cannot bless a skeleton the image disagrees with.
+# Mount-point directories a UDF's sandbox may bind-mount over. The same
+# committed file drives the Dockerfile staging loop.
 SANDBOX_SKELETON_FILE="$ROOT/dist/slc-sandbox-skeleton.txt"
 
 CLIENT_REL="exaudf/exaudfclient"

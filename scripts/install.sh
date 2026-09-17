@@ -11,11 +11,10 @@
 #     deployment.json .backend field:
 #       - "local": Personal publishes only the SQL port from its VM and exposes
 #         no BucketFS HTTP endpoint, so the tarball is placed where the engine
-#         reconciles a real bucket from the filesystem. Two mechanisms reach
-#         that place, chosen by what the deployment directory publishes: over
-#         SSH into the VM, or by extracting into the host directory the
-#         deployment shares into its VM. The SSH port is reassigned on every
-#         `exasol start`, so re-running after `exasol stop && exasol start`
+#         reconciles a real bucket from the filesystem, either over SSH into
+#         the VM or by extracting into the deployment's shared host directory,
+#         chosen by what the deployment directory publishes. The SSH port is
+#         reassigned on every `exasol start`, so re-running after `exasol stop && exasol start`
 #         picks it up. The SQL port is assigned per deployment via
 #         `exasol config set --ports db:<port>`, so it is read fresh from
 #         connection.dbPort rather than hardcoded — a hardcoded value would
@@ -39,16 +38,10 @@ DEPLOYMENT_DESCRIPTOR="deployment.json"
 SECRETS_DESCRIPTOR="secrets.json"
 NODE_KEY_RELATIVE_PATH="local/node_access.pem"
 VM_BUCKETFS_ROOT="/var/lib/exa/bucketfs"
-# The host directory a local deployment shares into its VM, and the deployment's
-# own declaration of which VM-side path under it serves each BucketFS bucket.
 VM_SHARED_RELATIVE_PATH="local/runtime/vm-shared"
 BUCKETFS_MAPPING_RELATIVE_PATH="$VM_SHARED_RELATIVE_PATH/exa/bucketfs.conf"
-# deployment_bucketfs_dir failure statuses. BUCKETFS_MAPPING_ABSENT is the only
-# one the caller branches on: it means neither local mechanism applies, so the
-# caller writes its own combined message instead of passing this one on.
-# BUCKETFS_PAIR_UNSERVED and status 1 stay distinct from it so that
-# deployment_bucketfs_dir names each of those failures itself and the caller
-# re-emits its message unchanged.
+# deployment_bucketfs_dir exit statuses; only BUCKETFS_MAPPING_ABSENT is
+# branched on by name (see personal_local_mechanism).
 BUCKETFS_MAPPING_ABSENT=2
 BUCKETFS_PAIR_UNSERVED=3
 SCRIPT_LANGUAGES_COLUMN="CURRENT_SCRIPT_LANGUAGES"
@@ -182,14 +175,8 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found on PATH"
 }
 
-# Accept only a single path segment for a value the install interpolates into
-# the BucketFS path it removes with `rm -rf`. A component carrying `/` or `..`
-# walks that removal out of the SLC subtree and into the deployment's own data;
-# `.` removes the bucket directory's contents rather than the SLC; a leading `-`
-# turns the value into an option for whichever command receives the path.
-#
-# Returns 1 (never exits), like the other validators, so the sourced unit
-# harness drives it in-process.
+# A `/`, `.`, `..` or leading `-` here would widen or redirect the `rm -rf`
+# this value is later interpolated into.
 require_path_segment() {
   local flag="$1" value="$2"
 
@@ -226,21 +213,8 @@ deployment_key_path() {
 }
 
 # ── Personal: shared host directory the deployment mounts into its VM ─────────
-# Print the host directory that serves <service>/<bucket>, read from the
-# deployment's own BucketFS mapping. Each mapping line names a VM-side path, the
-# service and the bucket it serves; joining that path to the shared directory
-# yields the host side of the same bucket.
-#
-# The deployment declares this. Rebuilding the layout from a hard-coded path
-# here would be a second copy of that declaration, and a service/bucket pair the
-# deployment does not serve would become a directory the engine never
-# reconciles instead of an error.
-#
-# The three failure statuses are three different operator errors, so the caller
-# can report each one differently: BUCKETFS_MAPPING_ABSENT means the deployment
-# publishes no mapping at all and this mechanism does not apply;
-# BUCKETFS_PAIR_UNSERVED means the mapping is there and the requested pair is
-# wrong; 1 means the pair is served but its host directory is unusable.
+# Prints the host directory serving <service>/<bucket>, read from the
+# deployment's own BucketFS mapping rather than a hard-coded layout.
 deployment_bucketfs_dir() {
   local dir="$1" service="$2" bucket="$3"
   local mapping="$dir/$BUCKETFS_MAPPING_RELATIVE_PATH"
@@ -252,8 +226,7 @@ deployment_bucketfs_dir() {
     return "$BUCKETFS_MAPPING_ABSENT"
   fi
 
-  # `|| [[ -n … ]]`: read reports failure on a last line with no trailing
-  # newline, having already filled the fields, so the loop must still run.
+  # `|| [[ -n ... ]]`: still process a last line with no trailing newline.
   while read -r line_path line_service line_bucket _ || [[ -n "$line_path" ]]; do
     [[ -z "$line_path" ]] && continue
     served="$served $line_service/$line_bucket"
@@ -273,9 +246,7 @@ deployment_bucketfs_dir() {
     return 1
   fi
 
-  # Physically resolved on both sides: a symlinked component leaves a string
-  # prefix on the unresolved join reading as inside the deployment while the
-  # directory it removes from is somewhere else entirely.
+  # Physically resolved: a symlink could otherwise pass this string-prefix check.
   resolved_host="$(cd "$host_dir" && pwd -P)" || return 1
   resolved_dir="$(cd "$dir" && pwd -P)" || return 1
   if [[ "$resolved_host" != "$resolved_dir" && "$resolved_host" != "$resolved_dir"/* ]]; then
@@ -287,10 +258,6 @@ deployment_bucketfs_dir() {
 }
 
 # ── Personal: which local placement mechanism the deployment supports ─────────
-# True only when both inputs the SSH mechanism consumes are present. It reads
-# the port through deployment_ssh_port, so the "read fresh on every run" rule
-# holds here too, and it stays quiet: a deployment that publishes no SSH port is
-# an ordinary shared-directory deployment, not an error.
 deployment_supports_ssh_transport() {
   local dir="$1" key
 
@@ -299,29 +266,13 @@ deployment_supports_ssh_transport() {
   [[ -r "$key" ]]
 }
 
-# Print the placement mechanism a local deployment supports: "ssh" or "shared".
-# The deployment directory decides, from the literal inputs each mechanism
-# consumes. A Personal version string names none of those inputs and drifts from
-# what a deployment actually publishes, so it is never read. The SSH inputs win
-# wherever they are present, so no deployment that installs today changes
-# mechanism.
+# Prints the placement mechanism a local deployment supports: "ssh" or
+# "shared". Reads no Personal version string; the SSH inputs win wherever
+# present, so no deployment that installs today changes mechanism.
 #
-# The sole reader of both predicates, and therefore also the sole place that
-# turns their outcome into an operator-facing error. Each failure gets exactly
-# one line naming what is missing: no mapping at all means neither mechanism
-# applies, so the line names both mechanisms' prerequisites; an unserved pair or
-# an unusable host directory are the mapping's own errors, reported as
-# deployment_bucketfs_dir stated them rather than restated here.
-#
-# Returns 1 (never exits), like the resolver, so the sourced unit harness drives
-# it in-process. The deployment_bucketfs_dir call below deliberately captures
-# that function's stderr and lets the assignment carry its non-zero status, so
-# the status can be inspected and the message held in `err` until the branch
-# decides whether to re-emit it or replace it with the combined one. From an
-# ordinary statement position errexit would abort at that assignment with
-# nothing printed, so main invokes it as
-# `LOCAL_MECHANISM="$(personal_local_mechanism …)" || exit 1`, whose
-# command-substitution context suspends errexit inside.
+# The stderr capture below deliberately carries a non-zero status, so this
+# must be invoked from a command-substitution/condition context (as main
+# does) or errexit aborts before the message is re-emitted.
 personal_local_mechanism() {
   local dir="$1" service="$2" bucket="$3" err rc
 
@@ -493,12 +444,9 @@ csv_unquote() {
   printf '%s\n' "$field"
 }
 
-# Read the current parameter value out of the CSV result of the query below.
-# An unrecognized shape is an error rather than an empty value, and so is an
-# absent one: a result with no data line is what a query that never ran leaves
-# behind, and silently treating that as empty would drop every language the
-# database already has. A parameter that really is empty still arrives as a
-# quoted empty field, which parses as the empty value it is.
+# Reads the current parameter value out of the CSV result below. An absent
+# data line (a query that never ran) is an error, not an empty value — an
+# actually-empty parameter still arrives as a quoted empty field.
 parse_script_languages() {
   local output="$1" candidate line="" value token
   local -a tokens
@@ -545,9 +493,8 @@ script_languages_with_rust_entry() {
   printf '%s\n' "${kept[*]}"
 }
 
-# The query's own status is captured rather than left to errexit: every caller
-# reads this function through a command substitution, which suspends errexit
-# inside, so a failed exapump would otherwise fall through to an empty parse.
+# Status captured explicitly: callers read this via command substitution,
+# which suspends errexit, so a failed exapump would otherwise fall through.
 current_script_languages() {
   local dsn="$1" output
 
@@ -573,27 +520,10 @@ extract_slc_into_bucketfs() {
 }
 
 # ── Personal: extraction into the deployment's shared host directory ──────────
-# Place the SLC by extracting it into the host directory the deployment shares
-# into its VM, leaving the same tree at the same /buckets/<service>/<bucket>/
-# <slc-name>/ path the SSH mechanism writes from inside the VM. It runs the same
-# step sequence as extract_slc_into_bucketfs, so both mechanisms leave the same
-# tree, and it opens no SSH session.
-#
-# Only <slc-name> under the bucket directory is replaced. The bucket directory
-# itself is never removed or recreated: it also carries the operator's own
-# udf/*.so artifacts, which an install must leave alone.
-#
-# Two guards stand before the removal, because the removed path is assembled
-# from three operator-supplied values. --slc-name must be a single path segment,
-# so the name cannot address anything but a child. The assembled destination is
-# then checked back against the bucket directory the mapping resolved: its
-# physically resolved parent must be that directory and its basename must be the
-# name itself, which keeps the check on the exact string `rm -rf` receives
-# rather than on the inputs it was built from.
-#
-# Returns 1 on every failure (never exits), so the sourced unit harness drives it
-# in-process; that harness runs with errexit off, so each step handles its own
-# failure rather than relying on `set -e`.
+# Replaces only <slc-name> under the bucket directory, never the bucket
+# directory itself (it also carries the operator's own udf/*.so artifacts).
+# The destination is checked back against the resolved bucket directory
+# before the `rm -rf`, so it can only ever be a direct child of it.
 extract_slc_into_shared_bucketfs() {
   local dir="$1" tarball="$2"
   local bucket_dir dest resolved_parent resolved_bucket
@@ -644,8 +574,7 @@ done
 
 # ── validation ─────────────────────────────────────────────────────────────────
 # Interpolated into BucketFS paths (an `rm -rf` for both Personal local
-# mechanisms) — a component that is not a single path segment would widen or
-# relocate the destination.
+# mechanisms) — a bad component would widen or relocate the destination.
 require_path_segment --bfs-service "$BFS_SERVICE" || exit 1
 require_path_segment --bucket "$BUCKET"           || exit 1
 require_path_segment --slc-name "$SLC_NAME"       || exit 1
@@ -675,10 +604,8 @@ if [[ -n "$DEPLOYMENT" ]]; then
     || die "cannot determine the deployment backend from $DEPLOYMENT_DIR/$DEPLOYMENT_DESCRIPTOR"
 
   if [[ "$backend" == "local" ]]; then
-    # Personal-local always talks to the VM's local SQL port; ALTER SYSTEM so the
-    # registration survives a restart. Connection resolution, the scope, the
-    # reconciliation wait and the registration are the same on both placement
-    # mechanisms; only where the tarball lands differs.
+    # Personal-local always talks to the VM's local SQL port; ALTER SYSTEM so
+    # the registration survives a restart. Only placement differs by mechanism.
     LOCAL_TRANSPORT=1
     resolve_deployment_connection "$DEPLOYMENT_DIR" "$PERSONAL_DB_HOST_DEFAULT" \
       || die "cannot resolve the local deployment connection from $DEPLOYMENT_DIR"
@@ -690,13 +617,9 @@ if [[ -n "$DEPLOYMENT" ]]; then
       fi
     fi
     SCOPE=SYSTEM
-    # personal_local_mechanism reports its own single-line error, so a second
-    # one from die here would only repeat it.
     LOCAL_MECHANISM="$(personal_local_mechanism "$DEPLOYMENT_DIR" "$BFS_SERVICE" "$BUCKET")" \
       || exit 1
     if [[ "$LOCAL_MECHANISM" == "ssh" ]]; then
-      # Read fresh on every run: the SSH port is reassigned on every
-      # `exasol start`. Both were already proven present by the mechanism check.
       SSH_PORT="$(deployment_ssh_port "$DEPLOYMENT_DIR")"
       NODE_KEY="$(deployment_key_path "$DEPLOYMENT_DIR")"
     fi
@@ -757,8 +680,6 @@ if [[ "$LOCAL_TRANSPORT" -eq 1 ]]; then
   DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
   SLC_PATH="$SLC_NAME"
 
-  # Placement is the only step the two local mechanisms do not share; each one
-  # reports the destination it writes to before it writes.
   if [[ "$LOCAL_MECHANISM" == "ssh" ]]; then
     echo "==> Copying the SLC into ${VM_BUCKETFS_ROOT}/${BFS_SERVICE}/${BUCKET}/${SLC_NAME} (ssh port ${SSH_PORT}) …"
     extract_slc_into_bucketfs "$NODE_KEY" "$SSH_PORT" "$TMP_TAR"

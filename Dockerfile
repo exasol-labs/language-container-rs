@@ -120,11 +120,8 @@ RUN TRIPLET="$(cat /slc-meta/triplet)" && \
 
 RUN mkdir -p /slc/exaudf /slc/build_info
 
-# The staged tree is the UDF's entire root filesystem, so every standard
-# mount-point directory a bind-mount may target (BucketFS at /buckets, the
-# script's own /scripts, /proc, tmpfs under /run and /var/tmp, ...) must
-# already exist. Without it, mounting over a missing path fails outside the
-# sandbox's control and the UDF never starts.
+# Every mount point a UDF sandbox may bind-mount over must already exist, or
+# the mount fails outside the sandbox's control and the UDF never starts.
 COPY dist/slc-sandbox-skeleton.txt /slc-meta/sandbox-skeleton
 RUN while IFS= read -r dir; do \
         if [ -n "$dir" ]; then \
