@@ -12,6 +12,8 @@ The Exasol engine sets `TZ` from the session timezone for every UDF (via `NSEXEC
 
 The SLC is distributed as a flattened root-filesystem tarball that Exasol extracts after BucketFS upload, with the executable at `/exaudf/exaudfclient`. For DNS to work inside the UDF sandbox, the tarball must present `/etc/hosts` and `/etc/resolv.conf` as symlinks into `/conf/`, which the database populates at runtime. These symlinks cannot be baked as live symlinks in the image layers (`COPY` dereferences a dangling symlink into a 0-byte file; `RUN ln -sf` hits Docker's build-time bind-mount of those two paths), so they are created in a staging directory and tarred inside the Docker build itself.
 
+The Exasol UDF sandbox also creates a set of mount points inside the SLC root before the client starts, mirroring the top-level layout every official SLC already carries because it is exported from a full distribution image. When the SLC root is writable, a missing mount point is invisible: the sandbox creates it itself. When the root is mounted read-only, for example on Exasol Personal's custom-SLC install path, a missing mount point instead fails the sandbox setup with `cannot create directories: Read-only file system`, reported to the user as a bare `22002 VM crashed` before any UDF code runs. The staging stage therefore pre-creates the same top-level skeleton an official SLC provides, so the tarball behaves identically on a writable and a read-only mount.
+
 ## Scenarios
 
 ### Scenario: docker build produces the SLC artifact tarball
@@ -85,6 +87,14 @@ The SLC is distributed as a flattened root-filesystem tarball that Exasol extrac
 * *AND* `etc/resolv.conf` MUST be a symbolic-link entry pointing to `/conf/resolv.conf`
 * *AND* producing the tarball MUST NOT require any interpreter or tool outside the Docker build environment (no host `python3`)
 * *AND* the tarball MUST be produced with GNU `tar --hard-dereference`, so no shipped path depends on BucketFS extraction recreating a hard link
+
+### Scenario: Staged tree provides the sandbox directory skeleton
+
+* *GIVEN* the staged `/slc` tree, and that an official SLC (exported from a full distribution image) already carries the top-level directories the UDF sandbox mounts into
+* *WHEN* the staging stage builds the tree
+* *THEN* it MUST pre-create `conf`, `proc`, `sys`, `dev`, `run`, `var/tmp`, `home`, `root`, `media`, `mnt`, `opt`, `srv`, `boot`, and `buckets` as empty directories, matching that official layout
+* *AND* a sandbox mount point missing from the tree MUST NOT surface as `cannot create directories: Read-only file system` and a bare `22002 VM crashed` on a read-only SLC mount
+* *AND* this MUST hold identically whether the SLC root is mounted read-only or writable
 
 ### Scenario: Runtime image bundles the IANA zoneinfo database
 
