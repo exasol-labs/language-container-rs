@@ -34,7 +34,7 @@ The workspace ships three crates for UDF authors, container operators, and build
 
 Two instances need a different path, both covered in [Installation](docs/installation.md):
 
-- **Exasol Personal** — it publishes no BucketFS endpoint, so run `scripts/install.sh --deployment <name>`: it copies the container into the deployment VM's BucketFS directory over SSH (the engine reconciles a bucket from it) and registers the language with `ALTER SYSTEM`, preserving the entries already there.
+- **Exasol Personal** — it publishes no BucketFS endpoint, so run `scripts/install.sh --deployment <name>`: it places the container in the deployment's BucketFS directory — over SSH into the VM, or into the host directory the deployment shares into it, whichever that deployment supports (the engine reconciles a bucket from it) and registers the language with `ALTER SYSTEM`, preserving the entries already there.
 - **No `exapump` reach to BucketFS or the DB** (e.g. Exasol SaaS) — a fully manual path: download the prebuilt release tarball, upload it via a UI/REST API/curl, and hand-run the registration SQL.
 
 ## Quick start
