@@ -3,6 +3,8 @@
 ![language-container-rs logo](assets/logo.svg)
 
 ![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=exasol-labs_language-container-rs&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=exasol-labs_language-container-rs)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=exasol-labs_language-container-rs&metric=coverage)](https://sonarcloud.io/summary/new_code?id=exasol-labs_language-container-rs)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
 ![spec|driven](https://img.shields.io/badge/spec-driven-blueviolet.svg)
 ![Exasol|database](https://img.shields.io/badge/Exasol-database-brightgreen.svg)
