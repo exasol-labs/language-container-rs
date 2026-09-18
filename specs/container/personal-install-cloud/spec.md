@@ -4,7 +4,7 @@ Installs and registers the Rust SLC on a cloud Exasol Personal deployment (`aws`
 
 ## Background
 
-A cloud Personal deployment reaches the database over the network and exposes the BucketFS HTTP endpoint (port `2581`, with the `bfsdefault/default` bucket auto-created), so it is the standard HTTP transport with connection details harvested from the deployment directory rather than typed on the command line. Cloud has no host default: `deployment.json` MUST carry `connection.host` or the operator MUST pass `--host`. Personal provisions no BucketFS read/write password anywhere, so the operator MUST supply `--bfs-password`; that credential is not a connection field, and only the cloud path requires it. After resolving connection details, the cloud path runs the same upload-and-register steps as a non-Personal install with no behavioral change.
+A cloud Personal deployment reaches the database over the network and exposes the BucketFS HTTP endpoint (port `2581`, with the `bfsdefault/default` bucket auto-created), so it is the standard HTTP transport with connection details harvested from the deployment directory rather than typed on the command line. Cloud has no host default: `deployment.json` MUST carry `connection.host` or the operator MUST pass `--host`. Personal provisions no BucketFS read/write password anywhere, so the operator MUST supply `--bfs-password`; that credential is not a connection field, and only the cloud path requires it. After resolving connection details, the cloud path runs the same upload-and-register steps as a non-Personal install. Registration is transport-independent, so `container/personal-install` specifies it for the cloud path too.
 
 ## Scenarios
 
@@ -39,10 +39,10 @@ A cloud Personal deployment reaches the database over the network and exposes th
 * *THEN* it MUST fail with a clear error stating that no DB password resolved
 * *AND* when `--password` is given, the cloud install MUST use it as the DB password and proceed
 
-### Scenario: Cloud install uses the standard HTTP transport and scope
+### Scenario: Cloud install uses the standard HTTP transport
 
 * *GIVEN* a cloud Personal deployment with resolved connection details and `--bfs-password`
 * *WHEN* the cloud install transports and registers the SLC
 * *THEN* it MUST upload the tarball over the BucketFS HTTP API (`exapump bucketfs cp`), exactly as the non-Personal path does
-* *AND* it MUST register with `ALTER <scope>` honoring `--scope`, whose default is `SESSION`
-* *AND* it MUST NOT force `SYSTEM` scope and MUST NOT apply the read-merge-write entry preservation used by the local path
+* *AND* it MUST register exactly as `container/personal-install`'s scenario "Registration is system-scoped and preserves existing entries" requires
+* *AND* it MUST apply no transport-specific registration rule of its own

@@ -14,6 +14,8 @@ A local deployment install uses one of two mechanisms, and both end at the same 
 
 The two mechanisms differ in the placement step alone. Both leave the same SLC tree at the same bucket path. Both then wait for the engine to reconcile the bucket and register the language with the install script's own `ALTER SYSTEM SET SCRIPT_LANGUAGES`. Both therefore resolve the same four connection fields, and every BucketFS placement option applies to both.
 
+Registration is transport-independent. Every transport runs the same read-merge-register step. That step reads the current `SCRIPT_LANGUAGES` value, merges the `RUST` entry into it, and persists the result with `ALTER SYSTEM SET SCRIPT_LANGUAGES`. The install script exposes no scope option, so no invocation registers at `SESSION` scope. Placement of the SLC tree is the only step that differs between transports.
+
 ## Scenarios
 
 ### Scenario: Connection details are read fresh on every run
@@ -41,9 +43,9 @@ The two mechanisms differ in the placement step alone. Both leave the same SLC t
 
 ### Scenario: Registration is system-scoped and preserves existing entries
 
-* *GIVEN* a Personal database that may already have `SCRIPT_LANGUAGES` entries for its built-in languages, and a local deployment on either mechanism
+* *GIVEN* a Personal database that may already have `SCRIPT_LANGUAGES` entries for its built-in languages, and a deployment reached over either local mechanism or over the cloud transport
 * *WHEN* the Personal install registers the `RUST` language
-* *THEN* it MUST use `ALTER SYSTEM SET SCRIPT_LANGUAGES` so the registration survives a restart
+* *THEN* it MUST use `ALTER SYSTEM SET SCRIPT_LANGUAGES`, the only registration statement the install script offers, so the registration survives a restart and no invocation registers at `SESSION` scope
 * *AND* it MUST print the resolved `host:port` it is registering against before issuing the statement, so a wrong target is visible without querying the database
 * *AND* it MUST preserve every pre-existing `SCRIPT_LANGUAGES` entry, adding the `RUST` alias alongside them and replacing an earlier `RUST` entry rather than adding a second one
 * *AND* re-running the install MUST be idempotent across an `exasol stop`/`start` cycle
@@ -57,9 +59,10 @@ The two mechanisms differ in the placement step alone. Both leave the same SLC t
 
 ### Scenario: Registration refuses a SCRIPT_LANGUAGES value it could not read
 
-* *GIVEN* a Personal database against which reading the current `SCRIPT_LANGUAGES` value fails or returns no data line
+* *GIVEN* a Personal database against which reading the current `SCRIPT_LANGUAGES` value fails or returns no data line, over either local mechanism or over the cloud transport
 * *WHEN* the Personal install registers the `RUST` language
 * *THEN* it MUST NOT treat the unreadable value as empty and MUST NOT register `RUST` as the only language
+* *AND* it MUST issue no `ALTER SYSTEM SET SCRIPT_LANGUAGES` statement
 * *AND* it MUST fail the run, naming that the current value could not be read
 
 ### Scenario: Deployment backend selects the transport

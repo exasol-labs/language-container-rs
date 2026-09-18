@@ -271,7 +271,7 @@ some unexpected banner" >/dev/null 2>&1
   check "output that is not a list of ALIAS=… entries fails loudly" "1" "$?"
 }
 
-refuses_to_register_when_the_current_value_cannot_be_read() {
+refuses_to_read_a_current_value_the_query_cannot_supply() {
   local stub_dir saved_path
 
   stub_dir="$(mktemp -d)"
@@ -292,6 +292,129 @@ refuses_to_register_when_the_current_value_cannot_be_read() {
   check "a header-only query result fails the read" "1" "$?"
 }
 
+derives_the_endpoint_without_the_dsn_credentials() {
+  check "the endpoint is the host:port between the credentials and the query" \
+    "127.0.0.1:8563" \
+    "$(dsn_endpoint 'exasol://sys:pw@127.0.0.1:8563?validateservercertificate=0')"
+
+  check "an @ inside the password leaks no part of it into the endpoint" \
+    "db.example:8563" \
+    "$(dsn_endpoint 'exasol://sys:p@ss@db.example:8563?validateservercertificate=0')"
+
+  check "a ? inside the password does not truncate the endpoint back into the credentials" \
+    "db.example:8563" \
+    "$(dsn_endpoint 'exasol://sys:p?ss@db.example:8563?validateservercertificate=0')"
+
+  dsn_endpoint 'exasol://db.example:8563' >/dev/null 2>&1
+  check "a connection string with no credential separator fails instead of echoing itself" \
+    "1" "$?"
+}
+
+registers_by_merging_into_alter_system() {
+  local stub_dir saved_path rc banner
+  local dsn="exasol://sys:s3cr3t-pw@127.0.0.1:8563?validateservercertificate=0"
+
+  stub_dir="$(mktemp -d)"
+  cat >"$stub_dir/exapump" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$stub_dir/calls"
+case "\$*" in
+  *SELECT*)
+    printf 'CURRENT_SCRIPT_LANGUAGES\nPYTHON3=builtin_python3 JAVA=builtin_java\n'
+    ;;
+esac
+EOF
+  chmod +x "$stub_dir/exapump"
+
+  saved_path="$PATH"
+  PATH="$stub_dir:$PATH"
+  HOST="stale.example"
+  PORT=52164
+  banner="$(register_script_languages "$dsn" "$PERSONAL_ENTRY")"
+  rc=$?
+  PATH="$saved_path"
+  reset_connection_globals
+
+  check "register_script_languages succeeds when the read and the alter both work" "0" "$rc"
+  check "the call log holds exactly one merged ALTER SYSTEM statement" "1" \
+    "$(grep -Fc "ALTER SYSTEM SET SCRIPT_LANGUAGES='PYTHON3=builtin_python3 JAVA=builtin_java ${PERSONAL_ENTRY}'" "$stub_dir/calls")"
+  check "the banner names the endpoint the ALTER went to, not the connection globals" "1" \
+    "$(printf '%s\n' "$banner" | grep -Fc 'Registering RUST at 127.0.0.1:8563 ')"
+  check "the banner never echoes the dsn credentials" "0" \
+    "$(printf '%s\n' "$banner" | grep -Ec 'sys:|s3cr3t-pw')"
+
+  rm -rf "$stub_dir"
+}
+
+refuses_to_alter_when_the_current_value_cannot_be_read() {
+  local stub_dir saved_path rc errors
+
+  stub_dir="$(mktemp -d)"
+  cat >"$stub_dir/exapump" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$stub_dir/calls"
+case "\$*" in
+  *SELECT*)
+    echo "exapump: could not connect to host" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$stub_dir/exapump"
+
+  saved_path="$PATH"
+  PATH="$stub_dir:$PATH"
+  errors="$(register_script_languages "exasol://sys:x@127.0.0.1:8563" "$PERSONAL_ENTRY" 2>&1 >/dev/null)"
+  rc=$?
+  PATH="$saved_path"
+
+  check "register_script_languages fails when the current value cannot be read" "1" "$rc"
+  check "the read failure is reported once, not restated by the caller" "1" \
+    "$(printf '%s\n' "$errors" | grep -c '^error:')"
+  check "no ALTER call is issued when the read fails" "0" "$(grep -Fc "ALTER" "$stub_dir/calls")"
+
+  rm -rf "$stub_dir"
+}
+
+fails_when_the_alter_statement_is_rejected() {
+  local stub_dir saved_path rc
+
+  stub_dir="$(mktemp -d)"
+  cat >"$stub_dir/exapump" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$stub_dir/calls"
+case "\$*" in
+  *SELECT*)
+    printf 'CURRENT_SCRIPT_LANGUAGES\nPYTHON3=builtin_python3 JAVA=builtin_java\n'
+    ;;
+  *ALTER*)
+    echo "exapump: rejected ALTER SYSTEM: insufficient privileges" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$stub_dir/exapump"
+
+  saved_path="$PATH"
+  PATH="$stub_dir:$PATH"
+  register_script_languages "exasol://sys:x@127.0.0.1:8563" "$PERSONAL_ENTRY" >/dev/null 2>&1
+  rc=$?
+  PATH="$saved_path"
+
+  check "a rejected ALTER statement fails register_script_languages" "1" "$rc"
+  check "the rejected statement was attempted rather than skipped" "1" \
+    "$(grep -Fc "ALTER SYSTEM SET SCRIPT_LANGUAGES='PYTHON3=builtin_python3 JAVA=builtin_java ${PERSONAL_ENTRY}'" "$stub_dir/calls")"
+
+  rm -rf "$stub_dir"
+}
+
+both_transports_call_the_shared_registration() {
+  check "both transport arms call the shared registration" \
+    "2" "$(declare -f main | grep -c register_script_languages)"
+  check "no arm issues its own registration statement" \
+    "0" "$(declare -f main | grep -c 'SET SCRIPT_LANGUAGES')"
+}
+
 reset_connection_globals() {
   HOST=""
   PORT=8563
@@ -300,7 +423,6 @@ reset_connection_globals() {
   CLI_USER=""
   PASSWORD=""
   BFS_PASSWORD=""
-  SCOPE=SESSION
 }
 
 selects_transport_from_backend() {
@@ -456,25 +578,6 @@ resolves_cloud_defaults_when_connection_fields_absent() {
   check "resolve_deployment_connection succeeds with dbPort/username absent" "0" "$rc"
   check "PORT falls back to 8563 when connection.dbPort is absent" "8563" "$PORT"
   check "USER falls back to sys when connection.username is absent" "sys" "$USER"
-
-  rm -rf "$dir"
-}
-
-cloud_leaves_scope_untouched() {
-  local dir
-
-  dir="$(mktemp -d)"
-  printf '{"backend":"aws","connection":{"host":"h.example","dbPort":8563,"username":"sys"}}\n' \
-    >"$dir/deployment.json"
-  printf '{"dbPassword":"secret"}\n' >"$dir/secrets.json"
-
-  reset_connection_globals
-  resolve_deployment_connection "$dir" '' >/dev/null 2>&1
-
-  # Unlike the local transport, which forces SCOPE=SYSTEM, cloud resolution
-  # MUST NOT touch SCOPE: cloud honors --scope, default SESSION.
-  check "cloud resolution leaves SCOPE at its default (MUST NOT force SYSTEM)" \
-    "SESSION" "$SCOPE"
 
   rm -rf "$dir"
 }
@@ -757,7 +860,12 @@ run cli_host_overrides_local_descriptor
 run resolves_local_host_default_when_absent
 run resolves_local_user_from_descriptor
 run parses_current_script_languages_from_query_output
-run refuses_to_register_when_the_current_value_cannot_be_read
+run refuses_to_read_a_current_value_the_query_cannot_supply
+run derives_the_endpoint_without_the_dsn_credentials
+run registers_by_merging_into_alter_system
+run refuses_to_alter_when_the_current_value_cannot_be_read
+run fails_when_the_alter_statement_is_rejected
+run both_transports_call_the_shared_registration
 run selects_transport_from_backend
 run resolves_cloud_connection_from_descriptor
 run cli_flags_override_cloud_descriptor
@@ -765,7 +873,6 @@ run cloud_requires_operator_bfs_password
 run cloud_requires_host_when_descriptor_omits_it
 run cloud_requires_db_password
 run resolves_cloud_defaults_when_connection_fields_absent
-run cloud_leaves_scope_untouched
 run rejects_path_unsafe_name_components
 run resolves_shared_bucketfs_dir_from_mapping
 run extracts_slc_into_shared_bucketfs

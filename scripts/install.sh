@@ -2,10 +2,12 @@
 # Build the SLC tarball, get it into BucketFS, and register the RUST script
 # language in an Exasol instance.
 #
-# Two transports, selected by whether --deployment is given:
+# Two transports, selected by whether --deployment is given. Both register the
+# same way, through register_script_languages: it merges the RUST entry into the
+# current SCRIPT_LANGUAGES value and writes the result back with ALTER SYSTEM.
 #
 #   * Default (a normal cluster / docker-db / SaaS): upload the tarball over the
-#     BucketFS HTTP API and register with ALTER SESSION|SYSTEM.
+#     BucketFS HTTP API.
 #   * --deployment NAME (Exasol Personal): serves BOTH local and cloud Personal
 #     backends, discriminated at runtime by the deployment directory's
 #     deployment.json .backend field:
@@ -18,8 +20,7 @@
 #         picks it up. The SQL port is assigned per deployment via
 #         `exasol config set --ports db:<port>`, so it is read fresh from
 #         connection.dbPort rather than hardcoded — a hardcoded value would
-#         register against another deployment's database. Registration uses
-#         ALTER SYSTEM and preserves every pre-existing SCRIPT_LANGUAGES entry.
+#         register against another deployment's database.
 #       - any other backend (cloud, e.g. aws/azure/exoscale/stackit): reaches
 #         the DB over the network and exposes the ordinary BucketFS HTTP
 #         endpoint, so it falls through to the normal HTTP transport above,
@@ -66,7 +67,6 @@ BFS_PASSWORD=""
 BUCKET=default
 BFS_SERVICE=bfsdefault
 SLC_NAME=rustslc
-SCOPE=SESSION
 SKIP_BUILD=0
 DEPLOYMENT=""
 SSH_USER=root
@@ -79,6 +79,11 @@ Usage: $(basename "$0") [OPTIONS]
 
 Build the language container image, get it into BucketFS, and register the
 RUST script language in Exasol.
+
+Every transport registers with ALTER SYSTEM SET SCRIPT_LANGUAGES, merging the
+RUST entry into whatever languages are already registered rather than
+replacing the parameter. The --user/--password account needs SELECT on
+EXA_PARAMETERS and the privilege to run ALTER SYSTEM.
 
 Transport is chosen by --deployment:
   * without it — upload over the BucketFS HTTP API (normal cluster / SaaS);
@@ -135,7 +140,6 @@ Options:
       --bucket NAME          BucketFS bucket         (default: default)
       --bfs-service NAME     BucketFS service name   (default: bfsdefault)
       --slc-name NAME        SLC name in BucketFS    (default: rustslc)
-      --scope SESSION|SYSTEM ALTER scope             (default: SESSION; local --deployment forces SYSTEM, cloud --deployment honors --scope)
       --ssh-user USER        VM SSH user             (default: root; local Personal SSH mechanism only)
       --skip-build           Skip docker build; use SLC_TARBALL if set
   -h, --help                 Show this help
@@ -154,9 +158,9 @@ Examples:
   # Docker-db with default credentials:
   $(basename "$0") --host localhost --password exasol --bfs-password secret
 
-  # SaaS / enterprise, persist across sessions:
+  # SaaS / enterprise:
   $(basename "$0") --host my.exasol.cloud --user admin --password s3cr3t \\
-    --bfs-password bfspass --scope SYSTEM
+    --bfs-password bfspass
 
   # Exasol Personal, local backend (DB password resolved from secrets.json):
   $(basename "$0") --deployment my-db
@@ -362,8 +366,8 @@ deployment_db_password() {
 # host default is the only genuinely per-backend part of a connection, so it
 # arrives as an argument — 127.0.0.1 for local, empty for cloud, which has no
 # default and must read a host. Everything that is not a connection field (the
-# local ALTER scope, the missing-dbPort warning, the cloud BucketFS password)
-# stays at the call site, so this function never asks which backend called it.
+# missing-dbPort warning, the cloud BucketFS password) stays at the call site,
+# so this function never asks which backend called it.
 #
 # Returns 1 (never exits) on an unreadable deployment.json or a missing host or
 # password, so the sourced unit harness drives it in-process. main invokes it as
@@ -432,7 +436,7 @@ require_cloud_bfs_password() {
   return 0
 }
 
-# ── Personal: SCRIPT_LANGUAGES value handling ─────────────────────────────────
+# ── SCRIPT_LANGUAGES value handling (every transport) ─────────────────────────
 csv_unquote() {
   local field="$1"
 
@@ -507,6 +511,38 @@ current_script_languages() {
   parse_script_languages "$output"
 }
 
+# The host:port a dsn addresses, safe to print: the dsn carries the DB password
+# in its userinfo, so the credentials are dropped at the *last* `@` before the
+# query is stripped — a password containing `@` or `?` would otherwise leave a
+# fragment of it in the result. A dsn with no `@` has no credential separator to
+# cut at and would come back whole, so it fails instead of being echoed.
+dsn_endpoint() {
+  local dsn="$1" endpoint
+
+  if [[ "$dsn" != *@* ]]; then
+    echo "error: the connection string has no @ separating the credentials from the host" >&2
+    return 1
+  fi
+
+  endpoint="${dsn##*@}"
+  printf '%s\n' "${endpoint%%\?*}"
+}
+
+# Registration is transport-independent: this is the only place that reads,
+# merges, and writes SCRIPT_LANGUAGES. MUST return, never exit — sourced by
+# the unit test harness under set +e.
+register_script_languages() {
+  local dsn="$1" entry="$2"
+  local endpoint existing merged
+
+  endpoint="$(dsn_endpoint "$dsn")" || return 1
+  existing="$(current_script_languages "$dsn")" || return 1
+  merged="$(script_languages_with_rust_entry "$existing" "$entry")"
+
+  echo "==> Registering RUST at ${endpoint} (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"
+  exapump sql "ALTER SYSTEM SET SCRIPT_LANGUAGES='${merged}'" -d "$dsn"
+}
+
 # ── Personal: SSH copy + filesystem BucketFS reconciliation ───────────────────
 extract_slc_into_bucketfs() {
   local key="$1" ssh_port="$2" tarball="$3"
@@ -563,7 +599,6 @@ while [[ $# -gt 0 ]]; do
        --bucket)         BUCKET="$2";      shift 2 ;;
        --bfs-service)    BFS_SERVICE="$2"; shift 2 ;;
        --slc-name)       SLC_NAME="$2";    shift 2 ;;
-       --scope)          SCOPE="$2";       shift 2 ;;
     -D|--deployment)     DEPLOYMENT="$2";  shift 2 ;;
        --ssh-user)       SSH_USER="$2";    shift 2 ;;
        --skip-build)     SKIP_BUILD=1;     shift   ;;
@@ -581,11 +616,11 @@ require_path_segment --slc-name "$SLC_NAME"       || exit 1
 
 # ── transport selection ────────────────────────────────────────────────────────
 # --deployment routes on the descriptor's .backend: "local" keeps the Exasol
-# Personal SSH + filesystem transport (SQL endpoint resolved from the
-# descriptor with a 127.0.0.1 host default, ALTER SYSTEM); any cloud backend
-# resolves the normal HTTP connection details from the deployment directory
-# and falls through to the default upload-and-register path. Without
-# --deployment the default path handles a normal cluster / SaaS.
+# Personal SSH + filesystem transport (SQL endpoint resolved from the descriptor
+# with a 127.0.0.1 host default); any cloud backend resolves the normal HTTP
+# connection details from the deployment directory and falls through to the
+# default upload-and-register path. Without --deployment the default path
+# handles a normal cluster / SaaS.
 LOCAL_TRANSPORT=0
 LOCAL_MECHANISM=""
 DEPLOYMENT_DIR=""
@@ -604,8 +639,8 @@ if [[ -n "$DEPLOYMENT" ]]; then
     || die "cannot determine the deployment backend from $DEPLOYMENT_DIR/$DEPLOYMENT_DESCRIPTOR"
 
   if [[ "$backend" == "local" ]]; then
-    # Personal-local always talks to the VM's local SQL port; ALTER SYSTEM so
-    # the registration survives a restart. Only placement differs by mechanism.
+    # Personal-local always talks to the VM's local SQL port; only placement
+    # differs by mechanism.
     LOCAL_TRANSPORT=1
     resolve_deployment_connection "$DEPLOYMENT_DIR" "$PERSONAL_DB_HOST_DEFAULT" \
       || die "cannot resolve the local deployment connection from $DEPLOYMENT_DIR"
@@ -616,7 +651,6 @@ if [[ -n "$DEPLOYMENT" ]]; then
         echo "warning: no .connection.dbPort in $DEPLOYMENT_DIR/$DEPLOYMENT_DESCRIPTOR; registering over the fallback port $PERSONAL_DB_PORT_DEFAULT risks hitting another local deployment's database" >&2
       fi
     fi
-    SCOPE=SYSTEM
     LOCAL_MECHANISM="$(personal_local_mechanism "$DEPLOYMENT_DIR" "$BFS_SERVICE" "$BUCKET")" \
       || exit 1
     if [[ "$LOCAL_MECHANISM" == "ssh" ]]; then
@@ -636,13 +670,6 @@ else
   [[ -z "$HOST" ]]         && die "--host is required"
   [[ -z "$PASSWORD" ]]     && die "--password is required"
   [[ -z "$BFS_PASSWORD" ]] && die "--bfs-password is required"
-fi
-
-# tr, not ${SCOPE^^}: the local Personal path is macOS-only and macOS ships
-# bash 3.2, which lacks the bash-4 case-modification expansion.
-SCOPE_UPPER="$(printf '%s' "$SCOPE" | tr '[:lower:]' '[:upper:]')"
-if [[ "$SCOPE_UPPER" != "SESSION" && "$SCOPE_UPPER" != "SYSTEM" ]]; then
-  die "--scope must be SESSION or SYSTEM"
 fi
 
 # ── step 1: build (shared) ─────────────────────────────────────────────────────
@@ -690,12 +717,7 @@ if [[ "$LOCAL_TRANSPORT" -eq 1 ]]; then
   sleep "$RECONCILE_SECONDS"
 
   ENTRY="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
-  EXISTING="$(current_script_languages "$DSN")" \
-    || die "cannot read the current SCRIPT_LANGUAGES value; refusing to register"
-  SCRIPT_LANGUAGES="$(script_languages_with_rust_entry "$EXISTING" "$ENTRY")"
-
-  echo "==> Registering RUST at ${HOST}:${PORT} (ALTER SYSTEM SET SCRIPT_LANGUAGES) …"
-  exapump sql "ALTER SYSTEM SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" -d "$DSN"
+  register_script_languages "$DSN" "$ENTRY" || die "cannot register the RUST language"
   echo "==> Done. The RUST script language is now available at /buckets/${BFS_SERVICE}/${BUCKET}/${SLC_NAME}/."
   echo
   echo "    SCRIPT_LANGUAGES entry:"
@@ -714,17 +736,14 @@ else
     --bfs-validate-certificate false
   echo "==> Upload complete."
 
-  SCRIPT_LANGUAGES="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
+  ENTRY="$(script_languages_entry "$BFS_SERVICE" "$BUCKET" "$SLC_PATH")"
   DSN="exasol://${USER}:${PASSWORD}@${HOST}:${PORT}?validateservercertificate=0"
 
-  echo "==> Registering RUST language at ${HOST}:${PORT} (ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES) …"
-  exapump sql \
-    "ALTER ${SCOPE_UPPER} SET SCRIPT_LANGUAGES='${SCRIPT_LANGUAGES}'" \
-    -d "$DSN"
+  register_script_languages "$DSN" "$ENTRY" || die "cannot register the RUST language"
   echo "==> Done. The RUST script language is now available."
   echo
   echo "    SCRIPT_LANGUAGES entry:"
-  echo "    ${SCRIPT_LANGUAGES}"
+  echo "    ${ENTRY}"
 fi
 }
 
