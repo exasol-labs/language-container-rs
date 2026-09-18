@@ -52,6 +52,12 @@ docker exec exasol-db bash -c \
 
 Full option reference: `scripts/install.sh --help`
 
+The install reads the current `SCRIPT_LANGUAGES` value, adds the `RUST` entry
+beside the entries already registered, and persists the result with `ALTER
+SYSTEM`. The account passed to `--user`/`--password` therefore needs `SELECT` on
+`EXA_PARAMETERS` and the privilege to run `ALTER SYSTEM`; if the read fails the
+install aborts without registering rather than replacing the parameter.
+
 ## Exasol Personal install
 
 Exasol Personal publishes only a SQL port from its VM, on a host that
@@ -178,9 +184,9 @@ scripts/install.sh --deployment my-cloud-db --bfs-password <bfs-write-password>
 ```
 
 `--host`, `--port`, `--user`, and `--password` still work as explicit
-overrides of the descriptor-derived values, and `--scope` behaves as it does
-without `--deployment` (default `SESSION`) — the cloud path does not force
-`SYSTEM` the way the local path does. Full option reference:
+overrides of the descriptor-derived values. The cloud path registers with
+`ALTER SYSTEM SET SCRIPT_LANGUAGES` after merging into the current value,
+identically to the local path. Full option reference:
 `scripts/install.sh --help`.
 
 ## Manual install

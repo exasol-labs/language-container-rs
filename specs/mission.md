@@ -19,7 +19,7 @@ exhausting the UDF sandbox.
 | Persona | Goal | Key Workflow |
 |---------|------|--------------|
 | Rust data engineer | Write high-performance UDFs without leaving the Rust ecosystem | Implement the UDF fn, annotate with `#[exasol_udf]`, build a `.so`, upload to BucketFS, register in DB |
-| Exasol DBA / platform engineer | Deploy and register the Rust SLC in a production cluster | Build + upload the container, `ALTER SESSION SET SCRIPT_LANGUAGES`, create scripts |
+| Exasol DBA / platform engineer | Deploy and register the Rust SLC in a production cluster | Build + upload the container, `ALTER SYSTEM SET SCRIPT_LANGUAGES`, create scripts |
 | Exasol SDK maintainer | Extend or debug the SLC implementation itself | Run unit tests + integration tests against a local Exasol Docker container |
 
 ## Core Capabilities
@@ -28,7 +28,7 @@ exhausting the UDF sandbox.
 2. **Ergonomic Rust UDF SDK** — the `UdfRun` / `UdfContext` traits plus the `#[exasol_udf]` proc macro give typed column access and optional connect-back, with rows surfaced as the SDK's own `Value` type.
 3. **Precompiled execution model** — build a single `.so` (a glibc-dynamic cdylib) with `cargo exasol-udf build`, upload to BucketFS, load via a `%udf_object` directive in `CREATE SCRIPT`.
 4. **ABI-safe dynamic loading** — `abi_version` + `sdk_fingerprint` checks at load time turn a toolchain mismatch into a clear error instead of UB.
-5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SESSION SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step. The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) alongside the runtime.
+5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SYSTEM SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step. The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) alongside the runtime.
 6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the `.so` (`build`), and validates the ABI of a built artifact (`validate`).
 7. **Live diagnostics** — a `%udf_debug_level` script directive tunes runtime tracing verbosity, exposes an SDK `log` surface for UDF-authored lines, and reports memory/emit-buffer telemetry at debug level, all carried over Exasol's `SET SESSION SCRIPT OUTPUT ADDRESS` stderr redirect.
 
@@ -40,7 +40,7 @@ exhausting the UDF sandbox.
 
 | Term | Definition |
 |------|------------|
-| SLC | Script Language Container — a Docker image that provides a language runtime for Exasol UDFs, registered via `ALTER SESSION SET SCRIPT_LANGUAGES` |
+| SLC | Script Language Container — a Docker image that provides a language runtime for Exasol UDFs, registered with a `SET SCRIPT_LANGUAGES` statement at `ALTER SESSION` or `ALTER SYSTEM` scope |
 | UDF | User-Defined Function — a function defined in a script body and executed by the Exasol query engine |
 | `localzmq+protobuf` | The IPC wire protocol between the DB and an SLC: the client opens a ZeroMQ REQ socket to the DB's REP socket, protobuf-framed messages, one frame per message |
 | BucketFS | Exasol's distributed file system; the standard location for uploading precompiled `.so` artifacts |
