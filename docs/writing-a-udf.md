@@ -180,7 +180,7 @@ Every UDF receives `&mut dyn UdfContext`. The four core operations are:
 | `ctx.next()` | Advances to the next input row of a SET group, spanning `MT_NEXT` batches; returns `false` at the group boundary. Valid only for SET input — the host returns `Err` if a SCALAR UDF calls it |
 | `ctx.set_return(value)` | Sets the invocation's single RETURNS output value. The `#[exasol_udf]` macro calls this for you from the function's `Ok(Some(v))` / `Ok(None)` return; you never call it directly |
 
-| `ctx.num_columns()` | Number of input columns |
+| `ctx.input_column_count()` | Number of input columns |
 | `ctx.input_column(i)` / `ctx.output_column(i)` | `&ColumnInfo` for input/output column `i`: `name`, `typ`, `type_name`, `size`, `precision`, `scale`, exactly as the database declared it. `ctx.output_column_count()` gives the output width |
 
 `next()` is for SET UDFs only — call it before the first `get()` on each row; it walks every row of the group across all `MT_NEXT` batches transparently. SCALAR UDFs start with the single input row already loaded and must not call `next()`. See §6 for the full RETURNS/EMITS × SCALAR/SET matrix.
@@ -331,6 +331,8 @@ A UDF's dispatch shape is a product of two independent axes: how many input rows
 A script registered with dynamic output columns — a literal `EMITS (...)` in `CREATE SCRIPT` — must name them at the call site, as in `SELECT emit_k(k) EMITS (idx BIGINT) FROM t`. The macro publishes no default output columns, so the database rejects a call that omits the clause.
 
 `Ok(Some(v))` sets the RETURNS value for this invocation; `Ok(None)` maps to SQL `NULL`. Calling `ctx.emit` in RETURNS output returns `Err` — the return value is the only output channel. Calling `ctx.next()` in SCALAR input returns `Err` — the framework has already loaded the single row before `run()` starts.
+
+A UDF registered under more than one shape can read both axes as the database declared them: `ctx.input_type()` returns `Option<InputType>` (`Scalar` or `Set`) and `ctx.output_type()` returns `Option<OutputType>` (`Returns` or `Emits`). Both name the shapes written in `CREATE SCRIPT`, not the wire's own vocabulary, and both report `None` on a context that carries no host metadata (a hand-written double, for instance).
 
 ## 7. Scalar RETURNS example
 
@@ -754,7 +756,7 @@ mod tests {
     }
 
     impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
+        fn input_column_count(&self) -> usize {
             self.input.len()
         }
 
@@ -811,7 +813,7 @@ mod tests {
     }
 
     impl UdfContext for TestCtx {
-        fn num_columns(&self) -> usize {
+        fn input_column_count(&self) -> usize {
             self.rows.first().map_or(0, |r| r.len())
         }
 
@@ -849,3 +851,117 @@ mod tests {
 ```
 
 For connect-back UDFs, stub `cluster_ip`, `connection`, and `connect_back` with test implementations that return canned data, or use the integration tests in `crates/it` against a real Docker container.
+
+## 15. IMPORT and EXPORT spec-generation hooks
+
+`IMPORT ... FROM SCRIPT` and `EXPORT ... INTO SCRIPT` let a script decide, at
+statement time, which SQL the database then runs. The database calls your hook
+once with the statement's specification and expects a `SELECT` back:
+
+```sql
+IMPORT INTO staging FROM SCRIPT my_schema.import_gen AT my_conn WITH SHARDS='4';
+EXPORT source INTO SCRIPT my_schema.export_gen AT my_conn WITH SHARDS='4' TRUNCATE;
+```
+
+Wire a hook with the `import_spec(...)` / `export_spec(...)` annotation sections.
+Both name a plain function with the same signature, and both may sit on the same
+`#[exasol_udf]` alongside `vs_adapter(...)`:
+
+```rust
+#[exasol_udf(import_spec(import_sql))]
+pub fn import_gen(_ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
+    Ok(None)
+}
+
+fn import_sql(ctx: &mut dyn UdfContext, json_spec: &str) -> Result<String, UdfError> {
+    let spec = ImportSpec::from_json(json_spec)?;
+    Ok(format!(
+        "SELECT {}.import_worker({}) FROM DUAL",
+        ctx.script_schema(),
+        spec.parameters.len()
+    ))
+}
+```
+
+`ImportSpec` is the typed view the `import` feature ships, covered below. Build
+the statement from the values the worker actually needs and never from
+`json_spec` itself: the payload carries the CONNECTION object's password, and
+the database parses, executes and records the SQL you hand back. Any value you
+do place in a generated SQL literal must have its apostrophes doubled
+(`value.replace('\'', "''")`), because a `WITH` value is whatever the
+statement's author typed.
+
+The hook receives a live `UdfContext`, so it reads the same handshake metadata
+the run loop does — `ctx.script_schema()` to qualify the worker script,
+`ctx.node_count()` to size a shard count, `ctx.connection(name)` to resolve
+CONNECTION credentials — while it builds the SQL. Returning `Err` fails the
+statement with your error text. Omitting the annotation leaves the slot
+unwired, and the database raises its own "function not implemented" error.
+
+An `EXPORT` statement discards the generated `SELECT`'s result, so a worker that
+needs to report something back to the client has only the error channel.
+
+### The `json_spec` payload
+
+The specification is a protobuf message, which is not ABI-stable across the
+`.so` boundary, so the hook receives it as JSON: a field-for-field mirror of
+`import_specification_rep` / `export_specification_rep` under the proto field
+names. Every key is always present — an absent `optional` is `null` and a
+`repeated` is `[]` — so the object's key set never varies with what the database
+populated. `parameters` mirrors `key_value_pair` as an ordered array rather than
+a map, because a `WITH` clause may repeat a key. A `type` keeps its proto
+variant name, such as `"PB_DOUBLE"`.
+
+```json
+{
+  "is_subselect": true,
+  "connection_information": { "kind": "password", "address": "…", "user": "…", "password": "…" },
+  "connection_name": null,
+  "subselect_column_specification": [
+    { "name": "AMOUNT", "type": "PB_DOUBLE", "type_name": "DOUBLE",
+      "size": null, "precision": null, "scale": null }
+  ],
+  "parameters": [{ "key": "FILE", "value": "a.csv" }, { "key": "FILE", "value": "b.csv" }]
+}
+```
+
+The EXPORT payload carries `has_truncate`, `has_replace`, `created_by`,
+`source_column_names`, `connection_information`, `connection_name`, and
+`parameters`.
+
+`connection_information` holds the CONNECTION object's password, so never log
+the payload.
+
+### Parsing it: the `import` and `export` features
+
+Two non-default cargo features ship typed views of the payload, one per
+statement, so a UDF that writes one kind of hook compiles no code for the other.
+Each adds `serde` and `serde_json`; a default UDF build takes neither.
+
+```toml
+exasol-udf-sdk = { version = "…", features = ["import"] }   # or ["export"], or both
+```
+
+```rust
+use exasol_udf_sdk::spec::ImportSpec;
+
+fn import_sql(ctx: &mut dyn UdfContext, json_spec: &str) -> Result<String, UdfError> {
+    let spec = ImportSpec::from_json(json_spec)?;
+    let shards = spec
+        .parameters
+        .iter()
+        .find(|p| p.key == "SHARDS")
+        .map_or(1, |p| p.value.parse().unwrap_or(1));
+    Ok(format!(
+        "SELECT {}.import_worker({shards}) FROM DUAL",
+        ctx.script_schema()
+    ))
+}
+```
+
+`ImportSpec::from_json` and `ExportSpec::from_json` return `UdfError::Type` on a
+payload they cannot read, and ignore a JSON field they do not know — so a `.so`
+built against today's SDK keeps parsing a payload a later proto field widened.
+They normalize nothing: `type` stays the proto variant name rather than an
+`ExaType`, because the wire-type mapping has exactly one owner and it is not the
+SDK.

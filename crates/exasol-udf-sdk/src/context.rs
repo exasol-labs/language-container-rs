@@ -1,10 +1,33 @@
 use crate::error::UdfError;
 use crate::value::{ColumnInfo, Decimal, Value};
 
+/// How the database declared the script's input: the `SCALAR` or `SET` keyword
+/// an author writes in `CREATE SCRIPT`.
+///
+/// Named for the SQL an author writes rather than the wire's `PB_EXACTLY_ONCE`
+/// and `PB_MULTIPLE`, so reading the axis back needs no protocol vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputType {
+    /// `SCALAR`: the framework drives one invocation per input row.
+    Scalar,
+    /// `SET`: one invocation reads a whole group through `next()`.
+    Set,
+}
+
+/// How the database declared the script's output: the `RETURNS` or `EMITS`
+/// clause an author writes in `CREATE SCRIPT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputType {
+    /// `RETURNS`: one value per invocation, crossing via `set_return`.
+    Returns,
+    /// `EMITS`: any number of rows per invocation, pushed through `emit`.
+    Emits,
+}
+
 /// Context for a single UDF call — provided by the host, read by the UDF
 pub trait UdfContext {
     /// Number of input columns
-    fn num_columns(&self) -> usize;
+    fn input_column_count(&self) -> usize;
 
     /// Declared metadata of input column `idx`. Errors when the index is out of
     /// range, or reports itself unimplemented on a context without a schema.
@@ -227,6 +250,32 @@ pub trait UdfContext {
         tracing::Level::INFO
     }
 
+    /// Number of input rows the database reported for the batch this context is
+    /// reading. For SET input that is the size of the current group; for SCALAR
+    /// input it is the engine's vector-chunk size, not a whole-input count, so a
+    /// SCALAR UDF must not size a buffer over its entire input from it. The
+    /// value stays constant across every `next()` of one group, including the
+    /// read after `next()` reports exhaustion, because it reports the last batch
+    /// the database sent. Returns `0` on a context that does not override this
+    /// method, the engine's own value for a call with no group defined.
+    fn rows_in_group(&self) -> u64 {
+        0
+    }
+
+    /// The input iteration axis the database declared for this script. Returns
+    /// `None` on a context carrying no host metadata, such as one a unit test
+    /// builds itself.
+    fn input_type(&self) -> Option<InputType> {
+        None
+    }
+
+    /// The output iteration axis the database declared for this script. Returns
+    /// `None` on a context carrying no host metadata, such as one a unit test
+    /// builds itself.
+    fn output_type(&self) -> Option<OutputType> {
+        None
+    }
+
     /// Return the IP address of the cluster node that started this language container.
     /// The IP is parsed from the ZMQ endpoint; no network call is made.
     fn cluster_ip(&self) -> Result<String, UdfError> {
@@ -289,7 +338,16 @@ fn record_batch_to_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u
     Ok(buf)
 }
 
-/// Per-call lifecycle hooks — default implementations return Unimplemented for v1 single-call hooks
+/// The per-call lifecycle surface the `#[exasol_udf]` macro wires into the
+/// `ExaUdfVTable` it emits.
+///
+/// `run` is required: it is the body the database invokes per row or per group.
+/// Every single-call hook — [`UdfRun::virtual_schema_adapter_call`],
+/// [`UdfRun::default_output_columns`], [`UdfRun::generate_sql_for_import_spec`]
+/// and [`UdfRun::generate_sql_for_export_spec`] — defaults to
+/// [`UdfError::Unimplemented`], which leaves the matching vtable slot unwired so
+/// the runtime answers the call with `MT_UNDEFINED_CALL` instead of a failure.
+/// An author therefore implements only the hooks their script needs.
 pub trait UdfRun: Sized {
     fn run(ctx: &mut dyn UdfContext) -> Result<(), UdfError>;
 
@@ -305,6 +363,32 @@ pub trait UdfRun: Sized {
     /// Called once before run() — default: Unimplemented
     fn default_output_columns() -> Result<String, UdfError> {
         Err(UdfError::Unimplemented("default_output_columns".into()))
+    }
+
+    /// Build the `SELECT` an `IMPORT ... FROM SCRIPT` statement runs.
+    /// `json_spec` is the `import_specification_rep` message as JSON; the
+    /// `import` cargo feature parses it into `spec::ImportSpec`.
+    /// Default: Unimplemented.
+    fn generate_sql_for_import_spec(
+        _ctx: &mut dyn UdfContext,
+        _json_spec: &str,
+    ) -> Result<String, UdfError> {
+        Err(UdfError::Unimplemented(
+            "generate_sql_for_import_spec".into(),
+        ))
+    }
+
+    /// Build the `SELECT` an `EXPORT ... INTO SCRIPT` statement runs.
+    /// `json_spec` is the `export_specification_rep` message as JSON; the
+    /// `export` cargo feature parses it into `spec::ExportSpec`.
+    /// Default: Unimplemented.
+    fn generate_sql_for_export_spec(
+        _ctx: &mut dyn UdfContext,
+        _json_spec: &str,
+    ) -> Result<String, UdfError> {
+        Err(UdfError::Unimplemented(
+            "generate_sql_for_export_spec".into(),
+        ))
     }
 }
 

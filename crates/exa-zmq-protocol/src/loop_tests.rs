@@ -354,3 +354,109 @@ fn import_connection_request_passes_script_name() {
     let import = req.import.expect("import field must be set");
     assert_eq!(import.script_name, "MY_SCRIPT");
 }
+
+/// Each single-call function id names its own payload field on
+/// `exascript_single_call_rep`, so the state machine must carry all three
+/// through untouched and leave an unpopulated one as `None`: the dispatcher
+/// tells "the database sent no specification" from "it sent an empty one".
+#[test]
+fn single_call_event_carries_both_specification_messages() {
+    use exa_proto::{
+        ConnectionInformationRep, ExascriptSingleCallRep, ExportSpecificationRep,
+        ImportSpecificationRep, KeyValuePair, SingleCallFunctionId,
+    };
+
+    let mut proto = Protocol::new();
+    let mut info_resp = response(MessageType::MtInfo);
+    info_resp.info = Some(info());
+    proto.step(info_resp).unwrap();
+    let mut meta_resp = response(MessageType::MtMeta);
+    meta_resp.meta = Some(ExascriptMetadata {
+        single_call_mode: true,
+        ..scalar_meta()
+    });
+    proto.step(meta_resp).unwrap();
+
+    let import = ImportSpecificationRep {
+        is_subselect: true,
+        connection_information: Some(ConnectionInformationRep {
+            kind: "password".into(),
+            address: "10.0.0.5:8563".into(),
+            user: "sys".into(),
+            password: "exasol".into(),
+        }),
+        connection_name: Some("SRC".into()),
+        subselect_column_specification: vec![column("AMOUNT", ColumnType::PbDouble)],
+        parameters: vec![KeyValuePair {
+            key: "FILE".into(),
+            value: "a.csv".into(),
+        }],
+    };
+    let export = ExportSpecificationRep {
+        has_truncate: true,
+        has_replace: false,
+        created_by: Some("CREATE TABLE T (K DECIMAL(18,0))".into()),
+        source_column_names: vec!["T.K".into()],
+        connection_information: None,
+        connection_name: Some("DST".into()),
+        parameters: vec![],
+    };
+
+    let mut call_resp = response(MessageType::MtCall);
+    call_resp.call = Some(ExascriptSingleCallRep {
+        r#fn: SingleCallFunctionId::ScFnGenerateSqlForImportSpec as i32,
+        json_arg: None,
+        import_specification: Some(import.clone()),
+        export_specification: Some(export.clone()),
+    });
+
+    let (ev, act) = proto.step(call_resp).unwrap();
+    assert!(
+        act.is_none(),
+        "MT_CALL asks the host for no follow-up action"
+    );
+    match ev {
+        HostEvent::SingleCall {
+            fn_id,
+            json_arg,
+            import_spec,
+            export_spec,
+        } => {
+            assert_eq!(fn_id, SingleCallFunctionId::ScFnGenerateSqlForImportSpec);
+            assert_eq!(
+                json_arg, None,
+                "an unpopulated json_arg stays None, not an empty string"
+            );
+            assert_eq!(import_spec, Some(import));
+            assert_eq!(export_spec, Some(export));
+        }
+        other => panic!("expected SingleCall event, got {other:?}"),
+    }
+
+    let mut bare_resp = response(MessageType::MtCall);
+    bare_resp.call = Some(ExascriptSingleCallRep {
+        r#fn: SingleCallFunctionId::ScFnVirtualSchemaAdapterCall as i32,
+        json_arg: Some(String::new()),
+        import_specification: None,
+        export_specification: None,
+    });
+
+    let (ev, _) = proto.step(bare_resp).unwrap();
+    match ev {
+        HostEvent::SingleCall {
+            json_arg,
+            import_spec,
+            export_spec,
+            ..
+        } => {
+            assert_eq!(
+                json_arg.as_deref(),
+                Some(""),
+                "an empty json_arg the database did populate stays Some"
+            );
+            assert_eq!(import_spec, None);
+            assert_eq!(export_spec, None);
+        }
+        other => panic!("expected SingleCall event, got {other:?}"),
+    }
+}

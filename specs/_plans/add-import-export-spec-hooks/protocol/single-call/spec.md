@@ -1,0 +1,20 @@
+# Feature: single-call
+
+Dispatches the single-call `SC_FN_*` path — decoding `MT_CALL` into a host event, serializing the host's result back as `MT_RETURN`, and handling the undefined-hook and DB-acknowledgement cases.
+
+## Background
+
+v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_UNDEFINED_CALL`) carrying a `SingleCallFunctionId`, selected when `MT_META` carries `single_call_function_id != SC_FN_NIL`. In single-call mode the DB acknowledges the container's reply by echoing it — `MT_RETURN` for a result, `MT_UNDEFINED_CALL` for a hook the container does not implement; the state machine surfaces these as `HostEvent::SingleCallAck` and `HostEvent::UndefinedCallAck` so the dispatch loop can close the run with `MT_DONE`. The protocol MUST NOT advance to the close sequence on `MT_RETURN` alone — the session ends only on a subsequent `MT_CLEANUP`. In non-single-call mode, `MT_RETURN` in the run phase remains a protocol error.
+
+## Scenarios
+
+<!-- DELTA:CHANGED -->
+### Scenario: Single-call request surfaces a SingleCall host event
+
+* *GIVEN* a `Protocol` driven past the handshake where `MT_META` carried `single_call_function_id != SC_FN_NIL`
+* *WHEN* the database sends an `MT_CALL` response carrying a `single_call_function_id` and its payload
+* *THEN* the state machine MUST emit a `HostEvent::SingleCall` carrying the decoded `SingleCallFn`, the `json_arg` string, the `import_specification` message, and the `export_specification` message, each exactly as the response carried it
+* *AND* an unpopulated payload field MUST surface as `None` rather than as an empty substitute, so the dispatcher can tell "absent" from "empty"
+* *AND* it MUST NOT emit any scalar/set run events (`HostEvent::Next` or `HostEvent::Run`) for that exchange
+* *AND* the state machine MUST remain pure, performing no socket I/O
+<!-- /DELTA:CHANGED -->

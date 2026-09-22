@@ -197,32 +197,58 @@ impl LoadedUdf {
         Some(unsafe { call_ctx_arg_hook("virtual_schema_adapter_call", ctx, json_arg, hook) })
     }
 
-    /// Call the `generate_sql_for_import_spec` single-call hook.
+    /// Whether the `.so` registered `generate_sql_for_import_spec`.
+    ///
+    /// The dispatcher asks before it decodes the specification payload, so an
+    /// `IMPORT` call against a UDF that implements no import hook still answers
+    /// `MT_UNDEFINED_CALL` and lets the database raise its own "function not
+    /// implemented" diagnostic.
+    pub(crate) fn implements_import_spec_hook(&self) -> bool {
+        unsafe { &*self.vtable }
+            .generate_sql_for_import_spec
+            .is_some()
+    }
+
+    /// Whether the `.so` registered `generate_sql_for_export_spec`. See
+    /// [`LoadedUdf::implements_import_spec_hook`].
+    pub(crate) fn implements_export_spec_hook(&self) -> bool {
+        unsafe { &*self.vtable }
+            .generate_sql_for_export_spec
+            .is_some()
+    }
+
+    /// Call the `generate_sql_for_import_spec` single-call hook with the
+    /// serialized specification, threading the host context pointer so the hook
+    /// can qualify the worker script with `ctx.script_schema()` and resolve
+    /// CONNECTION credentials while it builds the SQL.
     ///
     /// # Safety
     ///
-    /// See [`LoadedUdf::call_default_output_columns`].
+    /// See [`LoadedUdf::call_virtual_schema_adapter_call`].
     pub unsafe fn call_generate_sql_for_import_spec(
         &self,
+        ctx: *mut std::ffi::c_void,
         json_spec: &str,
     ) -> Option<Result<String, RuntimeError>> {
         let vtable = unsafe { &*self.vtable };
         let hook = vtable.generate_sql_for_import_spec?;
-        Some(unsafe { call_arg_hook("generate_sql_for_import_spec", json_spec, hook) })
+        Some(unsafe { call_ctx_arg_hook("generate_sql_for_import_spec", ctx, json_spec, hook) })
     }
 
-    /// Call the `generate_sql_for_export_spec` single-call hook.
+    /// Call the `generate_sql_for_export_spec` single-call hook. Same context
+    /// contract as [`LoadedUdf::call_generate_sql_for_import_spec`].
     ///
     /// # Safety
     ///
-    /// See [`LoadedUdf::call_default_output_columns`].
+    /// See [`LoadedUdf::call_virtual_schema_adapter_call`].
     pub unsafe fn call_generate_sql_for_export_spec(
         &self,
+        ctx: *mut std::ffi::c_void,
         json_spec: &str,
     ) -> Option<Result<String, RuntimeError>> {
         let vtable = unsafe { &*self.vtable };
         let hook = vtable.generate_sql_for_export_spec?;
-        Some(unsafe { call_arg_hook("generate_sql_for_export_spec", json_spec, hook) })
+        Some(unsafe { call_ctx_arg_hook("generate_sql_for_export_spec", ctx, json_spec, hook) })
     }
 }
 
@@ -250,27 +276,6 @@ unsafe fn call_noarg_hook(
 ) -> Result<String, RuntimeError> {
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(&mut out) };
-    if rc != 0 {
-        let msg = unsafe { crate::single_call::take_c_string(out) };
-        return Err(RuntimeError::Udf(if msg.is_empty() {
-            format!("single-call hook {name} returned error code {rc}")
-        } else {
-            msg
-        }));
-    }
-    Ok(unsafe { crate::single_call::take_c_string(out) })
-}
-
-/// Drive a single-argument single-call hook over a NUL-terminated JSON string.
-unsafe fn call_arg_hook(
-    name: &str,
-    arg: &str,
-    hook: unsafe extern "C" fn(*const std::ffi::c_char, *mut *mut std::ffi::c_char) -> i32,
-) -> Result<String, RuntimeError> {
-    let c_arg = std::ffi::CString::new(arg)
-        .map_err(|_| RuntimeError::Udf(format!("{name}: argument contains interior NUL")))?;
-    let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
-    let rc = unsafe { hook(c_arg.as_ptr(), &mut out) };
     if rc != 0 {
         let msg = unsafe { crate::single_call::take_c_string(out) };
         return Err(RuntimeError::Udf(if msg.is_empty() {

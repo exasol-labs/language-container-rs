@@ -127,7 +127,7 @@ fn exa_connection_trait_query_and_execute() {
 struct MockCtx;
 
 impl UdfContext for MockCtx {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         0
     }
     fn get(&self, _col: usize) -> Result<&Value, UdfError> {

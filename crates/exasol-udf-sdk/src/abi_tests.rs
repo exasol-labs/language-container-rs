@@ -1,13 +1,6 @@
 use super::*;
 
 #[test]
-fn abi_version_and_vtable_layout() {
-    assert_eq!(EXA_UDF_ABI_VERSION, 9);
-    assert!(std::mem::size_of::<ExaUdfVTable>() > 0);
-    let _ = EXA_SDK_FINGERPRINT;
-}
-
-#[test]
 fn vtable_layout_includes_vs_adapter() {
     // A vtable with all single-call hooks absent and no annotated schema
     // must still be constructible — the new fields are all nullable.
@@ -47,16 +40,19 @@ fn fingerprint_baked_nonempty() {
 }
 
 #[test]
-fn vs_adapter_slot_receives_context_pointer() {
-    // The virtual_schema_adapter_call slot must take a context pointer as its
-    // FIRST argument so the VS adapter can call ctx.connection()/connect_back()
-    // from single-call mode. This test pins the 3-arg ABI: (ctx, json, result).
-    // Declared locally so the test does not pull the `libc` crate, which
-    // would perturb dev-dependency resolution.
+fn spec_slots_take_context_and_abi_version_is_ten() {
+    assert_eq!(EXA_UDF_ABI_VERSION, 10);
+    // Every context-taking single-call slot must take a context pointer as its
+    // FIRST argument so the hook can call ctx.connection()/connect_back() and
+    // read handshake metadata from single-call mode. This pins the 3-arg ABI
+    // `(ctx, json, result)` on all three slots at once, so a slot that regressed
+    // to the 2-arg shape fails to compile here.
+    // `free`/`malloc` are declared locally so the test does not pull the `libc`
+    // crate, which would perturb dev-dependency resolution.
     unsafe extern "C" {
         fn free(ptr: *mut std::ffi::c_void);
     }
-    unsafe extern "C" fn vsa(
+    unsafe extern "C" fn echo_ctx_presence(
         ctx: *mut std::ffi::c_void,
         _json: *const c_char,
         result: *mut *mut c_char,
@@ -64,7 +60,6 @@ fn vs_adapter_slot_receives_context_pointer() {
         unsafe extern "C" {
             fn malloc(size: usize) -> *mut std::ffi::c_void;
         }
-        // Echo whether a non-null context pointer was threaded through.
         let marker = if ctx.is_null() { b"0\0" } else { b"1\0" };
         let buf = unsafe { malloc(marker.len()) } as *mut c_char;
         unsafe {
@@ -86,25 +81,42 @@ fn vs_adapter_slot_receives_context_pointer() {
         run: run_stub,
         destroy: destroy_stub,
         default_output_columns: None,
-        virtual_schema_adapter_call: Some(vsa),
-        generate_sql_for_import_spec: None,
-        generate_sql_for_export_spec: None,
+        virtual_schema_adapter_call: Some(echo_ctx_presence),
+        generate_sql_for_import_spec: Some(echo_ctx_presence),
+        generate_sql_for_export_spec: Some(echo_ctx_presence),
         annotated_input_schema: std::ptr::null(),
         annotated_output_schema: std::ptr::null(),
         output_shape: OutputShape::Returns,
     };
-    let hook = vt.virtual_schema_adapter_call.unwrap();
-    let mut ctx_byte = 0u8;
-    let ctx_ptr = &mut ctx_byte as *mut u8 as *mut std::ffi::c_void;
-    let arg = std::ffi::CString::new("{}").unwrap();
-    let mut out: *mut c_char = std::ptr::null_mut();
-    let rc = unsafe { hook(ctx_ptr, arg.as_ptr(), &mut out) };
-    assert_eq!(rc, 0);
-    let s = unsafe { std::ffi::CStr::from_ptr(out) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { free(out as *mut std::ffi::c_void) };
-    assert_eq!(s, "1", "the context pointer must be threaded to the slot");
+
+    let slots = [
+        (
+            "virtual_schema_adapter_call",
+            vt.virtual_schema_adapter_call,
+        ),
+        (
+            "generate_sql_for_import_spec",
+            vt.generate_sql_for_import_spec,
+        ),
+        (
+            "generate_sql_for_export_spec",
+            vt.generate_sql_for_export_spec,
+        ),
+    ];
+    for (name, slot) in slots {
+        let hook = slot.unwrap();
+        let mut ctx_byte = 0u8;
+        let ctx_ptr = &mut ctx_byte as *mut u8 as *mut std::ffi::c_void;
+        let arg = std::ffi::CString::new("{}").unwrap();
+        let mut out: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe { hook(ctx_ptr, arg.as_ptr(), &mut out) };
+        assert_eq!(rc, 0);
+        let s = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { free(out as *mut std::ffi::c_void) };
+        assert_eq!(s, "1", "{name} must receive the context pointer");
+    }
 }
 
 #[test]

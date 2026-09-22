@@ -1,7 +1,7 @@
 //! Test fixture cdylib that exercises the single-call vtable hooks.
 //!
 //! Unlike the `#[exasol_udf]` macro (which currently leaves all single-call
-//! hooks `None`), this fixture wires `default_output_columns`,
+//! hooks `None` unless annotated), this fixture wires `default_output_columns`,
 //! `virtual_schema_adapter_call`, and `generate_sql_for_import_spec` directly
 //! so the runtime's single-call dispatcher can be tested against a real `.so`
 //! boundary. `generate_sql_for_export_spec` alone is left `None` to verify the
@@ -46,7 +46,7 @@ unsafe extern "C" fn virtual_schema_adapter_call(
     unsafe {
         // Restore the host context via the ABI's double indirection. The runtime
         // builds `ctx` as `&mut (&mut dyn UdfContext) as *mut _ as *mut c_void`
-        // (see `invoke_vs_adapter_call` in exa-udf-runtime/src/single_call.rs and
+        // (see `invoke_ctx_hook` in exa-udf-runtime/src/single_call.rs and
         // the `call_ctx_arg_hook` contract in loader.rs), so we cast back to
         // `*mut &mut dyn UdfContext` and dereference twice.
         let ctx: &mut dyn UdfContext = &mut **(ctx as *mut &mut dyn UdfContext);
@@ -89,19 +89,29 @@ unsafe extern "C" fn virtual_schema_adapter_call(
     }
 }
 
-/// Deliberately fails, echoing the received spec: exercises the runtime's
-/// `ScFnGenerateSqlForImportSpec` arm and its hook-error mapping.
+/// Deliberately fails, echoing the script schema it read off the context and the
+/// specification JSON the dispatcher serialized: exercises the runtime's
+/// `ScFnGenerateSqlForImportSpec` arm, its context threading, and its
+/// hook-error mapping.
 unsafe extern "C" fn generate_sql_for_import_spec(
+    ctx: *mut std::ffi::c_void,
     json_spec: *const c_char,
     result: *mut *mut c_char,
 ) -> i32 {
     unsafe {
+        let ctx: &mut dyn UdfContext = &mut **(ctx as *mut &mut dyn UdfContext);
         let spec = if json_spec.is_null() {
             String::new()
         } else {
             CStr::from_ptr(json_spec).to_string_lossy().into_owned()
         };
-        write_result(&format!("IMPORT_SPEC_HOOK_ERROR arg={spec}"), result);
+        write_result(
+            &format!(
+                "IMPORT_SPEC_HOOK_ERROR schema={} arg={spec}",
+                ctx.script_schema()
+            ),
+            result,
+        );
         1
     }
 }

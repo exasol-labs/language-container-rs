@@ -92,7 +92,9 @@ jobs:
             -p returns-with-emit \
             -p column-meta \
             -p timestamp-precision \
-            -p type-probe
+            -p type-probe \
+            -p import-export-spec \
+            -p rows-in-group
 
       - name: Build IT test binary (compile once)
         run: |

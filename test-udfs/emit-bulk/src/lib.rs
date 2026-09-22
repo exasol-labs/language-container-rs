@@ -26,7 +26,7 @@ pub fn emit_bulk(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
             let n = ctx
                 .get_i64(0)?
                 .ok_or_else(|| UdfError::Type("n must not be NULL".into()))?;
-            let width = if ctx.num_columns() > 1 {
+            let width = if ctx.input_column_count() > 1 {
                 ctx.get_i64(1)?
             } else {
                 None

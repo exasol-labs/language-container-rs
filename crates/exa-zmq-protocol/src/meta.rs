@@ -6,8 +6,9 @@ pub use exasol_udf_sdk::value::{ColumnInfo, ExaType};
 /// RETURNS shape (one row per invocation), `Multiple` the set / EMITS shape
 /// (many rows per invocation). Parsed from the handshake metadata; the run
 /// dispatcher branches on the input axis to drive the UDF per-row or per-group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IterType {
+    #[default]
     ExactlyOnce,
     Multiple,
 }

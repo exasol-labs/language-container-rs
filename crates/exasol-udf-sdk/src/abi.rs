@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout or the signature of a method
 /// reached through it changes.
-pub const EXA_UDF_ABI_VERSION: u32 = 9;
+pub const EXA_UDF_ABI_VERSION: u32 = 10;
 
 /// Compiled output shape of a UDF, stamped into the vtable so the host can
 /// validate it against the DB's `output_iter_type` at load/run time.
@@ -70,14 +70,32 @@ pub struct ExaUdfVTable {
             result: *mut *mut c_char,
         ) -> i32,
     >,
-    /// Single-call hook: generate the SQL for an IMPORT spec. `None` when not
+    /// Single-call hook: generate the SQL an `IMPORT ... FROM SCRIPT` statement
+    /// runs. `ctx` is the same double-indirected `&mut dyn UdfContext` pointer
+    /// the host passes to `run`, so the hook can qualify the worker script with
+    /// `ctx.script_schema()` and resolve CONNECTION credentials during the call;
+    /// it must not be stored beyond the call. `json_spec` is the
+    /// `import_specification_rep` message serialised to JSON, because protobuf
+    /// types are not ABI-stable across the `.so` boundary. `None` when not
     /// implemented.
-    pub generate_sql_for_import_spec:
-        Option<unsafe extern "C" fn(json_spec: *const c_char, result: *mut *mut c_char) -> i32>,
-    /// Single-call hook: generate the SQL for an EXPORT spec. `None` when not
-    /// implemented.
-    pub generate_sql_for_export_spec:
-        Option<unsafe extern "C" fn(json_spec: *const c_char, result: *mut *mut c_char) -> i32>,
+    pub generate_sql_for_import_spec: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            json_spec: *const c_char,
+            result: *mut *mut c_char,
+        ) -> i32,
+    >,
+    /// Single-call hook: generate the SQL an `EXPORT ... INTO SCRIPT` statement
+    /// runs. Same `ctx` contract and JSON payload rationale as
+    /// `generate_sql_for_import_spec`, over `export_specification_rep`. `None`
+    /// when not implemented.
+    pub generate_sql_for_export_spec: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            json_spec: *const c_char,
+            result: *mut *mut c_char,
+        ) -> i32,
+    >,
     /// Null-terminated JSON describing the annotated input schema, or NULL when
     /// the UDF was not annotated with `input(...)`.
     pub annotated_input_schema: *const c_char,

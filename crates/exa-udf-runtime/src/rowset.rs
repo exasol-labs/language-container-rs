@@ -1,7 +1,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use exa_proto::ExascriptTableData;
 use exa_zmq_protocol::{ColumnInfo, ExaType, IterType};
-use exasol_udf_sdk::context::UdfContext;
+use exasol_udf_sdk::context::{InputType, OutputType, UdfContext};
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
 
@@ -12,16 +12,39 @@ fn null_index(row: usize, col: usize, n_cols: usize) -> usize {
     row * n_cols + col
 }
 
+/// Maps the wire's iteration axis onto the SDK's input-axis vocabulary, shared
+/// by `HostContextBridge` and `SingleCallContext` so both report the same
+/// mapping from one declared `IterType`.
+fn input_type_of(iter: IterType) -> InputType {
+    match iter {
+        IterType::ExactlyOnce => InputType::Scalar,
+        IterType::Multiple => InputType::Set,
+    }
+}
+
+/// Maps the wire's iteration axis onto the SDK's output-axis vocabulary, the
+/// output-side counterpart of [`input_type_of`].
+fn output_type_of(iter: IterType) -> OutputType {
+    match iter {
+        IterType::ExactlyOnce => OutputType::Returns,
+        IterType::Multiple => OutputType::Emits,
+    }
+}
+
 /// Materialised input rows from one proto `ExascriptTableData` batch.
 ///
 /// Stored as a dense `rows[row][col]` matrix of `Value` for simplicity and
 /// correctness; the per-type proto blocks are decoded once on construction.
 /// `row_numbers` holds the DB's local row number per row; emitted rows echo it
-/// so the engine can place them beside their input row.
+/// so the engine can place them beside their input row. `rows_in_group` carries
+/// the batch's own group row count through unchanged (a SET group size, or a
+/// SCALAR vector-chunk size), so the host bridge answers `UdfContext::rows_in_group()`
+/// from the current batch without reinterpreting the input shape.
 pub struct InputRowSet {
     rows: Vec<Vec<Value>>,
     row_numbers: Vec<u64>,
     current_row: usize,
+    rows_in_group: u64,
 }
 
 impl InputRowSet {
@@ -109,7 +132,15 @@ impl InputRowSet {
             rows,
             row_numbers,
             current_row: 0,
+            rows_in_group: table.rows_in_group,
         }
+    }
+
+    /// The group row count the database reported for the batch this row set
+    /// was decoded from: the SET group size, or the SCALAR vector-chunk size.
+    /// `0` reports a call with no group defined.
+    pub fn rows_in_group(&self) -> u64 {
+        self.rows_in_group
     }
 
     pub fn len(&self) -> usize {
@@ -1378,11 +1409,12 @@ pub struct HostContextBridge<'a> {
 
 /// Owned snapshot of the handshake metadata the bridge surfaces to UDF code.
 ///
-/// Bundles the `exascript_info` identity/origin fields and the memory limit so
-/// they thread through the bridge constructors as one argument. Strings are
-/// owned (not borrowed) because the corresponding `UdfContext` accessors return
-/// owned `String`/`Option<String>` across the `.so` vtable boundary. Built from
-/// a `&UdfMeta` via `From`; `Default` yields the all-neutral value tests use.
+/// Bundles the `exascript_info` identity/origin fields, the memory limit and the
+/// declared iteration axes so they thread through the bridge constructors as one
+/// argument. Strings are owned (not borrowed) because the corresponding
+/// `UdfContext` accessors return owned `String`/`Option<String>` across the
+/// `.so` vtable boundary. Built from a `&UdfMeta` via `From`; `Default` yields
+/// the all-neutral value tests use.
 #[derive(Debug, Clone, Default)]
 pub struct HandshakeMeta {
     pub session_id: u64,
@@ -1398,6 +1430,8 @@ pub struct HandshakeMeta {
     pub current_user: Option<String>,
     pub current_schema: Option<String>,
     pub scope_user: Option<String>,
+    pub input_iter: IterType,
+    pub output_iter: IterType,
 }
 
 impl From<&exa_zmq_protocol::UdfMeta> for HandshakeMeta {
@@ -1416,6 +1450,8 @@ impl From<&exa_zmq_protocol::UdfMeta> for HandshakeMeta {
             current_user: meta.current_user.clone(),
             current_schema: meta.current_schema.clone(),
             scope_user: meta.scope_user.clone(),
+            input_iter: meta.input_iter(),
+            output_iter: meta.output_iter(),
         }
     }
 }
@@ -1688,7 +1724,7 @@ macro_rules! delegate_connect_back_hooks {
 }
 
 impl UdfContext for HostContextBridge<'_> {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         self.input_cols.len()
     }
 
@@ -1782,6 +1818,18 @@ impl UdfContext for HostContextBridge<'_> {
         }
     }
 
+    fn rows_in_group(&self) -> u64 {
+        self.input.rows_in_group()
+    }
+
+    fn input_type(&self) -> Option<InputType> {
+        Some(input_type_of(self.input_iter))
+    }
+
+    fn output_type(&self) -> Option<OutputType> {
+        Some(output_type_of(self.output_iter))
+    }
+
     delegate_connect_back_hooks!();
 }
 
@@ -1836,7 +1884,7 @@ impl<'a> SingleCallContext<'a> {
 }
 
 impl UdfContext for SingleCallContext<'_> {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         0
     }
 
@@ -1858,6 +1906,14 @@ impl UdfContext for SingleCallContext<'_> {
         Err(UdfError::Unimplemented(
             "single-call mode has no input rows".into(),
         ))
+    }
+
+    fn input_type(&self) -> Option<InputType> {
+        Some(input_type_of(self.handshake.input_iter))
+    }
+
+    fn output_type(&self) -> Option<OutputType> {
+        Some(output_type_of(self.handshake.output_iter))
     }
 
     delegate_connect_back_hooks!();

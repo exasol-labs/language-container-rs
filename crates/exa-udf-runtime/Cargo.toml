@@ -49,6 +49,7 @@ tracing-subscriber = { workspace = true }
 # build and rebuild them. Path resolution: `tests/common/mod.rs`.
 annotated-fixture = { path = "../../test-udfs/annotated-fixture" }
 emit-k = { path = "../../test-udfs/emit-k" }
+import-export-spec = { path = "../../test-udfs/import-export-spec" }
 returns-with-emit = { path = "../../test-udfs/returns-with-emit" }
 scalar-double = { path = "../../test-udfs/scalar-double" }
 scalar-next-illegal = { path = "../../test-udfs/scalar-next-illegal" }

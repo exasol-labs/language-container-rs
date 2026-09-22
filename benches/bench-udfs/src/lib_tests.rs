@@ -32,7 +32,7 @@ impl BatchCapture {
 }
 
 impl UdfContext for BatchCapture {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         self.rows.first().map_or(0, Vec::len)
     }
     fn get(&self, col: usize) -> Result<&Value, UdfError> {

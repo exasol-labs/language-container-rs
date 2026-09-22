@@ -6,9 +6,11 @@
 //! the import/export SQL hooks `None`, so the runtime must reply `MT_RETURN`
 //! for the former and `MT_UNDEFINED_CALL` for the latter.
 
+use exa_proto::exascript_metadata::ColumnDefinition;
 use exa_proto::{
-    ExascriptInfo, ExascriptMetadata, ExascriptResponse, ExascriptSingleCallRep, IterType,
-    MessageType, SingleCallFunctionId,
+    ColumnType, ExascriptInfo, ExascriptMetadata, ExascriptResponse, ExascriptSingleCallRep,
+    ExportSpecificationRep, ImportSpecificationRep, IterType, KeyValuePair, MessageType,
+    SingleCallFunctionId,
 };
 use exa_udf_runtime::Runtime;
 use prost::Message;
@@ -48,16 +50,78 @@ fn call_response(
     resp
 }
 
+/// The two `WITH` parameters every spec-call test sends, duplicated on one key
+/// so the serialized array form is observable in the hook's echo.
+fn parameters() -> Vec<KeyValuePair> {
+    vec![
+        KeyValuePair {
+            key: "FILE".into(),
+            value: "a.csv".into(),
+        },
+        KeyValuePair {
+            key: "FILE".into(),
+            value: "b.csv".into(),
+        },
+    ]
+}
+
+fn import_spec_call(conn: u64, spec: Option<ImportSpecificationRep>) -> ExascriptResponse {
+    let mut resp = response(MessageType::MtCall, conn);
+    resp.call = Some(ExascriptSingleCallRep {
+        r#fn: SingleCallFunctionId::ScFnGenerateSqlForImportSpec as i32,
+        // Deliberately populated: the dispatcher must pass the serialized
+        // specification, never the virtual-schema adapter's payload.
+        json_arg: Some("JSON_ARG_MUST_NOT_REACH_THE_SPEC_HOOK".into()),
+        import_specification: spec,
+        export_specification: None,
+    });
+    resp
+}
+
+fn export_spec_call(conn: u64, spec: Option<ExportSpecificationRep>) -> ExascriptResponse {
+    let mut resp = response(MessageType::MtCall, conn);
+    resp.call = Some(ExascriptSingleCallRep {
+        r#fn: SingleCallFunctionId::ScFnGenerateSqlForExportSpec as i32,
+        json_arg: None,
+        import_specification: None,
+        export_specification: spec,
+    });
+    resp
+}
+
 /// Drive the handshake (MT_CLIENT -> MT_INFO -> MT_META) in single-call mode and
 /// return the bound server socket plus the connection id so each test can
 /// continue replaying the call sequence.
 fn handshake(server: &zmq::Socket, conn_id: u64, source: &str) {
+    handshake_as(server, conn_id, source, ScriptIdentity::default());
+}
+
+/// The `MT_INFO` script identity, defaulting to the one every test that does not
+/// assert on it would otherwise have to spell out.
+struct ScriptIdentity {
+    name: &'static str,
+    schema: &'static str,
+}
+
+impl Default for ScriptIdentity {
+    fn default() -> Self {
+        ScriptIdentity {
+            name: "SINGLE_CALL_UDF",
+            schema: "",
+        }
+    }
+}
+
+/// Handshake under a caller-chosen script identity, for the tests that assert a
+/// hook read its live `MT_META` values rather than the trait defaults.
+fn handshake_as(server: &zmq::Socket, conn_id: u64, source: &str, identity: ScriptIdentity) {
     let req = recv_req(server);
     assert_eq!(req.r#type, MessageType::MtClient as i32);
     let mut info = response(MessageType::MtInfo, conn_id);
     info.info = Some(ExascriptInfo {
         source_code: source.to_string(),
-        script_name: "SINGLE_CALL_UDF".into(),
+        script_name: identity.name.to_string(),
+        script_schema: identity.schema.to_string(),
         ..Default::default()
     });
     send_resp(server, &info);
@@ -201,8 +265,11 @@ fn dispatch_surfaces_adapter_hook_error() {
     );
 }
 
+/// `MT_UNDEFINED_CALL` names the SDK hook an author would implement, not the
+/// protobuf enum variant, so the database's "function not implemented" error
+/// names something actionable.
 #[test]
-fn unimplemented_hook_replies_undefined_call() {
+fn undefined_call_names_the_sdk_hook() {
     let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 13u64;
     let source = format!("%udf_object {}", so.display());
@@ -234,7 +301,7 @@ fn unimplemented_hook_replies_undefined_call() {
         "expected MT_UNDEFINED_CALL for an unregistered hook"
     );
     let undef = req.undefined_call.expect("undefined_call");
-    assert_eq!(undef.remote_fn, "SC_FN_GENERATE_SQL_FOR_EXPORT_SPEC");
+    assert_eq!(undef.remote_fn, "generate_sql_for_export_spec");
     send_resp(&server, &response(MessageType::MtCleanup, conn_id));
 
     let req = recv_req(&server);
@@ -849,11 +916,13 @@ fn unexpected_after_done_request_in_single_call_mode() {
     );
 }
 
+/// The dispatcher must hand the hook the `import_specification` message
+/// serialized to the pinned JSON shape, not the `json_arg` field the
+/// virtual-schema adapter uses. The fixture's hook returns rc=1 echoing the
+/// script schema it read off the context and the payload it received, so one
+/// close message carries both.
 #[test]
-fn import_spec_hook_error_surfaces_as_run_error() {
-    // invoke_hook's ScFnGenerateSqlForImportSpec arm and the Some(Err(e)) arm
-    // of the result-mapping match: the fixture's hook returns rc=1 with the
-    // echoed spec, so the hook error propagates as a run error.
+fn import_spec_call_delivers_serialized_specification() {
     let so = fixture_cdylib_path("single_call_fixture");
     let conn_id = 101u64;
     let source = format!("%udf_object {}", so.display());
@@ -864,16 +933,29 @@ fn import_spec_hook_error_surfaces_as_run_error() {
     server.bind(&endpoint).unwrap();
 
     let client = spawn_runtime(endpoint.clone());
-    handshake(&server, conn_id, &source);
+    handshake_as(
+        &server,
+        conn_id,
+        &source,
+        ScriptIdentity {
+            schema: "IT_RUST",
+            ..Default::default()
+        },
+    );
 
     let req = recv_req(&server);
     assert_eq!(req.r#type, MessageType::MtRun as i32);
     send_resp(
         &server,
-        &call_response(
+        &import_spec_call(
             conn_id,
-            SingleCallFunctionId::ScFnGenerateSqlForImportSpec,
-            Some(r#"{"x":1}"#),
+            Some(ImportSpecificationRep {
+                is_subselect: true,
+                connection_information: None,
+                connection_name: Some("SRC_CONN".into()),
+                subselect_column_specification: vec![],
+                parameters: parameters(),
+            }),
         ),
     );
 
@@ -893,8 +975,21 @@ fn import_spec_hook_error_surfaces_as_run_error() {
         "close carries the UDF error close code: {close_msg:?}"
     );
     assert!(
-        close_msg.contains(r#"IMPORT_SPEC_HOOK_ERROR arg={"x":1}"#),
-        "close echoes the hook's own error text with the spec it received: {close_msg:?}"
+        close_msg.contains("schema=IT_RUST"),
+        "the hook read the live script schema off its SingleCallContext: {close_msg:?}"
+    );
+    assert!(
+        close_msg.contains(r#""connection_name":"SRC_CONN""#)
+            && close_msg.contains(r#""is_subselect":true"#)
+            && close_msg.contains(
+                r#""parameters":[{"key":"FILE","value":"a.csv"},{"key":"FILE","value":"b.csv"}]"#
+            )
+            && close_msg.contains(r#""subselect_column_specification":[]"#),
+        "the hook received the specification serialized to the pinned JSON shape: {close_msg:?}"
+    );
+    assert!(
+        !close_msg.contains("JSON_ARG_MUST_NOT_REACH_THE_SPEC_HOOK"),
+        "the virtual-schema adapter's json_arg must not reach a spec hook: {close_msg:?}"
     );
 
     let result = client.join().expect("client thread panicked");
@@ -903,6 +998,262 @@ fn import_spec_hook_error_surfaces_as_run_error() {
         err.to_string().contains("IMPORT_SPEC_HOOK_ERROR"),
         "runtime error carries the hook's error text: {err}"
     );
+}
+
+/// A registered spec hook whose own specification field is unpopulated is a
+/// malformed exchange: building SQL from an empty payload would silently
+/// produce the wrong statement, so the session closes naming the missing field.
+#[test]
+fn import_spec_call_without_its_specification_closes_the_session() {
+    let so = fixture_cdylib_path("single_call_fixture");
+    let conn_id = 102u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("importspecmissing");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake(&server, conn_id, &source);
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(&server, &import_spec_call(conn_id, None));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "a spec call with no specification message must close the wire"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("F-UDF-CL-RUST-9001") && close_msg.contains("import_specification"),
+        "close carries the prefixed error naming the missing field: {close_msg:?}"
+    );
+    assert!(
+        !close_msg.contains("IMPORT_SPEC_HOOK_ERROR"),
+        "the hook must not run on an empty payload: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    result.expect_err("a missing specification must surface as Err");
+}
+
+/// The export side of the same malformed exchange, against a UDF whose export
+/// slot *is* registered, so the close comes from the missing-specification
+/// guard rather than from the unwired-slot path.
+#[test]
+fn export_spec_call_without_its_specification_closes_the_session() {
+    let so = fixture_cdylib_path("import_export_spec");
+    let conn_id = 105u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("exportspecmissing");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake_as(
+        &server,
+        conn_id,
+        &source,
+        ScriptIdentity {
+            name: "EXPORT_SPEC_GEN",
+            ..Default::default()
+        },
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(&server, &export_spec_call(conn_id, None));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "a spec call with no specification message must close the wire"
+    );
+    let close_msg = req
+        .close
+        .expect("close")
+        .exception_message
+        .expect("exception_message");
+    assert!(
+        close_msg.contains("F-UDF-CL-RUST-9001") && close_msg.contains("export_specification"),
+        "close carries the prefixed error naming the missing field: {close_msg:?}"
+    );
+    assert!(
+        !close_msg.contains("EXPORT_SPEC"),
+        "the hook must not run on an empty payload: {close_msg:?}"
+    );
+
+    let result = client.join().expect("client thread panicked");
+    result.expect_err("a missing specification must surface as Err");
+}
+
+/// The import direction of the serializer/parser contract, end to end: the
+/// runtime's `serialize_import` feeds a fixture that parses the payload with
+/// `ImportSpec::from_json`, so renaming a key on either side fails here.
+#[test]
+fn import_spec_call_parses_through_the_typed_spec() {
+    let so = fixture_cdylib_path("import_export_spec");
+    let conn_id = 106u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("importspectyped");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake_as(
+        &server,
+        conn_id,
+        &source,
+        ScriptIdentity {
+            name: "IMPORT_SPEC_GEN",
+            schema: "IT_RUST",
+        },
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &import_spec_call(
+            conn_id,
+            Some(ImportSpecificationRep {
+                is_subselect: true,
+                connection_information: None,
+                connection_name: Some("SRC_CONN".into()),
+                subselect_column_specification: vec![
+                    ColumnDefinition {
+                        name: "K".into(),
+                        r#type: Some(ColumnType::PbDouble as i32),
+                        type_name: "DOUBLE".into(),
+                        size: None,
+                        precision: None,
+                        scale: None,
+                    },
+                    ColumnDefinition {
+                        name: "LABEL".into(),
+                        r#type: Some(ColumnType::PbString as i32),
+                        type_name: "VARCHAR(20) UTF8".into(),
+                        size: Some(20),
+                        precision: None,
+                        scale: None,
+                    },
+                ],
+                parameters: parameters(),
+            }),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "a successful spec hook replies MT_RETURN"
+    );
+    let sql = req.call_result.expect("call_result").result;
+    assert!(
+        sql.starts_with("SELECT IT_RUST.IMPORT_WORKER("),
+        "the generated SQL qualifies its worker with the live script schema: {sql:?}"
+    );
+    assert!(
+        sql.contains("conn=SRC_CONN")
+            && sql.contains("params=[FILE=a.csv,FILE=b.csv]")
+            && sql.contains("is_subselect=true")
+            && sql.contains("cols=[K,LABEL]"),
+        "the hook parsed every field of the serialized specification: {sql:?}"
+    );
+
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+}
+
+/// The export hook is handed the same `SingleCallContext` the adapter call gets,
+/// so the `SELECT` it builds can qualify its worker with the live
+/// `script_schema()`. The fixture succeeds here, covering the `MT_RETURN` arm
+/// the import-side failure test never reaches.
+#[test]
+fn export_spec_hook_reads_handshake_metadata_from_context() {
+    let so = fixture_cdylib_path("import_export_spec");
+    let conn_id = 104u64;
+    let source = format!("%udf_object {}", so.display());
+    let endpoint = endpoint_for("exportspec");
+
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+
+    let client = spawn_runtime(endpoint.clone());
+    handshake_as(
+        &server,
+        conn_id,
+        &source,
+        ScriptIdentity {
+            name: "EXPORT_SPEC_GEN",
+            schema: "IT_RUST",
+        },
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &export_spec_call(
+            conn_id,
+            Some(ExportSpecificationRep {
+                has_truncate: true,
+                has_replace: false,
+                created_by: None,
+                source_column_names: vec![r#""T"."K""#.into()],
+                connection_information: None,
+                connection_name: Some("DST_CONN".into()),
+                parameters: parameters(),
+            }),
+        ),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtReturn as i32,
+        "a successful spec hook replies MT_RETURN"
+    );
+    let sql = req.call_result.expect("call_result").result;
+    assert!(
+        sql.starts_with("SELECT IT_RUST.EXPORT_WORKER("),
+        "the generated SQL qualifies its worker with the live script schema: {sql:?}"
+    );
+    assert!(
+        sql.contains("conn=DST_CONN")
+            && sql.contains("params=[FILE=a.csv,FILE=b.csv]")
+            && sql.contains("has_truncate=true has_replace=false")
+            && sql.contains(r#"cols=["T"."K"]"#),
+        "the hook parsed every field of the serialized specification: {sql:?}"
+    );
+
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtFinished as i32);
+    send_resp(&server, &response(MessageType::MtFinished, conn_id));
+
+    let result = client.join().expect("client thread panicked");
+    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
 #[test]
@@ -939,6 +1290,11 @@ fn unrecognized_call_fn_id_replies_undefined_call() {
         MessageType::MtUndefinedCall as i32,
         "expected MT_UNDEFINED_CALL for an unrecognized fn id"
     );
+    let undef = req.undefined_call.expect("undefined_call");
+    assert_eq!(
+        undef.remote_fn, "SC_FN_NIL",
+        "the sentinel names no SDK hook, so it keeps the protobuf variant name"
+    );
     send_resp(&server, &response(MessageType::MtCleanup, conn_id));
 
     let req = recv_req(&server);
@@ -951,7 +1307,7 @@ fn unrecognized_call_fn_id_replies_undefined_call() {
 
 #[test]
 fn adapter_hook_success_returns_via_mt_return() {
-    // invoke_vs_adapter_call's success arm (Some(Ok(s))): the runtime replies
+    // invoke_ctx_hook's success arm (Some(Ok(s))): the runtime replies
     // MT_RETURN with the hook's result. Every other adapter test drives the
     // fixture's deliberate-failure default instead.
     let so = fixture_cdylib_path("single_call_fixture");
@@ -1000,7 +1356,7 @@ fn adapter_hook_success_returns_via_mt_return() {
 
 #[test]
 fn vs_adapter_hook_undefined_when_not_registered() {
-    // invoke_vs_adapter_call's None arm: an unset virtual_schema_adapter_call
+    // invoke_ctx_hook's None arm: an unset virtual_schema_adapter_call
     // must reply MT_UNDEFINED_CALL rather than count as an error.
     let so = fixture_cdylib_path("scalar_double");
     let conn_id = 109u64;
@@ -1053,7 +1409,7 @@ fn vs_adapter_hook_undefined_when_not_registered() {
         "expected MT_UNDEFINED_CALL when the hook is unregistered"
     );
     let undef = req.undefined_call.expect("undefined_call");
-    assert_eq!(undef.remote_fn, "SC_FN_VIRTUAL_SCHEMA_ADAPTER_CALL");
+    assert_eq!(undef.remote_fn, "virtual_schema_adapter_call");
     send_resp(&server, &response(MessageType::MtCleanup, conn_id));
 
     let req = recv_req(&server);
@@ -1125,7 +1481,7 @@ fn adapter_connection_probe_close_preserves_db_exception_message() {
 #[cfg(feature = "connect-back")]
 #[test]
 fn adapter_connection_probe_combines_hook_and_recorded_errors() {
-    // invoke_vs_adapter_call's Some(detail) sub-arm: when the hook fails *and*
+    // invoke_ctx_hook's Some(detail) sub-arm: when the hook fails *and*
     // it called ctx.connection(...), the connect-back error recorded on the
     // context is folded into the surfaced message alongside the hook's own.
     let so = fixture_cdylib_path("single_call_fixture");

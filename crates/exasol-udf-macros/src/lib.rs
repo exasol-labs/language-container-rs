@@ -20,7 +20,8 @@ impl Parse for SchemaField {
     }
 }
 
-/// The parsed `input(...)` / `emits(...)` / `vs_adapter(path)` / `name = "..."` annotations.
+/// The parsed `input(...)` / `emits(...)` / `vs_adapter(path)` /
+/// `import_spec(path)` / `export_spec(path)` / `name = "..."` annotations.
 #[derive(Default)]
 struct Annotations {
     input: Option<Vec<SchemaField>>,
@@ -28,6 +29,14 @@ struct Annotations {
     /// Path to a `fn(&mut dyn UdfContext, &str) -> Result<String, UdfError>`
     /// wired into the `virtual_schema_adapter_call` single-call vtable slot.
     vs_adapter: Option<Path>,
+    /// Same signature as `vs_adapter`, wired into the
+    /// `generate_sql_for_import_spec` slot; the `&str` is the IMPORT
+    /// specification as JSON.
+    import_spec: Option<Path>,
+    /// Same signature as `vs_adapter`, wired into the
+    /// `generate_sql_for_export_spec` slot; the `&str` is the EXPORT
+    /// specification as JSON.
+    export_spec: Option<Path>,
     /// Verbatim SQL name override; when absent the SQL name is derived from the
     /// Rust function identifier by uppercasing every ASCII character.
     name: Option<String>,
@@ -69,11 +78,21 @@ impl Parse for Annotations {
                     syn::parenthesized!(content in input);
                     annotations.vs_adapter = Some(content.parse::<Path>()?);
                 }
+                "import_spec" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    annotations.import_spec = Some(content.parse::<Path>()?);
+                }
+                "export_spec" => {
+                    let content;
+                    syn::parenthesized!(content in input);
+                    annotations.export_spec = Some(content.parse::<Path>()?);
+                }
                 other => {
                     return Err(syn::Error::new(
                         section.span(),
                         format!(
-                            "unknown annotation `{other}`, expected `name`, `input`, `emits`, or `vs_adapter`"
+                            "unknown annotation `{other}`, expected `name`, `input`, `emits`, `vs_adapter`, `import_spec`, or `export_spec`"
                         ),
                     ));
                 }
@@ -216,7 +235,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
     // collisions. Same-name annotations still collide at link time (desired).
     let input_schema_ident = format_ident!("__EXA_INPUT_SCHEMA_{udf_name}");
     let output_schema_ident = format_ident!("__EXA_OUTPUT_SCHEMA_{udf_name}");
-    let write_c_string_ident = format_ident!("__exa_write_c_string_{udf_name}");
+    let write_c_string_ident = write_c_string_ident_for(&udf_name);
     let run_shim_ident = format_ident!("__exa_run_shim_{udf_name}");
     let destroy_shim_ident = format_ident!("__exa_destroy_shim_{udf_name}");
     let vtable_ident = format_ident!("__EXA_VTABLE_{udf_name}");
@@ -233,10 +252,20 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             Err(e) => return e.to_compile_error().into(),
         };
 
-    let (vs_adapter_shim, vs_adapter_slot) = build_vs_adapter_tokens(
+    let (vs_adapter_shim, vs_adapter_slot) = build_ctx_hook_tokens(
         annotations.vs_adapter.as_ref(),
-        &write_c_string_ident,
-        &format_ident!("__exa_vs_adapter_shim_{udf_name}"),
+        &udf_name,
+        "virtual_schema_adapter_call",
+    );
+    let (import_spec_shim, import_spec_slot) = build_ctx_hook_tokens(
+        annotations.import_spec.as_ref(),
+        &udf_name,
+        "generate_sql_for_import_spec",
+    );
+    let (export_spec_shim, export_spec_slot) = build_ctx_hook_tokens(
+        annotations.export_spec.as_ref(),
+        &udf_name,
+        "generate_sql_for_export_spec",
     );
 
     // Derive the output shape from the return type. EMITS calls the UDF and lets
@@ -338,6 +367,8 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         unsafe extern "C" fn #destroy_shim_ident() {}
 
         #vs_adapter_shim
+        #import_spec_shim
+        #export_spec_shim
 
         #[used]
         static #vtable_ident: ::exasol_udf_sdk::abi::ExaUdfVTable = ::exasol_udf_sdk::abi::ExaUdfVTable {
@@ -347,8 +378,8 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             destroy: #destroy_shim_ident,
             default_output_columns: ::std::option::Option::None,
             virtual_schema_adapter_call: #vs_adapter_slot,
-            generate_sql_for_import_spec: ::std::option::Option::None,
-            generate_sql_for_export_spec: ::std::option::Option::None,
+            generate_sql_for_import_spec: #import_spec_slot,
+            generate_sql_for_export_spec: #export_spec_slot,
             annotated_input_schema: #input_schema_ptr,
             annotated_output_schema: #output_schema_ptr,
             output_shape: #output_shape_expr,
@@ -363,61 +394,75 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Build the optional `virtual_schema_adapter_call` shim and the vtable slot
-/// expression. When no `vs_adapter` annotation is present, no shim is emitted
-/// and the slot is `None` (so the runtime replies MT_UNDEFINED_CALL, preserving
-/// backward compatibility).
-fn build_vs_adapter_tokens(
-    path: Option<&Path>,
-    write_c_string_ident: &proc_macro2::Ident,
-    vs_adapter_shim_ident: &proc_macro2::Ident,
-) -> (TokenStream2, TokenStream2) {
-    match path {
-        None => (quote! {}, quote! { ::std::option::Option::None }),
-        Some(adapter_fn) => {
-            let shim = quote! {
-                unsafe extern "C" fn #vs_adapter_shim_ident(
-                    ctx_ptr: *mut ::std::ffi::c_void,
-                    json_arg: *const ::std::ffi::c_char,
-                    result: *mut *mut ::std::ffi::c_char,
-                ) -> i32 {
-                    let outcome = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
-                        // SAFETY: double-indirection ABI, identical to the run shim:
-                        // the host passes `&mut (&mut dyn UdfContext)` erased to
-                        // `*mut c_void` and guarantees it outlives this call.
-                        let ctx: &mut &mut dyn ::exasol_udf_sdk::context::UdfContext = unsafe {
-                            &mut *(ctx_ptr as *mut &mut dyn ::exasol_udf_sdk::context::UdfContext)
-                        };
-                        let json = if json_arg.is_null() {
-                            ""
-                        } else {
-                            unsafe { ::std::ffi::CStr::from_ptr(json_arg) }
-                                .to_str()
-                                .unwrap_or("")
-                        };
-                        #adapter_fn(*ctx, json)
-                    }));
+/// The generated helper that hands an owned C string back over the vtable: one
+/// owner of the name, because the run shim and every single-call shim call it.
+fn write_c_string_ident_for(udf_name: &str) -> proc_macro2::Ident {
+    format_ident!("__exa_write_c_string_{udf_name}")
+}
 
-                    match outcome {
-                        ::std::result::Result::Ok(::std::result::Result::Ok(s)) => {
-                            unsafe { #write_c_string_ident(&s, result) };
-                            0
-                        }
-                        ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
-                            unsafe { #write_c_string_ident(&::std::string::ToString::to_string(&e), result) };
-                            1
-                        }
-                        ::std::result::Result::Err(_) => {
-                            unsafe { #write_c_string_ident("virtual_schema_adapter_call panicked", result) };
-                            2
-                        }
-                    }
+/// Build the shim and vtable-slot expression for one context-taking single-call
+/// hook (`virtual_schema_adapter_call`, `generate_sql_for_import_spec`,
+/// `generate_sql_for_export_spec`), all three of which share the
+/// `(ctx, json, result)` ABI and the `fn(&mut dyn UdfContext, &str) ->
+/// Result<String, UdfError>` target signature. When the annotation is absent no
+/// shim is emitted and the slot is `None`, so the runtime replies
+/// MT_UNDEFINED_CALL as it did for a UDF written before the hook existed.
+///
+/// `hook_name` names the shim and the vtable slot in the panic-path message,
+/// which is the only text that tells an operator which of the three hooks
+/// unwound.
+fn build_ctx_hook_tokens(
+    path: Option<&Path>,
+    udf_name: &str,
+    hook_name: &str,
+) -> (TokenStream2, TokenStream2) {
+    let Some(hook_fn) = path else {
+        return (quote! {}, quote! { ::std::option::Option::None });
+    };
+    let shim_ident = format_ident!("__exa_{hook_name}_shim_{udf_name}");
+    let write_c_string_ident = write_c_string_ident_for(udf_name);
+    let panic_message = format!("{hook_name} panicked");
+    let shim = quote! {
+        unsafe extern "C" fn #shim_ident(
+            ctx_ptr: *mut ::std::ffi::c_void,
+            json_arg: *const ::std::ffi::c_char,
+            result: *mut *mut ::std::ffi::c_char,
+        ) -> i32 {
+            let outcome = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                // SAFETY: double-indirection ABI, identical to the run shim:
+                // the host passes `&mut (&mut dyn UdfContext)` erased to
+                // `*mut c_void` and guarantees it outlives this call.
+                let ctx: &mut &mut dyn ::exasol_udf_sdk::context::UdfContext = unsafe {
+                    &mut *(ctx_ptr as *mut &mut dyn ::exasol_udf_sdk::context::UdfContext)
+                };
+                let json = if json_arg.is_null() {
+                    ""
+                } else {
+                    unsafe { ::std::ffi::CStr::from_ptr(json_arg) }
+                        .to_str()
+                        .unwrap_or("")
+                };
+                #hook_fn(*ctx, json)
+            }));
+
+            match outcome {
+                ::std::result::Result::Ok(::std::result::Result::Ok(s)) => {
+                    unsafe { #write_c_string_ident(&s, result) };
+                    0
                 }
-            };
-            let slot = quote! { ::std::option::Option::Some(#vs_adapter_shim_ident) };
-            (shim, slot)
+                ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
+                    unsafe { #write_c_string_ident(&::std::string::ToString::to_string(&e), result) };
+                    1
+                }
+                ::std::result::Result::Err(_) => {
+                    unsafe { #write_c_string_ident(#panic_message, result) };
+                    2
+                }
+            }
         }
-    }
+    };
+    let slot = quote! { ::std::option::Option::Some(#shim_ident) };
+    (shim, slot)
 }
 
 /// Build the optional schema `static` definition and the pointer expression for

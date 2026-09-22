@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 use crate::connect_back::ConnectionObject;
-use crate::context::UdfContext;
+use crate::context::{InputType, OutputType, UdfContext};
 use crate::error::UdfError;
 use crate::value::{ColumnInfo, Value};
 
@@ -52,7 +52,7 @@ pub enum NextPolicy {
 /// Construct it with [`TestContext::scalar`] for a scalar (one row per
 /// invocation) UDF or [`TestContext::set`] for a SET group, then read output
 /// back with [`TestContext::emitted`] and [`TestContext::captured_return`].
-/// `num_columns` follows the supplied row data, so no separate column count can
+/// `input_column_count` follows the supplied row data, so no separate column count can
 /// drift out of step with the rows.
 ///
 /// Two policies replace a knob per behavior: [`EmitPolicy`] and [`NextPolicy`]
@@ -235,6 +235,24 @@ impl TestContext {
         self
     }
 
+    /// Set the input-batch row count this context reports.
+    pub fn with_rows_in_group(mut self, rows: u64) -> Self {
+        self.meta.rows_in_group = rows;
+        self
+    }
+
+    /// Set the declared input iteration axis this context reports.
+    pub fn with_input_type(mut self, input_type: InputType) -> Self {
+        self.meta.input_type = Some(input_type);
+        self
+    }
+
+    /// Set the declared output iteration axis this context reports.
+    pub fn with_output_type(mut self, output_type: OutputType) -> Self {
+        self.meta.output_type = Some(output_type);
+        self
+    }
+
     /// Set the cluster IP this context reports.
     pub fn with_cluster_ip(mut self, ip: impl Into<String>) -> Self {
         self.meta.cluster_ip = Some(ip.into());
@@ -255,7 +273,7 @@ impl TestContext {
 }
 
 impl UdfContext for TestContext {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         self.rows.first().map_or(0, Vec::len)
     }
 
@@ -372,6 +390,18 @@ impl UdfContext for TestContext {
         self.meta.debug_level
     }
 
+    fn rows_in_group(&self) -> u64 {
+        self.meta.rows_in_group
+    }
+
+    fn input_type(&self) -> Option<InputType> {
+        self.meta.input_type
+    }
+
+    fn output_type(&self) -> Option<OutputType> {
+        self.meta.output_type
+    }
+
     fn cluster_ip(&self) -> Result<String, UdfError> {
         self.meta
             .cluster_ip
@@ -406,7 +436,7 @@ impl UdfContext for TestContext {
 pub struct DefaultsCtx;
 
 impl UdfContext for DefaultsCtx {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         0
     }
 
@@ -441,6 +471,9 @@ struct Metadata {
     current_schema: Option<String>,
     scope_user: Option<String>,
     debug_level: tracing::Level,
+    rows_in_group: u64,
+    input_type: Option<InputType>,
+    output_type: Option<OutputType>,
     cluster_ip: Option<String>,
     connections: HashMap<String, ConnectionObject>,
 }
@@ -462,6 +495,9 @@ impl Default for Metadata {
             current_schema: None,
             scope_user: None,
             debug_level: tracing::Level::INFO,
+            rows_in_group: 0,
+            input_type: None,
+            output_type: None,
             cluster_ip: None,
             connections: HashMap::new(),
         }
