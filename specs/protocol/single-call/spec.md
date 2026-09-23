@@ -12,7 +12,8 @@ v2 extends the protocol with the single-call path (`MT_CALL`, `MT_RETURN`, `MT_U
 
 * *GIVEN* a `Protocol` driven past the handshake where `MT_META` carried `single_call_function_id != SC_FN_NIL`
 * *WHEN* the database sends an `MT_CALL` response carrying a `single_call_function_id` and its payload
-* *THEN* the state machine MUST emit a `HostEvent::SingleCall` carrying the decoded `SingleCallFn` and the call arguments
+* *THEN* the state machine MUST emit a `HostEvent::SingleCall` carrying the decoded `SingleCallFn`, the `json_arg` string, the `import_specification` message, and the `export_specification` message, each exactly as the response carried it
+* *AND* an unpopulated payload field MUST surface as `None` rather than as an empty substitute, so the dispatcher can tell "absent" from "empty"
 * *AND* it MUST NOT emit any scalar/set run events (`HostEvent::Next` or `HostEvent::Run`) for that exchange
 * *AND* the state machine MUST remain pure, performing no socket I/O
 

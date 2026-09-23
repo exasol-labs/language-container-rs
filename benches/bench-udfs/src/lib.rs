@@ -285,7 +285,7 @@ fn scalar_params(ctx: &dyn UdfContext) -> Result<(i64, bool, usize), UdfError> {
         .get_i64(0)?
         .ok_or_else(|| UdfError::User("bench-udfs: n is NULL".into()))?;
     let do_emit = ctx.get_i64(1)?.unwrap_or(0) != 0;
-    let chunk = match ctx.num_columns() > 2 {
+    let chunk = match ctx.input_column_count() > 2 {
         true => ctx
             .get_i64(2)?
             .filter(|&b| b > 0)
@@ -349,7 +349,7 @@ fn generate_batches(
 
 fn reemit_rows(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {
-        let row: Vec<Value> = (0..ctx.num_columns())
+        let row: Vec<Value> = (0..ctx.input_column_count())
             .map(|c| ctx.get(c).cloned())
             .collect::<Result<_, _>>()?;
         ctx.emit(row)?;

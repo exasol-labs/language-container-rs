@@ -42,6 +42,8 @@ const RETURNS_WITH_EMIT_LIB: &str = "libreturns_with_emit.so";
 const COLUMN_META_LIB: &str = "libcolumn_meta.so";
 const TS_PREC_LIB: &str = "libtimestamp_precision.so";
 const TYPE_PROBE_LIB: &str = "libtype_probe.so";
+const IMPORT_EXPORT_SPEC_LIB: &str = "libimport_export_spec.so";
+const ROWS_IN_GROUP_LIB: &str = "librows_in_group.so";
 
 /// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
 /// cross-joined five times. Large enough that a scalar input or a single SET
@@ -177,6 +179,15 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let type_probe_path = harness
         .upload_udf(TYPE_PROBE_LIB, read_udf_artifact(TYPE_PROBE_LIB)?)
         .await?;
+    let import_export_spec_path = harness
+        .upload_udf(
+            IMPORT_EXPORT_SPEC_LIB,
+            read_udf_artifact(IMPORT_EXPORT_SPEC_LIB)?,
+        )
+        .await?;
+    let rows_in_group_path = harness
+        .upload_udf(ROWS_IN_GROUP_LIB, read_udf_artifact(ROWS_IN_GROUP_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -212,6 +223,12 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     eprintln!("[it] scenario dynamic_emits_without_columns ok");
     single_call_adapter_surfaces_live_handshake_metadata(&mut conn, &sc_path).await?;
     eprintln!("[it] scenario single_call_adapter_handshake_metadata ok");
+    import_from_script_roundtrip(&mut conn, &import_export_spec_path).await?;
+    eprintln!("[it] scenario import_from_script ok");
+    export_into_script_surfaces_spec(&mut conn, &import_export_spec_path).await?;
+    eprintln!("[it] scenario export_into_script ok");
+    rows_in_group_reports_live_group_size(&mut conn, &rows_in_group_path).await?;
+    eprintln!("[it] scenario rows_in_group ok");
 
     // Identity-metadata scenarios. The baseline runs on the shared connection;
     // the four that follow mutate session state (OPEN SCHEMA, CLOSE SCHEMA,
@@ -3048,5 +3065,178 @@ async fn type_metadata_probe(conn: &mut Connection, udf_object: &str) -> Result<
         }
     }
 
+    Ok(())
+}
+
+/// Scenario: `IMPORT ... FROM SCRIPT` runs the `SELECT` the spec-generation hook
+/// built. Two forms, because no single statement shows both halves: the
+/// target-table form proves the rows reach a table, and the subselect form is
+/// the only one for which the database populates
+/// `subselect_column_specification`. Both go through `IMPORT_WORKER`, whose
+/// variadic `(...)` input list forces it to discover its own schema at runtime.
+async fn import_from_script_roundtrip(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT import_spec_gen(...) RETURNS INT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT import_worker(...) \
+         EMITS (spec VARCHAR(2000), schema_info VARCHAR(2000)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE CONNECTION it_import_conn TO 'a' USER 'b' IDENTIFIED BY 'c'")
+        .await?;
+    conn.execute("DROP TABLE IF EXISTS it_rust.import_spec_target")
+        .await?;
+    conn.execute(
+        "CREATE TABLE it_rust.import_spec_target (spec VARCHAR(2000), schema_info VARCHAR(2000))",
+    )
+    .await?;
+
+    // The schema IMPORT_WORKER must report: the derived table's aliases give
+    // the CAST expressions a stable type but do not reach the variadic
+    // worker's reported column names, so the engine names them positionally.
+    const RUNTIME_SCHEMA: &str = "cols=2 [0:VARCHAR(2000) UTF8,1:DECIMAL(9,0)]";
+
+    conn.execute(
+        "IMPORT INTO it_rust.import_spec_target FROM SCRIPT it_rust.import_spec_gen \
+         AT it_import_conn WITH PARAM_A='alpha' PARAM_B='beta'",
+    )
+    .await?;
+    let inserted = query_single_string(
+        conn,
+        "SELECT spec || ' || ' || schema_info FROM it_rust.import_spec_target",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("IMPORT INTO the target table inserted no row"))?;
+    assert_import_row(
+        &inserted,
+        "IMPORT INTO the target table",
+        &["is_subselect=false cols=[]", RUNTIME_SCHEMA],
+    )?;
+
+    let subselect = query_single_string(
+        conn,
+        "SELECT spec || ' || ' || schema_info FROM (\
+         IMPORT INTO (spec VARCHAR(2000), schema_info VARCHAR(2000)) \
+         FROM SCRIPT it_rust.import_spec_gen AT it_import_conn \
+         WITH PARAM_A='alpha' PARAM_B='beta')",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("IMPORT as a subselect produced no row"))?;
+    assert_import_row(
+        &subselect,
+        "IMPORT as a subselect",
+        &["is_subselect=true cols=[SPEC,SCHEMA_INFO]", RUNTIME_SCHEMA],
+    )
+}
+
+/// The statement's `WITH` parameters are asserted one at a time: the proto
+/// carries them as a repeated field, and this scenario pins what the hook read,
+/// not the order the database chose to send them in.
+fn assert_import_row(row: &str, statement: &str, expected_fragments: &[&str]) -> Result<()> {
+    let always_present = ["conn=IT_IMPORT_CONN", "PARAM_A=alpha", "PARAM_B=beta"];
+    for expected in always_present.iter().chain(expected_fragments) {
+        if !row.contains(expected) {
+            bail!("{statement} produced {row:?}, which does not carry {expected:?}");
+        }
+    }
+    Ok(())
+}
+
+/// Scenario: `EXPORT ... INTO SCRIPT` runs the `SELECT` its hook built. The
+/// statement discards that `SELECT`'s result, so `EXPORT_WORKER` reports the
+/// observed specification over the UDF error channel — and the
+/// `F-UDF-CL-RUST-` prefix is what distinguishes a hook that ran from the
+/// database's own "function not implemented" diagnostic for an unwired slot.
+async fn export_into_script_surfaces_spec(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT export_spec_gen(...) RETURNS INT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT export_worker(summary VARCHAR(2000)) RETURNS INT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE CONNECTION it_export_conn TO 'a' USER 'b' IDENTIFIED BY 'c'")
+        .await?;
+    conn.execute("DROP TABLE IF EXISTS it_rust.export_spec_source")
+        .await?;
+    conn.execute("CREATE TABLE it_rust.export_spec_source (k DECIMAL(18,0), label VARCHAR(20))")
+        .await?;
+    conn.execute("INSERT INTO it_rust.export_spec_source VALUES (1, 'x')")
+        .await?;
+
+    let result = conn
+        .execute(
+            "EXPORT it_rust.export_spec_source INTO SCRIPT it_rust.export_spec_gen \
+             AT it_export_conn WITH SHARDS='4' TRUNCATE",
+        )
+        .await;
+    let msg = match result {
+        Ok(_) => bail!(
+            "EXPORT INTO SCRIPT succeeded — EXPORT_WORKER must fail with the observed \
+             specification in its error text"
+        ),
+        Err(e) => e.to_string(),
+    };
+
+    if !msg.contains("F-UDF-CL-RUST-") {
+        bail!("EXPORT error did not arrive over the UDF error path: {msg:?}");
+    }
+    let expected = "EXPORT_SPEC conn=IT_EXPORT_CONN params=[SHARDS=4] \
+                    has_truncate=true has_replace=false \
+                    cols=[\"EXPORT_SPEC_SOURCE\".\"K\",\"EXPORT_SPEC_SOURCE\".\"LABEL\"]";
+    if !msg.contains(expected) {
+        bail!("EXPORT error did not carry the observed specification {expected:?}: {msg:?}");
+    }
+
+    Ok(())
+}
+
+/// Scenario: `runtime/rowset-codec` — the database reports a non-zero group
+/// row count over a live connection. Three groups of known, distinct sizes (4,
+/// 7, 1 rows) prove `ctx.rows_in_group()` tracks each group's own cardinality
+/// rather than a fixed or global value, and that the reported count equals the
+/// number of rows the fixture actually iterated via `ctx.next()`.
+async fn rows_in_group_reports_live_group_size(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT rows_in_group(g BIGINT, x BIGINT) \
+         EMITS (g BIGINT, reported BIGINT, iterated BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.rows_in_group_src (g BIGINT, x BIGINT)")
+        .await?;
+    conn.execute(
+        "INSERT INTO it_rust.rows_in_group_src (g, x) VALUES \
+         (1,1),(1,1),(1,1),(1,1), \
+         (2,1),(2,1),(2,1),(2,1),(2,1),(2,1),(2,1), \
+         (3,1)",
+    )
+    .await?;
+
+    let got = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(TO_CHAR(g) || '=' || TO_CHAR(reported) || ':' || TO_CHAR(iterated) \
+         ORDER BY g) \
+         FROM (SELECT rows_in_group(g, x) FROM it_rust.rows_in_group_src GROUP BY g)",
+    )
+    .await?
+    .ok_or_else(|| anyhow!("rows_in_group query returned NULL"))?;
+
+    if got != "1=4:4,2=7:7,3=1:1" {
+        bail!(
+            "rows_in_group over three groups of known size produced {got:?}, expected \
+             \"1=4:4,2=7:7,3=1:1\" (reported == iterated == each group's own cardinality)"
+        );
+    }
     Ok(())
 }

@@ -10,7 +10,7 @@ impl UdfRun for DummyUdf {
 }
 
 #[test]
-fn bridge_typed_getters_return_typed_options() {
+fn typed_accessors_read_the_current_row() {
     let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 14).unwrap();
     let ctx = TestContext::scalar(vec![
         Value::Int64(42),
@@ -82,13 +82,26 @@ fn default_handshake_metadata_is_neutral() {
 }
 
 #[test]
+fn rows_in_group_defaults_to_zero() {
+    let ctx = DefaultsCtx;
+    assert_eq!(ctx.rows_in_group(), 0);
+}
+
+#[test]
+fn iteration_axis_accessors_default_to_none() {
+    let ctx = DefaultsCtx;
+    assert_eq!(ctx.input_type(), None);
+    assert_eq!(ctx.output_type(), None);
+}
+
+#[test]
 fn default_debug_level_is_info() {
     let ctx = DefaultsCtx;
     assert_eq!(ctx.debug_level(), tracing::Level::INFO);
 }
 
 #[test]
-fn default_hooks_unimplemented() {
+fn udf_run_spec_hooks_default_to_unimplemented() {
     let mut ctx = DefaultsCtx;
 
     let vsa = DummyUdf::virtual_schema_adapter_call(&mut ctx, "{}");
@@ -96,6 +109,12 @@ fn default_hooks_unimplemented() {
 
     let doc = DummyUdf::default_output_columns();
     assert!(matches!(doc, Err(UdfError::Unimplemented(_))));
+
+    let import = DummyUdf::generate_sql_for_import_spec(&mut ctx, "{}");
+    assert!(matches!(import, Err(UdfError::Unimplemented(_))));
+
+    let export = DummyUdf::generate_sql_for_export_spec(&mut ctx, "{}");
+    assert!(matches!(export, Err(UdfError::Unimplemented(_))));
 }
 
 #[cfg(feature = "emit-arrow")]

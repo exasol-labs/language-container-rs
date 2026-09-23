@@ -78,6 +78,8 @@ fn single_call_context_debug_level_returns_valid_level() {
     #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
         Box::new(|_name| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                 "no credential fetcher".into(),
@@ -85,7 +87,11 @@ fn single_call_context_debug_level_returns_valid_level() {
         }),
     );
     #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(HandshakeMeta::default());
+    let ctx = SingleCallContext::new(
+        HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
+    );
 
     let level = ctx.debug_level();
     assert!(
@@ -335,7 +341,7 @@ fn bridge_typed_accessors() {
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
 
     assert!(bridge.next().unwrap());
-    assert_eq!(bridge.num_columns(), 4);
+    assert_eq!(bridge.input_column_count(), 4);
     assert_eq!(bridge.get(0).unwrap(), &Value::Int64(10));
     assert_eq!(bridge.get(1).unwrap(), &Value::String("x".into()));
     assert_eq!(bridge.get(3).unwrap(), &Value::Bool(true));
@@ -793,7 +799,7 @@ fn bridge_exposes_input_and_output_column_metadata() {
         }),
     );
 
-    assert_eq!(bridge.num_columns(), 1);
+    assert_eq!(bridge.input_column_count(), 1);
     assert_eq!(bridge.input_column(0).unwrap().name, "x");
     assert!(bridge.input_column(1).is_err());
     assert_eq!(bridge.output_column_count(), 2);
@@ -963,6 +969,108 @@ fn refill_skips_empty_batches_until_a_nonempty_one_arrives() {
     assert_eq!(bridge.get(0).unwrap(), &Value::Int64(9));
 }
 
+/// `InputRowSet` carries `rows_in_group` from the decoded batch unchanged, and
+/// the host bridge answers `UdfContext::rows_in_group()` from it — `0` when no
+/// group is defined, and unchanged across the batch boundaries one group spans.
+#[test]
+fn rows_in_group_is_carried_from_the_input_batch() {
+    let meta = vec![col("a", ExaType::Int64)];
+
+    let (no_group_table, no_group_meta) = single_int_batch();
+    let rs = InputRowSet::from_proto(&no_group_table, &no_group_meta);
+    assert_eq!(rs.rows_in_group(), 0);
+
+    let first_batch = ExascriptTableData {
+        rows: 1,
+        rows_in_group: 7,
+        data_int64: vec![1],
+        data_nulls: vec![false],
+        ..Default::default()
+    };
+    let mut rs = InputRowSet::from_proto(&first_batch, &meta);
+    let mut emit = EmitBuffer::new();
+    let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+    bridge.configure_group_input(
+        IterType::Multiple,
+        IterType::Multiple,
+        Box::new(|| {
+            Ok(Some(ExascriptTableData {
+                rows: 1,
+                rows_in_group: 7,
+                data_int64: vec![2],
+                data_nulls: vec![false],
+                ..Default::default()
+            }))
+        }),
+    );
+    assert_eq!(bridge.rows_in_group(), 7);
+
+    assert!(bridge.next().unwrap());
+    assert!(
+        bridge.next().unwrap(),
+        "the second next() is the one that crosses the batch boundary into the group's next batch"
+    );
+    assert_eq!(
+        bridge.rows_in_group(),
+        7,
+        "must stay constant across every batch of the same group"
+    );
+}
+
+/// The host bridge reports the same iteration axes `configure_group_input`
+/// installed — the fields the `emit`/`next` gates already read — and the
+/// single-call context reports the axes passed to its constructor.
+#[test]
+fn context_reports_the_declared_iteration_axes() {
+    let (table, meta) = single_int_batch();
+    let mut rs = InputRowSet::from_proto(&table, &meta);
+    let mut emit = EmitBuffer::new();
+    let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
+    bridge.configure_group_input(
+        IterType::ExactlyOnce,
+        IterType::Multiple,
+        Box::new(|| Ok(None)),
+    );
+    assert_eq!(bridge.input_type(), Some(InputType::Scalar));
+    assert_eq!(bridge.output_type(), Some(OutputType::Emits));
+
+    let ctx = single_call_ctx_with(
+        HandshakeMeta::default(),
+        IterType::Multiple,
+        IterType::ExactlyOnce,
+    );
+    assert_eq!(ctx.input_type(), Some(InputType::Set));
+    assert_eq!(ctx.output_type(), Some(OutputType::Returns));
+}
+
+/// The axes reach the single-call context straight from the handshake's
+/// `UdfMeta`, so a SCALAR/RETURNS script reports Scalar/Returns with no second
+/// call to install them — there is no construction path that can leave them
+/// at SET/EMITS.
+#[test]
+fn single_call_context_reports_a_scalar_handshake_as_scalar() {
+    use exa_proto::{ExascriptInfo, ExascriptMetadata, IterType as PbIterType};
+
+    let meta = exa_zmq_protocol::UdfMeta::from_pb(
+        &ExascriptMetadata {
+            input_iter_type: PbIterType::PbExactlyOnce as i32,
+            output_iter_type: PbIterType::PbExactlyOnce as i32,
+            ..Default::default()
+        },
+        &ExascriptInfo::default(),
+    )
+    .unwrap();
+
+    let ctx = single_call_ctx_with(
+        HandshakeMeta::from(&meta),
+        meta.input_iter(),
+        meta.output_iter(),
+    );
+
+    assert_eq!(ctx.input_type(), Some(InputType::Scalar));
+    assert_eq!(ctx.output_type(), Some(OutputType::Returns));
+}
+
 #[test]
 fn bridge_returns_memory_limit() {
     let meta = vec![col("a", ExaType::Int64)];
@@ -1076,6 +1184,8 @@ fn single_call_context_returns_handshake_metadata() {
     #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         handshake,
+        IterType::default(),
+        IterType::default(),
         Box::new(|_name| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                 "no credential fetcher in test".into(),
@@ -1083,7 +1193,7 @@ fn single_call_context_returns_handshake_metadata() {
         }),
     );
     #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(handshake);
+    let ctx = SingleCallContext::new(handshake, IterType::default(), IterType::default());
 
     // Numeric accessors return the exact UdfMeta values, no rescaling.
     assert_eq!(ctx.session_id(), 4242);
@@ -1531,6 +1641,8 @@ fn bridge_connection_error_is_recorded_via_record_error() {
 fn single_call_context_connection_error_is_recorded_via_record_error() {
     let mut ctx = SingleCallContext::new(
         HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
         Box::new(|name: &str| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
                 "no such connection: {name}"
@@ -1556,10 +1668,24 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
 /// Construct a `SingleCallContext`, supplying the connect-back arg only when
 /// the feature is enabled so call sites compile either way.
 fn single_call_ctx() -> SingleCallContext<'static> {
+    single_call_ctx_with(
+        HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
+    )
+}
+
+fn single_call_ctx_with(
+    handshake: HandshakeMeta,
+    input_iter: IterType,
+    output_iter: IterType,
+) -> SingleCallContext<'static> {
     #[cfg(feature = "connect-back")]
     {
         SingleCallContext::new(
-            HandshakeMeta::default(),
+            handshake,
+            input_iter,
+            output_iter,
             Box::new(|_name: &str| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                     "no credential fetcher in test".into(),
@@ -1569,15 +1695,15 @@ fn single_call_ctx() -> SingleCallContext<'static> {
     }
     #[cfg(not(feature = "connect-back"))]
     {
-        SingleCallContext::new(HandshakeMeta::default())
+        SingleCallContext::new(handshake, input_iter, output_iter)
     }
 }
 
-/// Single-call mode presents no input columns: `num_columns` always reports
+/// Single-call mode presents no input columns: `input_column_count` always reports
 /// 0 regardless of handshake or connection state.
 #[test]
-fn single_call_context_num_columns_is_always_zero() {
-    assert_eq!(single_call_ctx().num_columns(), 0);
+fn single_call_context_input_column_count_is_always_zero() {
+    assert_eq!(single_call_ctx().input_column_count(), 0);
 }
 
 /// Single-call mode has no input rows to read: `get` always rejects with

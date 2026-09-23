@@ -10,6 +10,10 @@ The rowset codec (`InputRowSet`/`EmitBuffer`) packs output values by declared co
 
 The exact wire-format strings the Exasol engine parses are fixed contracts: `DATE_FORMAT = "%Y-%m-%d"`, `TIMESTAMP_EMIT = "%Y-%m-%d %H:%M:%S%.9f"` (full nanosecond precision, engine-truncated to the declared column precision), and fixed-point decimal via `Decimal`'s `Display`. Any performance optimisation of the formatting/parsing path — whether a hand-rolled fast formatter or a fast decimal/date parser — must leave those wire bytes and the `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`) flush semantics unchanged.
 
+`ExascriptTableData.rows_in_group` ("Rows count in current group in EXASolution", field 8) is set on every batch the engine sends. `create_next_response` writes `table->set_rows_in_group(inp.rowsInGroup())` on both the `MT_NEXT` and the `MT_RESET` reply (`../db/Engine/src/exscript/pluggable/zmqcontainer.cc:415`, recorded in `FINDINGS.md:258-262`). What the value counts follows the input shape. For SET input it is the full group size (`vmciterators.h:147-150`). For SCALAR input it is the current vector-chunk size (`:70-73`). The proto declares the field `required` and comments it "Can be 0 if no group defined" (`zmqcontainer.proto:52-54`), so `0` reports an ungrouped call rather than an absent value. The codec carries the field through to `UdfContext::rows_in_group()`.
+
+`exascript_metadata.input_iter_type` and `output_iter_type` (`zmqcontainer.proto:38-39`, over the `iter_type` enum at `:21`) declare the script's own shapes. `PB_EXACTLY_ONCE` is SCALAR input or RETURNS output, and `PB_MULTIPLE` is SET input or EMITS output. The host context bridge already branches on both axes to drive the run loop per row or per group and to gate `emit` and `next`. It surfaces the same two axes to UDF code through `UdfContext::input_type()` and `output_type()`.
+
 ## Scenarios
 
 ### Scenario: EmitBuffer packs output values row-major by declared column type
@@ -75,3 +79,27 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *THEN* each decoded `Value` MUST equal the `Value` the current `chrono`-based decode path produces for the same wire bytes, preserving lossless round-trip with the emit path
 * *AND* the decoder MUST accept every format the emit path can produce — TIMESTAMP with 0..9 fractional-second digits (`%.f`), DATE as `%Y-%m-%d`, and fixed-point DECIMAL — with no loss of precision
 * *AND* a NULL cell MUST NOT consume a slot in its type block, preserving the per-type cursor advancement `from_proto` guarantees
+
+### Scenario: InputRowSet carries the group row count of the input batch
+
+* *GIVEN* an `ExascriptTableData` the database sent for a set-input group, carrying `rows_in_group`
+* *WHEN* `InputRowSet::from_proto` decodes the batch and the host bridge answers `UdfContext::rows_in_group()`
+* *THEN* the bridge MUST return that batch's `rows_in_group` value unchanged, and `0` when the database sent none
+* *AND* the value MUST stay constant for every row of one group, including across the batch boundaries the group spans
+* *AND* for SCALAR input the reported value MUST be the vector-chunk size the engine filled, because the codec passes the field through without interpreting the input shape
+* *AND* `EmitBuffer::take_proto` MUST keep writing `rows_in_group = 0` on emitted batches, matching the reference C++ SLC
+
+### Scenario: The host context reports the iteration axes the database declared
+
+* *GIVEN* handshake metadata declaring an input iteration axis and an output iteration axis
+* *WHEN* a UDF reads `ctx.input_type()` and `ctx.output_type()`
+* *THEN* the host context bridge MUST report `Scalar` for `PB_EXACTLY_ONCE` input and `Set` for `PB_MULTIPLE` input, and `Returns` for `PB_EXACTLY_ONCE` output and `Emits` for `PB_MULTIPLE` output
+* *AND* one field per axis MUST hold the value, so the accessor and the existing `emit` and `next` gates read the same axis rather than two copies of it
+* *AND* the single-call context MUST report the same two axes from the same handshake metadata, because a spec-generation hook reads the declaration of the script it runs in
+
+### Scenario: The database reports a non-zero group row count over a live connection
+
+* *GIVEN* a live Exasol database with a registered Rust SLC, the `rows-in-group` fixture registered as a SET script, and a source table of known group cardinality
+* *WHEN* a client runs a query that groups that table and calls the script once per group
+* *THEN* each emitted row MUST report a group row count equal to the number of rows the UDF iterated with `ctx.next()`
+* *AND* that count MUST be non-zero, because the engine fills `rows_in_group` from the group's own cardinality on every batch it sends

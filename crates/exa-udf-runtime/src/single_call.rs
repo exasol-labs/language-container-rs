@@ -2,7 +2,7 @@ use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
 use crate::wire::{close_error, request};
 use exa_proto::SingleCallFunctionId;
-use exa_zmq_protocol::{HostEvent, Protocol, UdfMeta, ZmqTransport};
+use exa_zmq_protocol::{HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
 use std::ffi::{CStr, c_char};
 
@@ -26,9 +26,10 @@ pub fn run_single_call(
     meta: &UdfMeta,
 ) -> Result<(), RuntimeError> {
     // Snapshot the handshake metadata once so every single-call hook that
-    // receives a `SingleCallContext` (the virtual-schema adapter call) surfaces
-    // the same live `exascript_info` values the streaming `HostContextBridge`
-    // does, instead of the trait's neutral defaults.
+    // receives a `SingleCallContext` (the virtual-schema adapter call and both
+    // spec-generation hooks) surfaces the same live `exascript_info` values the
+    // streaming `HostContextBridge` does, instead of the trait's neutral
+    // defaults.
     let handshake = crate::rowset::HandshakeMeta::from(meta);
     // Mirror the canonical C++ single-call loop:
     //   loop { MT_RUN -> MT_CALL; dispatch; MT_RETURN/-UNDEFINED; MT_DONE }
@@ -39,20 +40,29 @@ pub fn run_single_call(
     loop {
         match request(transport, proto, proto.run_request())? {
             HostEvent::SingleCall {
-                fn_id, json_arg, ..
+                fn_id,
+                json_arg,
+                import_spec,
+                export_spec,
             } => {
-                let outcome = invoke_hook(
-                    transport,
-                    proto,
-                    udf,
+                let call = SingleCallRequest {
                     fn_id,
-                    json_arg.as_deref(),
-                    handshake.clone(),
-                )?;
+                    json_arg,
+                    import_spec,
+                    export_spec,
+                };
+                let session = CallSession {
+                    transport,
+                    proto: &mut *proto,
+                    handshake: handshake.clone(),
+                    input_iter: meta.input_iter(),
+                    output_iter: meta.output_iter(),
+                };
+                let outcome = invoke_hook(session, udf, call)?;
                 let undefined = matches!(outcome, HookOutcome::Undefined);
                 let reply = match outcome {
                     HookOutcome::Returned(result) => proto.return_request(result),
-                    HookOutcome::Undefined => proto.undefined_call_request(fn_name(fn_id)),
+                    HookOutcome::Undefined => proto.undefined_call_request(hook_name(fn_id)),
                 };
                 // Send MT_RETURN/MT_UNDEFINED_CALL and consume the DB's ack,
                 // which echoes the message just sent; a defensive MT_CLEANUP
@@ -100,38 +110,79 @@ enum HookOutcome {
     Undefined,
 }
 
-/// Route a single-call function id to its vtable hook, returning the hook's
-/// string result or `Undefined` when the UDF did not register the hook.
-///
-/// `transport` and `proto` are used only by `virtual_schema_adapter_call`, which
-/// is handed a [`SingleCallContext`] so the adapter can call
-/// `ctx.connection(name)` (an on-demand MT_IMPORT exchange) and
-/// `ctx.connect_back(...)` during the call. The dispatch loop is blocked waiting
-/// here, so the ZMQ socket is idle and the MT_IMPORT exchange is safe to perform.
-fn invoke_hook(
-    transport: &ZmqTransport,
-    proto: &mut Protocol,
-    udf: &LoadedUdf,
+/// The payload of one `MT_CALL`. Each single-call function id names its own
+/// field on `exascript_single_call_rep`, so the dispatcher carries all of them
+/// and reads the one its id selects.
+struct SingleCallRequest {
     fn_id: SingleCallFunctionId,
-    json_arg: Option<&str>,
+    json_arg: Option<String>,
+    import_spec: Option<exa_proto::ImportSpecificationRep>,
+    export_spec: Option<exa_proto::ExportSpecificationRep>,
+}
+
+/// Everything one `MT_CALL` needs besides its own payload: the wire to reach the
+/// DB on and the handshake snapshot a `SingleCallContext` is built from.
+struct CallSession<'a> {
+    transport: &'a ZmqTransport,
+    proto: &'a mut Protocol,
     handshake: crate::rowset::HandshakeMeta,
+    input_iter: IterType,
+    output_iter: IterType,
+}
+
+fn invoke_hook(
+    session: CallSession<'_>,
+    udf: &LoadedUdf,
+    call: SingleCallRequest,
 ) -> Result<HookOutcome, RuntimeError> {
-    let arg = json_arg.unwrap_or("");
-    let result = match fn_id {
-        SingleCallFunctionId::ScFnDefaultOutputColumns => unsafe {
-            udf.call_default_output_columns()
-        },
-        SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => {
-            return invoke_vs_adapter_call(transport, proto, udf, arg, handshake);
+    match call.fn_id {
+        SingleCallFunctionId::ScFnDefaultOutputColumns => {
+            hook_outcome(unsafe { udf.call_default_output_columns() })
         }
-        SingleCallFunctionId::ScFnGenerateSqlForImportSpec => unsafe {
-            udf.call_generate_sql_for_import_spec(arg)
-        },
-        SingleCallFunctionId::ScFnGenerateSqlForExportSpec => unsafe {
-            udf.call_generate_sql_for_export_spec(arg)
-        },
-        SingleCallFunctionId::ScFnNil => return Ok(HookOutcome::Undefined),
-    };
+        SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => {
+            let arg = call.json_arg.unwrap_or_default();
+            invoke_ctx_hook(session, &arg, |ctx, arg| unsafe {
+                udf.call_virtual_schema_adapter_call(ctx, arg)
+            })
+        }
+        SingleCallFunctionId::ScFnGenerateSqlForImportSpec => {
+            if !udf.implements_import_spec_hook() {
+                return Ok(HookOutcome::Undefined);
+            }
+            let spec = call.import_spec.ok_or_else(|| {
+                missing_specification("generate_sql_for_import_spec", "import_specification")
+            })?;
+            let json = crate::spec_json::serialize_import(&spec);
+            invoke_ctx_hook(session, &json, |ctx, arg| unsafe {
+                udf.call_generate_sql_for_import_spec(ctx, arg)
+            })
+        }
+        SingleCallFunctionId::ScFnGenerateSqlForExportSpec => {
+            if !udf.implements_export_spec_hook() {
+                return Ok(HookOutcome::Undefined);
+            }
+            let spec = call.export_spec.ok_or_else(|| {
+                missing_specification("generate_sql_for_export_spec", "export_specification")
+            })?;
+            let json = crate::spec_json::serialize_export(&spec);
+            invoke_ctx_hook(session, &json, |ctx, arg| unsafe {
+                udf.call_generate_sql_for_export_spec(ctx, arg)
+            })
+        }
+        SingleCallFunctionId::ScFnNil => Ok(HookOutcome::Undefined),
+    }
+}
+
+/// A spec-generation call whose own specification field is unpopulated is a
+/// malformed exchange: the hook would otherwise build SQL from an empty
+/// payload, so the session closes naming the field the database left out.
+fn missing_specification(hook: &str, field: &str) -> RuntimeError {
+    RuntimeError::Udf(format!(
+        "single-call hook {hook}: the MT_CALL carried no {field} message"
+    ))
+}
+
+fn hook_outcome(result: Option<Result<String, RuntimeError>>) -> Result<HookOutcome, RuntimeError> {
     match result {
         Some(Ok(s)) => Ok(HookOutcome::Returned(s)),
         Some(Err(e)) => Err(e),
@@ -139,16 +190,22 @@ fn invoke_hook(
     }
 }
 
-/// Invoke the `virtual_schema_adapter_call` hook with a live [`SingleCallContext`]
-/// threaded through the ABI's double-indirection, so the adapter can resolve
-/// CONNECTION credentials and open self-connections mid-call.
-fn invoke_vs_adapter_call(
-    transport: &ZmqTransport,
-    proto: &mut Protocol,
-    udf: &LoadedUdf,
+fn invoke_ctx_hook<F>(
+    session: CallSession<'_>,
     arg: &str,
-    handshake: crate::rowset::HandshakeMeta,
-) -> Result<HookOutcome, RuntimeError> {
+    call: F,
+) -> Result<HookOutcome, RuntimeError>
+where
+    F: FnOnce(*mut std::ffi::c_void, &str) -> Option<Result<String, RuntimeError>>,
+{
+    let CallSession {
+        transport,
+        proto,
+        handshake,
+        input_iter,
+        output_iter,
+    } = session;
+
     // `transport`/`proto` feed the on-demand MT_IMPORT closure only when
     // connect-back is enabled; without it the context's `connection()` /
     // `connect_back()` inherit the trait's Unimplemented defaults.
@@ -164,6 +221,8 @@ fn invoke_vs_adapter_call(
 
     let mut bridge = crate::rowset::SingleCallContext::new(
         handshake,
+        input_iter,
+        output_iter,
         #[cfg(feature = "connect-back")]
         conn_requester,
     );
@@ -171,20 +230,27 @@ fn invoke_vs_adapter_call(
     // indirection), exactly as the run loop does.
     let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-    let result = unsafe { udf.call_virtual_schema_adapter_call(ctx_ptr, arg) };
-    match result {
-        Some(Ok(s)) => Ok(HookOutcome::Returned(s)),
-        Some(Err(e)) => Err(match bridge.take_last_error() {
+    let result = call(ctx_ptr, arg).map(|r| {
+        r.map_err(|e| match bridge.take_last_error() {
             Some(detail) => RuntimeError::Udf(format!("{e}: {detail}")),
             None => e,
-        }),
-        None => Ok(HookOutcome::Undefined),
-    }
+        })
+    });
+    hook_outcome(result)
 }
 
-/// The wire name reported in `MT_UNDEFINED_CALL` for a single-call function.
-fn fn_name(fn_id: SingleCallFunctionId) -> &'static str {
-    fn_id.as_str_name()
+/// The name reported in `MT_UNDEFINED_CALL`: the SDK hook an author would
+/// implement, so the database's "function not implemented" diagnostic names
+/// something actionable. `SC_FN_NIL` is a sentinel naming no hook, so it keeps
+/// the protobuf variant name.
+fn hook_name(fn_id: SingleCallFunctionId) -> &'static str {
+    match fn_id {
+        SingleCallFunctionId::ScFnDefaultOutputColumns => "default_output_columns",
+        SingleCallFunctionId::ScFnVirtualSchemaAdapterCall => "virtual_schema_adapter_call",
+        SingleCallFunctionId::ScFnGenerateSqlForImportSpec => "generate_sql_for_import_spec",
+        SingleCallFunctionId::ScFnGenerateSqlForExportSpec => "generate_sql_for_export_spec",
+        SingleCallFunctionId::ScFnNil => fn_id.as_str_name(),
+    }
 }
 
 /// Consume a heap-allocated C string produced by a vtable single-call hook.

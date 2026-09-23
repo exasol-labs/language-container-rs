@@ -19,7 +19,7 @@ fn variant_name(v: &Value) -> &'static str {
 
 #[exasol_udf]
 pub fn type_probe(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    let n_in = ctx.num_columns();
+    let n_in = ctx.input_column_count();
     let n_out = ctx.output_column_count();
     while ctx.next()? {
         let mut diag_parts = Vec::with_capacity(n_in);

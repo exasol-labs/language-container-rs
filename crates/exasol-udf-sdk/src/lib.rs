@@ -2,12 +2,14 @@ pub mod abi;
 pub mod connect_back;
 pub mod context;
 pub mod error;
+#[cfg(any(feature = "import", feature = "export"))]
+pub mod spec;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod value;
 
 pub use connect_back::{ConnectionObject, ExaConnection};
-pub use context::{UdfContext, UdfRun};
+pub use context::{InputType, OutputType, UdfContext, UdfRun};
 pub use error::UdfError;
 pub use value::{ColumnInfo, ExaType, IntoValue, Value};
 

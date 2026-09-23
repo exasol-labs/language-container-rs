@@ -12,9 +12,17 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 arrow = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 emit-arrow = ["dep:arrow"]
+# Typed parsing of the specification payload a spec-generation hook receives.
+# One feature per SQL statement, so a UDF that writes only an IMPORT hook
+# carries no EXPORT types. Neither is on by default: a plain UDF build takes
+# neither serde nor serde_json.
+import = ["dep:serde", "dep:serde_json"]
+export = ["dep:serde", "dep:serde_json"]
 # Ships the `test_support` UdfContext doubles. Enables nothing else on purpose:
 # dev-dependency features unify into the crate under test, so any implied
 # feature here would silently change a dependent's featureless test build.

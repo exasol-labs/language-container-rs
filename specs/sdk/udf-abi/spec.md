@@ -1,6 +1,6 @@
 # Feature: udf-abi
 
-Defines the `#[repr(C)]` ABI vtable, SDK fingerprint, vtable stability rules, and the `emit-arrow` feature boundary for the author-facing SDK.
+Defines the `#[repr(C)]` ABI vtable, SDK fingerprint, vtable stability rules, and the `emit-arrow` feature boundary for the author-facing SDK. The spec-generation single-call hook vtable slots are specified separately in `sdk/udf-spec-abi`.
 
 ## Background
 

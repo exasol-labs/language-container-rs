@@ -17,6 +17,12 @@ fn annotation_unknown_type() {
 }
 
 #[test]
+fn unknown_annotation_section() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/trybuild/unknown_annotation_section.rs");
+}
+
+#[test]
 fn invalid_name_annotation() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/trybuild/bad_name.rs");

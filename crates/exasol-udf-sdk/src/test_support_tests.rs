@@ -1,13 +1,13 @@
 use super::{DefaultsCtx, EmitPolicy, NextPolicy, TestContext};
 use crate::connect_back::ConnectionObject;
-use crate::context::UdfContext;
+use crate::context::{InputType, OutputType, UdfContext};
 use crate::error::UdfError;
 use crate::value::{ColumnInfo, ExaType, Value};
 
 #[test]
 fn test_context_covers_scalar_set_emit_and_return_paths() {
     let mut scalar = TestContext::scalar(vec![Value::Int64(7), Value::String("a".into())]);
-    assert_eq!(scalar.num_columns(), 2);
+    assert_eq!(scalar.input_column_count(), 2);
     assert_eq!(scalar.get(0).unwrap(), &Value::Int64(7));
     assert_eq!(scalar.get_string(1).unwrap(), Some("a"));
     assert!(!scalar.next().unwrap(), "scalar input is a single row");
@@ -17,7 +17,7 @@ fn test_context_covers_scalar_set_emit_and_return_paths() {
     assert_eq!(scalar.captured_return(), Some(&Some(Value::Int64(42))));
 
     let mut group = TestContext::set(vec![vec![Value::Int64(1)], vec![Value::Int64(2)]]);
-    assert_eq!(group.num_columns(), 1);
+    assert_eq!(group.input_column_count(), 1);
     let mut seen = Vec::new();
     while group.next().unwrap() {
         seen.push(group.get_i64(0).unwrap());
@@ -69,6 +69,13 @@ fn next_policy_rejects_every_call_with_the_supplied_error() {
 }
 
 #[test]
+fn test_context_exposes_input_column_count_and_rows_in_group() {
+    let ctx = TestContext::set(vec![vec![Value::Int64(1), Value::Int64(2)]]).with_rows_in_group(9);
+    assert_eq!(ctx.input_column_count(), 2);
+    assert_eq!(ctx.rows_in_group(), 9);
+}
+
+#[test]
 fn metadata_defaults_match_the_trait_defaults() {
     let ctx = TestContext::scalar(vec![]);
     let defaults = DefaultsCtx;
@@ -87,6 +94,9 @@ fn metadata_defaults_match_the_trait_defaults() {
     assert_eq!(ctx.current_schema(), defaults.current_schema());
     assert_eq!(ctx.scope_user(), defaults.scope_user());
     assert_eq!(ctx.debug_level(), defaults.debug_level());
+    assert_eq!(ctx.rows_in_group(), defaults.rows_in_group());
+    assert_eq!(ctx.input_type(), defaults.input_type());
+    assert_eq!(ctx.output_type(), defaults.output_type());
 
     assert!(ctx.cluster_ip().is_err(), "cluster_ip unset by default");
     assert!(
@@ -141,6 +151,9 @@ fn metadata_setters_override_every_accessor() {
         .with_current_schema("IT_RUST_OTHER")
         .with_scope_user("IT_VIEW_OWNER")
         .with_debug_level(tracing::Level::TRACE)
+        .with_rows_in_group(512)
+        .with_input_type(InputType::Set)
+        .with_output_type(OutputType::Emits)
         .with_cluster_ip("10.0.0.5")
         .with_connection(
             "MY_CONN",
@@ -166,6 +179,9 @@ fn metadata_setters_override_every_accessor() {
     assert_eq!(ctx.current_schema().as_deref(), Some("IT_RUST_OTHER"));
     assert_eq!(ctx.scope_user().as_deref(), Some("IT_VIEW_OWNER"));
     assert_eq!(ctx.debug_level(), tracing::Level::TRACE);
+    assert_eq!(ctx.rows_in_group(), 512);
+    assert_eq!(ctx.input_type(), Some(InputType::Set));
+    assert_eq!(ctx.output_type(), Some(OutputType::Emits));
     assert_eq!(ctx.cluster_ip().unwrap(), "10.0.0.5");
     let conn = ctx.connection("MY_CONN").unwrap();
     assert_eq!(conn.address, "10.0.0.5:8563");
@@ -203,7 +219,7 @@ fn get_before_the_first_next_errors_instead_of_panicking() {
 #[test]
 fn empty_set_group_reports_no_columns_and_no_rows() {
     let mut ctx = TestContext::set(Vec::new());
-    assert_eq!(ctx.num_columns(), 0);
+    assert_eq!(ctx.input_column_count(), 0);
     assert!(!ctx.next().unwrap());
     assert!(ctx.get(0).is_err());
 }
@@ -226,7 +242,7 @@ fn defaults_ctx_overrides_no_provided_method() {
 fn defaults_ctx_reports_no_columns_and_accepts_emit() {
     let mut ctx = DefaultsCtx;
 
-    assert_eq!(ctx.num_columns(), 0);
+    assert_eq!(ctx.input_column_count(), 0);
     assert!(matches!(ctx.get(0).unwrap_err(), UdfError::Type(_)));
     assert!(ctx.emit(vec![Value::Int64(1)]).is_ok());
     assert!(!ctx.next().unwrap());

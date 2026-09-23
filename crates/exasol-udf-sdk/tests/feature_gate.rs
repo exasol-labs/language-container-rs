@@ -12,7 +12,7 @@ use exasol_udf_sdk::value::Value;
 struct Ctx;
 
 impl UdfContext for Ctx {
-    fn num_columns(&self) -> usize {
+    fn input_column_count(&self) -> usize {
         0
     }
     fn get(&self, _col: usize) -> Result<&Value, UdfError> {
