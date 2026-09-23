@@ -249,14 +249,14 @@ unsafe fn call_lifecycle_slot(
     if rc == 0 {
         return Ok(());
     }
-    if error_out.is_null() {
-        return Err(RuntimeError::Udf(format!(
-            "UDF {slot_name} returned error code {rc}"
-        )));
-    }
     let text = unsafe { crate::single_call::take_c_string(error_out) };
+    let detail = if text.is_empty() {
+        text
+    } else {
+        format!(": {text}")
+    };
     Err(RuntimeError::Udf(format!(
-        "UDF {slot_name} returned error code {rc}: {text}"
+        "UDF {slot_name} returned error code {rc}{detail}"
     )))
 }
 

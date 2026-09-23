@@ -1748,26 +1748,13 @@ fn cleanup_context_refuses_connection_lookup() {
         Err(UdfError::ConnectBack(msg)) => msg,
         other => panic!("expected a ConnectBack refusal, got {other:?}"),
     };
-    assert!(
-        refusal.contains("unavailable during cleanup"),
-        "the refusal must name the cleanup phase: {refusal}"
-    );
-    assert!(
-        refusal.contains("run()"),
-        "the refusal must tell the author to resolve the connection in run(): {refusal}"
-    );
+    assert!(refusal.contains("unavailable during cleanup") && refusal.contains("run()"));
     assert_eq!(
         ctx.take_last_error(),
-        Some(UdfError::ConnectBack(refusal).to_string()),
-        "the refusal must be recorded for the runtime's error report"
+        Some(UdfError::ConnectBack(refusal).to_string())
     );
     assert_eq!(ctx.script_name(), "CLEANUP_PROBE");
-    assert!(ctx.next().is_err(), "next() must fail after MT_CLEANUP");
-    assert!(ctx.get(0).is_err(), "get() must fail after MT_CLEANUP");
-    assert!(
-        ctx.emit(vec![Value::Int64(1)]).is_err(),
-        "emit() must fail after MT_CLEANUP"
-    );
+    assert!(ctx.next().is_err() && ctx.get(0).is_err() && ctx.emit(vec![]).is_err());
 }
 
 // -----------------------------------------------------------------------

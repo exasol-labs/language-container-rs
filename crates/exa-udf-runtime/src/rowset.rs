@@ -1995,9 +1995,8 @@ impl UdfContext for CleanupContext {
         name: &str,
     ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
         let refusal = UdfError::ConnectBack(format!(
-            "CONNECTION lookups are unavailable during cleanup, so ctx.connection(\"{name}\") \
-             was refused: resolve the ConnectionObject with ctx.connection() during run() and \
-             keep it, for example in a static, then pass it to ctx.connect_back() in cleanup"
+            "CONNECTION lookups are unavailable during cleanup: resolve \"{name}\" in run() \
+             and keep it for cleanup"
         ));
         self.record_error(refusal.to_string());
         Err(refusal)

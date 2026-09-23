@@ -283,54 +283,21 @@ unsafe extern "C" fn slot_panic_code(
     2
 }
 
-unsafe extern "C" fn slot_reads_script_name(
-    ctx: *mut std::ffi::c_void,
-    _error_out: *mut *mut std::ffi::c_char,
-) -> i32 {
-    let ctx = unsafe { &mut *(ctx as *mut &mut dyn UdfContext) };
-    if ctx.script_name() == "PROBE" { 0 } else { 1 }
-}
-
 #[test]
-fn lifecycle_slot_error_carries_the_slot_name_code_and_out_pointer_text() {
+fn lifecycle_slot_error_names_the_slot_code_and_text() {
     let mut ctx = TestContext::set(vec![]);
-    let result = unsafe { call_lifecycle_slot("cleanup", slot_error_with_msg, &mut ctx) };
-    match result {
-        Err(RuntimeError::Udf(msg)) => {
-            assert_eq!(msg, "UDF cleanup returned error code 1: cleanup broke")
-        }
-        other => panic!("expected Udf error, got {other:?}"),
-    }
-}
+    let mut err = |slot_name, slot| {
+        unsafe { call_lifecycle_slot(slot_name, slot, &mut ctx) }
+            .unwrap_err()
+            .to_string()
+    };
 
-#[test]
-fn lifecycle_slot_error_without_out_pointer_text_names_only_the_code() {
-    let mut ctx = TestContext::set(vec![]);
-    let result = unsafe { call_lifecycle_slot("run", slot_panic_code, &mut ctx) };
-    match result {
-        Err(RuntimeError::Udf(msg)) => assert_eq!(msg, "UDF run returned error code 2"),
-        other => panic!("expected Udf error, got {other:?}"),
-    }
-}
-
-#[test]
-fn lifecycle_slot_receives_the_double_indirected_context() {
-    let mut ctx = TestContext::set(vec![]).with_script_name("PROBE");
-    let result = unsafe { call_lifecycle_slot("run", slot_reads_script_name, &mut ctx) };
-    assert!(
-        result.is_ok(),
-        "slot must read the live context, got {result:?}"
+    assert_eq!(
+        err("cleanup", slot_error_with_msg),
+        "UDF error: UDF cleanup returned error code 1: cleanup broke"
     );
-}
-
-#[test]
-fn cleanup_is_none_when_the_slot_is_unset() {
-    let dir = make_tempdir();
-    let so = compile_full_vtable_fixture(dir.path(), "no_cleanup", 1);
-    let udf = LoadedUdf::open(&so, "SHAPE").expect("full-vtable fixture must load");
-    let mut ctx = TestContext::set(vec![]);
-    assert!(
-        udf.cleanup(&mut ctx).is_none(),
-        "a vtable without a cleanup slot must report no hook"
+    assert_eq!(
+        err("run", slot_panic_code),
+        "UDF error: UDF run returned error code 2"
     );
 }

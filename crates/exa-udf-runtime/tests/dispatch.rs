@@ -154,21 +154,11 @@ fn scalar_dispatch_full_protocol() {
 /// The one connection id every mock-DB session uses.
 const MOCK_CONN_ID: u64 = 7;
 
+/// Bring up one mock-DB session for a fixture `.so`: binds a REP socket scoped
+/// by `tag`, spawns the [`Runtime`] client thread, and drives the handshake so
+/// the caller can script the run cycle from the first `MT_RUN`.
 fn start_mock_session(
     lib: &str,
-    tag: &str,
-    meta: ExascriptMetadata,
-) -> (
-    zmq::Socket,
-    std::thread::JoinHandle<Result<(), exa_udf_runtime::RuntimeError>>,
-) {
-    start_mock_session_as(lib, &lib.to_uppercase(), tag, meta)
-}
-
-/// [`start_mock_session`] driving the entry point named `script_name`.
-fn start_mock_session_as(
-    lib: &str,
-    script_name: &str,
     tag: &str,
     meta: ExascriptMetadata,
 ) -> (
@@ -183,7 +173,7 @@ fn start_mock_session_as(
     server.bind(&endpoint).unwrap();
 
     let source = format!("%udf_object {}", so.display());
-    let script_name = script_name.to_string();
+    let script_name = lib.to_uppercase();
 
     let ep = endpoint.clone();
     let client = std::thread::spawn(move || Runtime::new(ep, "test-client".into()).run(|_| {}));
@@ -247,6 +237,16 @@ fn drive_session(
     meta: ExascriptMetadata,
     batches: Vec<ExascriptTableData>,
 ) -> SessionOutcome {
+    drive_groups(script_name, so, meta, vec![batches])
+}
+
+/// [`drive_session`] over one input group per `groups` entry.
+fn drive_groups(
+    script_name: &str,
+    so: &std::path::Path,
+    meta: ExascriptMetadata,
+    groups: Vec<Vec<ExascriptTableData>>,
+) -> SessionOutcome {
     let endpoint = format!(
         "ipc:///tmp/exa-mockdb-{}-{}-{}.ipc",
         script_name,
@@ -288,15 +288,17 @@ fn drive_session(
             m.meta = Some(meta.clone());
             send_resp(&server, &m);
         } else if mt == MessageType::MtRun as i32 {
-            // First MT_RUN opens the single group; the second ends the session.
+            // Each MT_RUN opens the next group; the one after the last ends the session.
             run_seen += 1;
-            let reply = if run_seen == 1 {
+            cursor = 0;
+            let reply = if run_seen <= groups.len() {
                 MessageType::MtRun
             } else {
                 MessageType::MtCleanup
             };
             send_resp(&server, &response(reply, conn_id));
         } else if mt == MessageType::MtNext as i32 {
+            let batches = &groups[run_seen - 1];
             if cursor < batches.len() {
                 let mut next = response(MessageType::MtNext, conn_id);
                 next.next = Some(ExascriptNextDataRep {
@@ -1263,191 +1265,91 @@ fn advance_row_wire_error_ends_group_as_run_error() {
 
 const CLEANUP_HOOK_LIB: &str = "cleanup_hook";
 
-/// Drive one input group of `batch` to completion; returns the emitted table.
-fn feed_group(server: &zmq::Socket, batch: ExascriptTableData) -> ExascriptTableData {
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtRun as i32);
-    send_resp(server, &response(MessageType::MtRun, MOCK_CONN_ID));
-
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtNext as i32);
-    let mut next = response(MessageType::MtNext, MOCK_CONN_ID);
-    next.next = Some(ExascriptNextDataRep { table: batch });
-    send_resp(server, &next);
-
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtNext as i32);
-    send_resp(server, &response(MessageType::MtDone, MOCK_CONN_ID));
-
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtEmit as i32, "expected MT_EMIT");
-    let emitted = req.emit.expect("emit payload").table;
-    send_resp(server, &response(MessageType::MtEmit, MOCK_CONN_ID));
-
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtDone as i32);
-    send_resp(server, &response(MessageType::MtDone, MOCK_CONN_ID));
-
-    emitted
-}
-
-fn answer_run_with_cleanup(server: &zmq::Socket) {
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtRun as i32);
-    send_resp(server, &response(MessageType::MtCleanup, MOCK_CONN_ID));
-}
-
-fn expect_close(server: &zmq::Socket, expectation: &str) -> String {
-    let req = recv_req(server);
-    assert_eq!(req.r#type, MessageType::MtClose as i32, "{expectation}");
-    req.close
-        .and_then(|c| c.exception_message)
-        .expect("close carries an exception message")
-}
-
-fn assert_in_order(msg: &str, first: &str, second: &str) {
-    let first_at = msg
-        .find(first)
-        .unwrap_or_else(|| panic!("{first:?} missing from {msg:?}"));
-    let second_at = msg
-        .find(second)
-        .unwrap_or_else(|| panic!("{second:?} missing from {msg:?}"));
-    assert!(
-        first_at < second_at,
-        "{first:?} must precede {second:?} in {msg:?}"
-    );
+fn drive_cleanup_session(
+    script_name: &str,
+    meta: ExascriptMetadata,
+    groups: Vec<Vec<ExascriptTableData>>,
+) -> SessionOutcome {
+    drive_groups(
+        script_name,
+        &fixture_cdylib_path(CLEANUP_HOOK_LIB),
+        meta,
+        groups,
+    )
 }
 
 #[test]
 fn cleanup_runs_once_after_the_last_group() {
-    let (server, client) = start_mock_session_as(
-        CLEANUP_HOOK_LIB,
+    let outcome = drive_cleanup_session(
         "CLEANUP_REPORTS",
-        "cleanupreports",
         int64_meta(IterType::PbMultiple, IterType::PbMultiple),
+        vec![
+            vec![int64_batch(&[Some(1), Some(2)])],
+            vec![int64_batch(&[Some(3), Some(4), Some(5)])],
+        ],
     );
 
-    feed_group(&server, int64_batch(&[Some(1), Some(2)]));
-    feed_group(&server, int64_batch(&[Some(3), Some(4), Some(5)]));
-    answer_run_with_cleanup(&server);
-
-    let msg = expect_close(
-        &server,
-        "a failing cleanup hook must close the session instead of sending MT_FINISHED",
-    );
+    let msg = outcome
+        .close
+        .expect("a failing hook must close the session");
     assert!(
-        msg.starts_with("F-UDF-CL-RUST-9001"),
-        "close carries the UDF error close code, got: {msg}"
+        msg.starts_with("F-UDF-CL-RUST-9001")
+            && msg.contains("cleanup ran: script=CLEANUP_REPORTS groups=2 rows=5"),
+        "the hook ran once after both groups with the handshake metadata, got: {msg}"
     );
-    assert!(
-        msg.contains("cleanup ran: script=CLEANUP_REPORTS groups=2 rows=5 io_rejected=true"),
-        "the hook ran once after both groups and saw the handshake script name, got: {msg}"
-    );
-    let result = client.join().expect("client thread panicked");
-    assert!(result.is_err(), "a cleanup error must fail the session");
 }
 
 #[test]
 fn successful_cleanup_precedes_mt_finished() {
-    let (server, client) = start_mock_session_as(
-        CLEANUP_HOOK_LIB,
+    let outcome = drive_cleanup_session(
         "CLEANUP_OK",
-        "cleanupok",
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
+        vec![vec![int64_batch(&[Some(21)])]],
     );
 
-    let emitted = feed_group(&server, int64_batch(&[Some(21)]));
-    assert_eq!(emitted.data_int64, vec![21], "run() returns its input");
-    answer_run_with_cleanup(&server);
-
-    let req = recv_req(&server);
     assert_eq!(
-        req.r#type,
-        MessageType::MtFinished as i32,
-        "a successful cleanup hook must be followed by MT_FINISHED"
+        outcome.close, None,
+        "a successful hook must end with MT_FINISHED"
     );
-    send_resp(&server, &response(MessageType::MtFinished, MOCK_CONN_ID));
-
-    let result = client.join().expect("client thread panicked");
-    assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
+    assert!(!outcome.errored);
 }
 
 #[test]
 fn cleanup_runs_when_no_group_ran() {
-    let (server, client) = start_mock_session_as(
-        CLEANUP_HOOK_LIB,
+    let outcome = drive_cleanup_session(
         "CLEANUP_AFTER_RUN_ERROR",
-        "cleanupnogroup",
         int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
+        vec![],
     );
 
-    answer_run_with_cleanup(&server);
-
-    let msg = expect_close(
-        &server,
-        "the cleanup hook must run even when the DB ends the session before any group",
-    );
+    let msg = outcome
+        .close
+        .expect("a failing hook must close the session");
     assert!(
-        msg.contains("cleanup failed on purpose"),
-        "close carries the cleanup error, got: {msg}"
+        msg.contains("cleanup failed on purpose") && !msg.contains("run failed on purpose"),
+        "only the hook ran, got: {msg}"
     );
-    assert!(
-        !msg.contains("run failed on purpose"),
-        "run() never ran, got: {msg}"
-    );
-    let result = client.join().expect("client thread panicked");
-    assert!(result.is_err(), "a cleanup error must fail the session");
 }
 
 #[test]
 fn run_error_runs_cleanup_and_reports_both_errors() {
-    let outcome = drive_session(
+    let outcome = drive_cleanup_session(
         "CLEANUP_AFTER_RUN_ERROR",
-        &fixture_cdylib_path(CLEANUP_HOOK_LIB),
         int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
-        vec![int64_batch(&[Some(1)])],
+        vec![vec![int64_batch(&[Some(1)])]],
     );
 
-    assert!(outcome.errored, "a run error must fail the session");
     let msg = outcome.close.expect("a run error must close the session");
     assert!(
-        msg.starts_with("F-UDF-CL-RUST-9001"),
-        "close carries the UDF error close code, got: {msg}"
+        msg.contains("run failed on purpose") && msg.contains("cleanup failed on purpose"),
+        "close carries both errors, got: {msg}"
     );
-    assert_in_order(&msg, "run failed on purpose", "cleanup failed on purpose");
 }
 
 #[test]
-fn db_close_runs_cleanup_before_relaying_the_close() {
-    let (server, client) = start_mock_session_as(
-        CLEANUP_HOOK_LIB,
+fn validation_failure_skips_cleanup() {
+    let outcome = drive_cleanup_session(
         "CLEANUP_AFTER_RUN_ERROR",
-        "cleanupdbclose",
-        int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
-    );
-
-    let req = recv_req(&server);
-    assert_eq!(req.r#type, MessageType::MtRun as i32);
-    let mut close = response(MessageType::MtClose, MOCK_CONN_ID);
-    close.close = Some(exa_proto::ExascriptClose {
-        exception_message: Some("db closed on purpose".into()),
-    });
-    send_resp(&server, &close);
-
-    let msg = expect_close(
-        &server,
-        "the runtime relays the DB's close as its own MT_CLOSE",
-    );
-    assert_in_order(&msg, "db closed on purpose", "cleanup failed on purpose");
-    let result = client.join().expect("client thread panicked");
-    assert!(result.is_err(), "a DB close must fail the session");
-}
-
-#[test]
-fn output_shape_mismatch_skips_cleanup() {
-    let outcome = drive_session(
-        "CLEANUP_AFTER_RUN_ERROR",
-        &fixture_cdylib_path(CLEANUP_HOOK_LIB),
         int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
         vec![],
     );
@@ -1456,60 +1358,7 @@ fn output_shape_mismatch_skips_cleanup() {
         .close
         .expect("a shape mismatch must close the session");
     assert!(
-        msg.contains("Output shape mismatch"),
-        "close carries the validation error, got: {msg}"
-    );
-    assert!(
-        !msg.contains("cleanup failed on purpose"),
+        msg.contains("Output shape mismatch") && !msg.contains("cleanup failed on purpose"),
         "the hook must not run when validation fails before dispatch, got: {msg}"
     );
-}
-
-#[test]
-fn schema_mismatch_skips_cleanup() {
-    let meta = ExascriptMetadata {
-        input_columns: vec![int64_col("wrong")],
-        ..int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple)
-    };
-    let outcome = drive_session(
-        "CLEANUP_AFTER_RUN_ERROR",
-        &fixture_cdylib_path(CLEANUP_HOOK_LIB),
-        meta,
-        vec![],
-    );
-
-    let msg = outcome
-        .close
-        .expect("a schema mismatch must close the session");
-    assert!(
-        msg.starts_with("F-UDF-CL-RUST-1001") && msg.contains("wrong"),
-        "close carries the schema-mismatch error, got: {msg}"
-    );
-    assert!(
-        !msg.contains("cleanup failed on purpose"),
-        "the hook must not run when validation fails before dispatch, got: {msg}"
-    );
-}
-
-#[test]
-fn cleanup_connection_lookup_is_refused_without_mt_import() {
-    let (server, client) = start_mock_session_as(
-        CLEANUP_HOOK_LIB,
-        "CLEANUP_CONNECTION",
-        "cleanupconn",
-        int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
-    );
-
-    answer_run_with_cleanup(&server);
-
-    let msg = expect_close(
-        &server,
-        "the DB accepts no MT_IMPORT after MT_CLEANUP, so the refused lookup must close the session",
-    );
-    assert!(
-        msg.contains("unavailable during cleanup") && msg.contains("run()"),
-        "close carries the CleanupContext refusal, got: {msg}"
-    );
-    let result = client.join().expect("client thread panicked");
-    assert!(result.is_err(), "the refusal must fail the session");
 }

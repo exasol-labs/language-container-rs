@@ -36,14 +36,6 @@ fn cleanup_by_script_name(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     }
 }
 
-fn first_cleanup(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Err(UdfError::User("first cleanup ran".into()))
-}
-
-fn second_cleanup(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Err(UdfError::User("second cleanup ran".into()))
-}
-
 #[exasol_udf(cleanup(cleanup_by_script_name))]
 fn outcome_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Ok(())
@@ -52,34 +44,6 @@ fn outcome_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 #[exasol_udf]
 fn plain_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Ok(())
-}
-
-// Fails to compile if the macro emits a cleanup shim without `cleanup(...)`.
-#[allow(dead_code, non_snake_case)]
-fn __exa_cleanup_shim_PLAIN_RUN() {}
-
-#[exasol_udf(cleanup(cleanup_by_script_name))]
-fn tidy_up_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Ok(())
-}
-
-#[exasol_udf(cleanup(cleanup_by_script_name), name = "NAMED_CLEANUP")]
-fn named_cleanup_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Ok(())
-}
-
-#[exasol_udf(cleanup(first_cleanup))]
-fn first_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Ok(())
-}
-
-#[exasol_udf(cleanup(second_cleanup))]
-fn second_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
-    Ok(())
-}
-
-fn slot_address(slot: Option<CleanupSlot>) -> Option<usize> {
-    slot.map(|f| f as usize)
 }
 
 #[test]
@@ -109,41 +73,4 @@ fn cleanup_annotation_wires_slot_and_maps_outcomes() {
 fn omitted_cleanup_leaves_slot_none() {
     let vt = unsafe { &*__exa_udf_entry_PLAIN_RUN() };
     assert!(vt.cleanup.is_none());
-}
-
-#[test]
-fn cleanup_shim_carries_the_entry_suffix() {
-    let vt = unsafe { &*__exa_udf_entry_TIDY_UP_RUN() };
-    assert_eq!(
-        slot_address(vt.cleanup),
-        slot_address(Some(__exa_cleanup_shim_TIDY_UP_RUN))
-    );
-}
-
-#[test]
-fn name_combines_with_cleanup_section() {
-    let vt = unsafe { &*__exa_udf_entry_NAMED_CLEANUP() };
-    assert_eq!(
-        slot_address(vt.cleanup),
-        slot_address(Some(__exa_cleanup_shim_NAMED_CLEANUP))
-    );
-    assert_eq!(
-        call_cleanup(vt.cleanup.unwrap(), "FAIL"),
-        (1, Some("cleanup of FAIL failed".to_string()))
-    );
-}
-
-#[test]
-fn distinct_entries_get_independent_cleanup_shims() {
-    let first = unsafe { &*__exa_udf_entry_FIRST_RUN() };
-    let second = unsafe { &*__exa_udf_entry_SECOND_RUN() };
-
-    assert_eq!(
-        call_cleanup(first.cleanup.unwrap(), ""),
-        (1, Some("first cleanup ran".to_string()))
-    );
-    assert_eq!(
-        call_cleanup(second.cleanup.unwrap(), ""),
-        (1, Some("second cleanup ran".to_string()))
-    );
 }

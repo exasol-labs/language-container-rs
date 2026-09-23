@@ -10,39 +10,32 @@ pub(crate) fn run_hook(
     meta: &UdfMeta,
     outcome: Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
-    fold(outcome, invoke_hook(udf, meta))
-}
-
-fn invoke_hook(udf: &LoadedUdf, meta: &UdfMeta) -> Result<(), RuntimeError> {
     let mut ctx = CleanupContext::new(
         HandshakeMeta::from(meta),
         meta.input_iter(),
         meta.output_iter(),
     );
-    let Some(result) = udf.cleanup(&mut ctx) else {
-        return Ok(());
+    let cleanup = match udf.cleanup(&mut ctx) {
+        None | Some(Ok(())) => return outcome,
+        Some(Err(e)) => e.with_recorded_detail(ctx.take_last_error()),
     };
-    result.map_err(|e| e.with_recorded_detail(ctx.take_last_error()))
+    fold(outcome, cleanup)
 }
 
-fn fold(
-    outcome: Result<(), RuntimeError>,
-    cleanup: Result<(), RuntimeError>,
-) -> Result<(), RuntimeError> {
-    match (outcome, cleanup) {
-        (outcome, Ok(())) => outcome,
-        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(original), Err(cleanup_error)) => Err(RuntimeError::Udf(format!(
-            "{} (cleanup also failed: {})",
-            message_of(&original),
-            message_of(&cleanup_error)
-        ))),
-    }
+fn fold(outcome: Result<(), RuntimeError>, cleanup: RuntimeError) -> Result<(), RuntimeError> {
+    let Err(original) = outcome else {
+        return Err(cleanup);
+    };
+    Err(RuntimeError::Udf(format!(
+        "{} (cleanup also failed: {})",
+        message_of(original),
+        message_of(cleanup)
+    )))
 }
 
-fn message_of(error: &RuntimeError) -> String {
+fn message_of(error: RuntimeError) -> String {
     match error {
-        RuntimeError::Udf(text) => text.clone(),
+        RuntimeError::Udf(text) => text,
         other => other.to_string(),
     }
 }

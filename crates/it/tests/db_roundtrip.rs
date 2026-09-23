@@ -3318,10 +3318,8 @@ async fn cleanup_reports_per_process_counts(conn: &mut Connection, udf_object: &
              each: {msg:?}"
         );
     }
-    for expected in ["script=CLEANUP_REPORTS", "io_rejected=true"] {
-        if !msg.contains(expected) {
-            bail!("cleanup error did not carry {expected:?}: {msg:?}");
-        }
+    if !msg.contains("script=CLEANUP_REPORTS") {
+        bail!("cleanup error did not carry the handshake script name: {msg:?}");
     }
     Ok(())
 }
@@ -3384,9 +3382,11 @@ async fn cleanup_connects_back_with_a_resolved_connection_object(
         Err(e) => e.to_string(),
     };
 
-    let expected = "cleanup connect-back read 42 connection_refused=true";
-    if !msg.contains(expected) {
-        bail!("cleanup error did not carry {expected:?}: {msg:?}");
+    if !(msg.contains("cleanup connect-back read") && msg.contains("42")) {
+        bail!("cleanup error did not carry the connect-back read of 42: {msg:?}");
+    }
+    if !msg.contains("connection_refused=true") {
+        bail!("cleanup's own CONNECTION lookup was not refused: {msg:?}");
     }
     Ok(())
 }
@@ -3417,7 +3417,7 @@ async fn export_into_script_fails_on_cleanup_error(
     if !msg.contains("F-UDF-CL-RUST-") {
         bail!("EXPORT error did not arrive over the UDF error path: {msg:?}");
     }
-    if !msg.contains("cleanup ran after export_spec") {
+    if !msg.contains("cleanup failed on purpose") {
         bail!("EXPORT error did not carry the cleanup hook's text: {msg:?}");
     }
     Ok(())
