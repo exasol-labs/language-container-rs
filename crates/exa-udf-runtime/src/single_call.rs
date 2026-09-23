@@ -13,9 +13,7 @@ use std::ffi::{CStr, c_char};
 /// expects exactly one `MT_RETURN` (the function's JSON result) or
 /// `MT_UNDEFINED_CALL` (the function is not implemented in this container) per
 /// call. The session ends when the DB answers `MT_RUN` (or a call's reply) with
-/// `MT_CLEANUP`. This returns without sending the session's final message:
-/// `Runtime::run` runs the cleanup hook, then sends `MT_FINISHED` or the error
-/// close.
+/// `MT_CLEANUP`; `Runtime::run` then runs cleanup and sends the final message.
 ///
 /// The wire stays in strict REQ/REP lockstep: every request the client sends is
 /// answered by exactly one DB response. A function call therefore costs two
@@ -35,7 +33,7 @@ pub fn run_single_call(
     let handshake = crate::rowset::HandshakeMeta::from(meta);
     // Mirror the canonical C++ single-call loop:
     //   loop { MT_RUN -> MT_CALL; dispatch; MT_RETURN/-UNDEFINED; MT_DONE }
-    //   then cleanup and MT_FINISHED, which `Runtime::run` owns.
+    //   then cleanup and MT_FINISHED (in `Runtime::run`).
     // The DB acknowledges the container's MT_RETURN with MT_RETURN (not
     // MT_CLEANUP); the session only ends when the DB answers a later MT_RUN or
     // MT_DONE with MT_CLEANUP.

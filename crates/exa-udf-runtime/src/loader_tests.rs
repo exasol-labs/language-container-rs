@@ -266,8 +266,6 @@ fn success_path_returns_written_string() {
     assert_eq!(result.unwrap(), "the value");
 }
 
-/// Lifecycle slot that writes a C-allocated error message into `*error_out`
-/// and returns the user-error code.
 unsafe extern "C" fn slot_error_with_msg(
     _ctx: *mut std::ffi::c_void,
     error_out: *mut *mut std::ffi::c_char,
@@ -278,7 +276,6 @@ unsafe extern "C" fn slot_error_with_msg(
     1
 }
 
-/// Lifecycle slot that returns the panic code without touching `*error_out`.
 unsafe extern "C" fn slot_panic_code(
     _ctx: *mut std::ffi::c_void,
     _error_out: *mut *mut std::ffi::c_char,
@@ -286,8 +283,6 @@ unsafe extern "C" fn slot_panic_code(
     2
 }
 
-/// Lifecycle slot that restores the double-indirected context and succeeds only
-/// when it reads the script name the test context carries.
 unsafe extern "C" fn slot_reads_script_name(
     ctx: *mut std::ffi::c_void,
     _error_out: *mut *mut std::ffi::c_char,

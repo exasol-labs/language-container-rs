@@ -12,9 +12,7 @@ fn null_index(row: usize, col: usize, n_cols: usize) -> usize {
     row * n_cols + col
 }
 
-/// Maps the wire's iteration axis onto the SDK's input-axis vocabulary, shared
-/// by every `UdfContext` here so all of them report the same mapping from one
-/// declared `IterType`.
+/// Maps the wire's iteration axis onto the SDK's input axis.
 fn input_type_of(iter: IterType) -> InputType {
     match iter {
         IterType::ExactlyOnce => InputType::Scalar,
@@ -1418,8 +1416,7 @@ pub struct HostContextBridge<'a> {
 ///
 /// The iteration axes are deliberately not here: `HostContextBridge` already
 /// owns them natively (set by `configure_group_input`), so a copy here would
-/// sit unused; `SingleCallContext` and `CleanupContext` hold their own axis
-/// fields for the same reason instead of reading them off this struct.
+/// sit unused; the other contexts hold their own axis fields.
 #[derive(Debug, Clone, Default)]
 pub struct HandshakeMeta {
     pub session_id: u64,
@@ -1608,7 +1605,6 @@ fn request_connection(
 }
 
 /// Open a self-connection back to the DB from a resolved [`ConnectionObject`].
-/// Shared by every context.
 #[cfg(feature = "connect-back")]
 fn open_connect_back(
     conn: &exasol_udf_sdk::connect_back::ConnectionObject,
@@ -1623,8 +1619,7 @@ fn open_connect_back(
         .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>)
 }
 
-/// The `UdfContext` handshake-metadata getters. Every context forwards them to
-/// its `handshake` field identically.
+/// The `UdfContext` handshake-metadata getters, forwarded to `handshake`.
 macro_rules! delegate_handshake_meta {
     () => {
         fn memory_limit(&self) -> u64 {
@@ -1685,9 +1680,7 @@ macro_rules! delegate_handshake_meta {
     };
 }
 
-/// The `connect-back` CONNECTION lookup over the context's on-demand `MT_IMPORT`
-/// requester, recording the error on failure. Only the contexts that may still
-/// talk on the control channel invoke it.
+/// CONNECTION lookup via `MT_IMPORT`; only for contexts that own the channel.
 macro_rules! delegate_connection_lookup {
     () => {
         #[cfg(feature = "connect-back")]
@@ -1704,9 +1697,7 @@ macro_rules! delegate_connection_lookup {
     };
 }
 
-/// The `connect-back` hooks that send nothing on the control channel: the node
-/// address and the TCP login back to the database. Every context forwards them
-/// identically, recording the error on failure.
+/// Connect-back hooks that do not use the control channel.
 macro_rules! delegate_connect_back_session {
     () => {
         #[cfg(feature = "connect-back")]
@@ -1939,21 +1930,10 @@ impl UdfContext for SingleCallContext<'_> {
     delegate_connect_back_session!();
 }
 
-/// The `UdfContext` a UDF's cleanup hook receives once per process, after the
-/// run loop or the single-call loop ends.
-///
-/// Once the database sends `MT_CLEANUP` it accepts no message besides
-/// `MT_FINISHED` and `MT_CLOSE`, so this context holds no control channel. The
-/// handshake accessors, `cluster_ip`, and `connect_back` behave as in
-/// [`SingleCallContext`], because a connect-back login travels over its own TCP
-/// session. `connection(name)` would need an `MT_IMPORT` exchange, so it always
-/// refuses: resolve the `ConnectionObject` with `ctx.connection(name)` during
-/// `run()`, keep it (for example in a `static`), and pass it to
-/// `ctx.connect_back(&conn)` during cleanup. No input or output remains, so
-/// `next`, `get`, and `emit` fail.
+/// The context passed to the cleanup hook. After `MT_CLEANUP` the DB accepts
+/// only `MT_FINISHED`/`MT_CLOSE`, so `connection()` and row I/O fail;
+/// `connect_back` still works over its own TCP session.
 pub struct CleanupContext {
-    /// Last error captured from a context method, appended to the hook's own
-    /// error. A `Cell` because `connection()` borrows `&self`.
     last_error: std::cell::Cell<Option<String>>,
     handshake: HandshakeMeta,
     input_iter: IterType,
@@ -1970,7 +1950,6 @@ impl CleanupContext {
         }
     }
 
-    /// Take the last error message captured from a context method.
     pub fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }

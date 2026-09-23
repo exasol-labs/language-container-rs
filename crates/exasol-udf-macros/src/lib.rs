@@ -38,8 +38,7 @@ struct Annotations {
     /// `generate_sql_for_export_spec` slot; the `&str` is the EXPORT
     /// specification as JSON.
     export_spec: Option<Path>,
-    /// Path to a `fn(&mut dyn UdfContext) -> Result<(), UdfError>` wired into
-    /// the `cleanup` vtable slot.
+    /// `fn(&mut dyn UdfContext) -> Result<(), UdfError>` for the `cleanup` slot.
     cleanup: Option<Path>,
     /// Verbatim SQL name override; when absent the SQL name is derived from the
     /// Rust function identifier by uppercasing every ASCII character.
@@ -358,15 +357,13 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// The generated helper that hands an owned C string back over the vtable: one
-/// owner of the name, because every generated shim calls it.
+/// Name of the generated helper that hands an owned C string over the vtable.
 fn write_c_string_ident_for(udf_name: &str) -> proc_macro2::Ident {
     format_ident!("__exa_write_c_string_{udf_name}")
 }
 
-/// Build a shim over the `(ctx, error_out) -> i32` ABI that the `run` and
-/// `cleanup` slots share, so both map `Ok`, `Err`, and panic to `0`, `1`, and
-/// `2`. `call_body` evaluates to a `Result<(), E: Display>` from `ctx`.
+/// Shim for the `run`/`cleanup` `(ctx, error_out) -> i32` ABI: `Ok` → 0,
+/// `Err` → 1, panic → 2.
 fn build_lifecycle_shim(
     shim_ident: &proc_macro2::Ident,
     udf_name: &str,

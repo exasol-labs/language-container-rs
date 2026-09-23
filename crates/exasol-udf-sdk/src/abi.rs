@@ -52,13 +52,8 @@ pub struct ExaUdfVTable {
     /// mixed. On the `0` and `2` return paths the shim leaves `*error_out`
     /// untouched (null).
     pub run: unsafe extern "C" fn(ctx: *mut std::ffi::c_void, error_out: *mut *mut c_char) -> i32,
-    /// The UDF's optional cleanup hook, run once per UDF process at session
-    /// end, before the host sends the session's final message, so a failure
-    /// reaches the database. `None` when the UDF defines no cleanup.
-    ///
-    /// Same contract as `run`: the double-indirected `ctx` pointer, the
-    /// `error_out` ownership rules, and the `0` ok / `1` user error / `2`
-    /// panic return codes.
+    /// Optional cleanup hook, run once per process before the final message.
+    /// Same contract as `run`.
     pub cleanup: Option<
         unsafe extern "C" fn(ctx: *mut std::ffi::c_void, error_out: *mut *mut c_char) -> i32,
     >,

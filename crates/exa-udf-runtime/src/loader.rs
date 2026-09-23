@@ -118,20 +118,14 @@ impl LoadedUdf {
         Ok(())
     }
 
-    /// Invoke the UDF's `run` over `ctx`.
-    ///
-    /// A non-zero return code becomes `RuntimeError::Udf` carrying
-    /// `UDF run returned error code <rc>`, followed by `: <text>` when the shim
-    /// wrote an error message. The success path allocates nothing, because a
-    /// SCALAR group calls this once per input row.
+    /// Invoke the UDF's `run` over `ctx`. The success path must not allocate:
+    /// SCALAR calls this once per row.
     pub fn run(&self, ctx: &mut dyn UdfContext) -> Result<(), RuntimeError> {
         let vtable = unsafe { &*self.vtable };
         unsafe { call_lifecycle_slot("run", vtable.run, ctx) }
     }
 
-    /// Invoke the UDF's cleanup hook over `ctx`, or return `None` when the UDF
-    /// registered none. A failure reads `UDF cleanup returned error code <rc>`
-    /// in the format [`LoadedUdf::run`] documents.
+    /// Invoke the cleanup hook, or `None` when the UDF has none.
     pub fn cleanup(&self, ctx: &mut dyn UdfContext) -> Option<Result<(), RuntimeError>> {
         let vtable = unsafe { &*self.vtable };
         let slot = vtable.cleanup?;
@@ -242,8 +236,7 @@ impl LoadedUdf {
 
 type LifecycleSlot = unsafe extern "C" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_char) -> i32;
 
-/// Call a `(ctx, error_out) -> i32` slot through the double-indirected context
-/// pointer the ABI prescribes, and take ownership of any error text it wrote.
+/// Call a `(ctx, error_out) -> i32` slot and take ownership of its error text.
 unsafe fn call_lifecycle_slot(
     slot_name: &'static str,
     slot: LifecycleSlot,

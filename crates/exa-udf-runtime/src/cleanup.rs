@@ -3,14 +3,8 @@ use crate::loader::LoadedUdf;
 use crate::rowset::{CleanupContext, HandshakeMeta};
 use exa_zmq_protocol::UdfMeta;
 
-/// Run the UDF's cleanup hook, when it registered one, and fold its failure
-/// into the dispatch `outcome`.
-///
-/// Called once per session after either dispatcher returns, so every dispatch
-/// exit passes this one step. The hook receives a [`CleanupContext`] built from
-/// the handshake metadata. When dispatch and the hook both failed, the single
-/// resulting error names the original error first and the cleanup error
-/// second, because the original error is the root cause.
+/// Run the cleanup hook, if any, and fold its error into `outcome`, original
+/// error first.
 pub(crate) fn run_hook(
     udf: &LoadedUdf,
     meta: &UdfMeta,

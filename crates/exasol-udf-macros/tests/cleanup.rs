@@ -1,7 +1,3 @@
-//! Verifies the `#[exasol_udf(cleanup(fn))]` annotation wires the `cleanup`
-//! vtable slot to a generated shim over the `run` slot's `(ctx, error_out) ->
-//! i32` ABI, and that omitting it leaves the slot `None`.
-
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
@@ -14,10 +10,7 @@ unsafe extern "C" {
 
 type CleanupSlot = unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32;
 
-/// Drive a cleanup slot exactly as the host runtime does: a `&mut &mut dyn
-/// UdfContext` erased to `*mut c_void`, and a null-initialised `error_out` whose
-/// `malloc`-backed string, when written, the caller frees through the C
-/// allocator.
+/// Call a cleanup slot the way the host does.
 fn call_cleanup(slot: CleanupSlot, script_name: &str) -> (i32, Option<String>) {
     let mut ctx = TestContext::set(vec![]).with_script_name(script_name);
     let mut dyn_ref: &mut dyn UdfContext = &mut ctx;
@@ -61,8 +54,7 @@ fn plain_run(_ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     Ok(())
 }
 
-// Collides with the generated shim at compile time if the macro emits one for
-// an annotation without a `cleanup(...)` section.
+// Fails to compile if the macro emits a cleanup shim without `cleanup(...)`.
 #[allow(dead_code, non_snake_case)]
 fn __exa_cleanup_shim_PLAIN_RUN() {}
 

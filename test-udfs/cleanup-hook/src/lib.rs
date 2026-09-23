@@ -1,8 +1,5 @@
-//! Fixture for the `cleanup(path)` hook: one entry point per cleanup behavior
-//! the runtime's mock-database tests and the live scenarios pin.
-//!
-//! The `.so` stays mapped across the tests of one process, so an entry point
-//! that keeps state in statics serves exactly one test.
+//! Fixture for the `cleanup(path)` hook. Entry points with statics serve one
+//! test each, since the `.so` stays mapped for the whole test process.
 
 use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::connect_back::ConnectionObject;
@@ -35,8 +32,6 @@ pub fn cleanup_reports(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     ctx.emit(vec![Value::Int64(rows)])
 }
 
-/// Fails with what the process accumulated, so a test reads the counts cleanup
-/// observed over every group that process ran.
 fn report_counts(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let groups = REPORTED_GROUPS.load(Ordering::Relaxed);
     if groups == 0 {
@@ -80,8 +75,6 @@ pub fn cleanup_connect_back(ctx: &mut dyn UdfContext) -> Result<Option<Value>, U
     echo_input(ctx)
 }
 
-/// Fails with the value it read over the connection `run()` resolved, and
-/// whether its own CONNECTION lookup was refused for the cleanup phase.
 fn read_over_resolved_connection(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let Some(conn) = RESOLVED_CONNECTION.get() else {
         return Ok(());

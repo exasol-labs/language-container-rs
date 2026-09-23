@@ -9,9 +9,7 @@ use std::cell::{Cell, RefCell};
 /// Drive the run phase: process each input group and flush the UDF's output
 /// until the DB signals no more groups.
 ///
-/// Returns `Ok` once the DB answers with `MT_CLEANUP` and `Err` when an error
-/// ends dispatch, without sending the session's final message: `Runtime::run`
-/// runs the cleanup hook, then sends `MT_FINISHED` or the error close.
+/// Does not send the final message; `Runtime::run` runs cleanup, then sends it.
 ///
 /// The DB binds a REP socket, so every wire exchange is strictly
 /// client-send-then-receive. The client opens each group with `MT_RUN`; the DB

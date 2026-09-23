@@ -1551,9 +1551,6 @@ fn adapter_connection_probe_combines_hook_and_recorded_errors() {
     );
 }
 
-/// Bring up a single-call session against the `cleanup-hook` fixture's
-/// `EXPORT_CLEANUP` entry, whose export-spec hook returns `SELECT 1` and whose
-/// cleanup hook fails with the text its own CONNECTION lookup returned.
 fn start_export_cleanup_session(
     tag: &str,
     conn_id: u64,

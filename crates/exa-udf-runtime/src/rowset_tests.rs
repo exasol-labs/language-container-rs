@@ -1736,10 +1736,6 @@ fn single_call_context_next_is_unimplemented() {
     }
 }
 
-/// The cleanup phase sends nothing on the control channel, so the context the
-/// hook receives refuses every CONNECTION lookup in its own body, records the
-/// refusal, and still serves the handshake metadata. No input or output
-/// remains after `MT_CLEANUP`, so the data methods fail too.
 #[test]
 fn cleanup_context_refuses_connection_lookup() {
     let handshake = HandshakeMeta {

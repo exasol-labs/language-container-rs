@@ -165,8 +165,7 @@ fn start_mock_session(
     start_mock_session_as(lib, &lib.to_uppercase(), tag, meta)
 }
 
-/// [`start_mock_session`] for a fixture `.so` exporting several entry points,
-/// naming the one to drive by its `script_name`.
+/// [`start_mock_session`] driving the entry point named `script_name`.
 fn start_mock_session_as(
     lib: &str,
     script_name: &str,
@@ -700,9 +699,8 @@ fn udf_error_closes_session_with_prefixed_message() {
 #[test]
 fn mid_group_cleanup_ends_session_cleanly() {
     // batch_fetcher's Cleanup arm (GroupExit::Session): a mid-group MT_CLEANUP
-    // ends the session successfully, with the MT_FINISHED every MT_CLEANUP
-    // gets. run_group skips the tail flush on this exit, so the row already
-    // processed this group has its output discarded.
+    // ends the session successfully. run_group skips the tail flush on this
+    // exit, so the row already processed this group has its output discarded.
     let (server, client) = start_mock_session(
         "scalar_double",
         "midcleanup",
@@ -1263,15 +1261,9 @@ fn advance_row_wire_error_ends_group_as_run_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Session-end cleanup hook, driven through the `cleanup-hook` fixture.
-// ---------------------------------------------------------------------------
-
 const CLEANUP_HOOK_LIB: &str = "cleanup_hook";
 
-/// Answer one input group: open it, deliver `batch`, end the input, ack the
-/// group's tail MT_EMIT, and answer the client's MT_DONE with MT_DONE so the
-/// session continues. Returns the emitted table.
+/// Drive one input group of `batch` to completion; returns the emitted table.
 fn feed_group(server: &zmq::Socket, batch: ExascriptTableData) -> ExascriptTableData {
     let req = recv_req(server);
     assert_eq!(req.r#type, MessageType::MtRun as i32);
@@ -1299,15 +1291,12 @@ fn feed_group(server: &zmq::Socket, batch: ExascriptTableData) -> ExascriptTable
     emitted
 }
 
-/// End the session the way the database does: answer the next MT_RUN with
-/// MT_CLEANUP.
 fn answer_run_with_cleanup(server: &zmq::Socket) {
     let req = recv_req(server);
     assert_eq!(req.r#type, MessageType::MtRun as i32);
     send_resp(server, &response(MessageType::MtCleanup, MOCK_CONN_ID));
 }
 
-/// The exception message of the client's next request, which must be MT_CLOSE.
 fn expect_close(server: &zmq::Socket, expectation: &str) -> String {
     let req = recv_req(server);
     assert_eq!(req.r#type, MessageType::MtClose as i32, "{expectation}");

@@ -44,14 +44,8 @@ impl Runtime {
     /// Execute one UDF session end to end: handshake → meta → resolve artifact
     /// → load → validate → dispatch → cleanup → final message.
     ///
-    /// Once dispatch has started, the UDF's cleanup hook runs exactly once,
-    /// whether dispatch ended on `MT_CLEANUP`, a UDF error, a DB `MT_CLOSE`, or
-    /// a protocol error. The session then ends with `MT_FINISHED` on success,
-    /// or with one `MT_CLOSE` whose `F-UDF-CL-RUST-` prefixed message carries
-    /// the dispatch error before the cleanup error. A failure before dispatch
-    /// (artifact, load, output shape, annotated schema) closes the session
-    /// without running the hook, as the reference client skips cleanup when VM
-    /// construction fails.
+    /// Once dispatch starts, the cleanup hook runs exactly once, however
+    /// dispatch ended. Failures before dispatch skip it, like the C++ client.
     ///
     /// `on_level_resolved` is called once immediately after the handshake, with
     /// the log level parsed from the script's `%udf_debug_level` directive (or
@@ -193,7 +187,6 @@ impl Runtime {
     }
 }
 
-/// End a clean session: `MT_FINISHED`, which the DB echoes.
 fn send_finished(transport: &ZmqTransport, proto: &mut Protocol) -> Result<(), RuntimeError> {
     let finished = proto.finished_reply();
     wire::request(transport, proto, finished).map(drop)

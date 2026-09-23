@@ -3266,9 +3266,8 @@ async fn rows_in_group_reports_live_group_size(
     Ok(())
 }
 
-/// Scenario: `runtime/dispatch-run-loop` — a cleanup hook that succeeds leaves
-/// the statement's result untouched, because the session still ends with
-/// `MT_FINISHED`.
+/// Scenario: `runtime/dispatch-run-loop` — a successful cleanup hook leaves
+/// the result untouched.
 async fn cleanup_ok_statement_succeeds(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SCALAR SCRIPT cleanup_ok(x BIGINT) RETURNS BIGINT AS\n\
@@ -3282,12 +3281,9 @@ async fn cleanup_ok_statement_succeeds(conn: &mut Connection, udf_object: &str) 
     Ok(())
 }
 
-/// Scenario: `runtime/dispatch-run-loop` — the cleanup hook runs once per UDF
-/// process, after the last group that process ran, and its error fails the
-/// statement. The database may spread the 8 groups over several processes, so
-/// the reported process ran between 1 and 8 of them, and each contributed its
-/// 3 rows. The hook also proves the `CleanupContext` carries live handshake
-/// metadata and rejects row I/O.
+/// Scenario: `runtime/dispatch-run-loop` — cleanup runs once per process and
+/// its error fails the statement. The DB may spread the 8 groups over several
+/// processes, so the reporting one ran 1..=8 of them.
 async fn cleanup_reports_per_process_counts(conn: &mut Connection, udf_object: &str) -> Result<()> {
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT cleanup_reports(g BIGINT, x BIGINT) \
@@ -3330,9 +3326,8 @@ async fn cleanup_reports_per_process_counts(conn: &mut Connection, udf_object: &
     Ok(())
 }
 
-/// Scenario: `runtime/dispatch-run-loop` — a `run()` error still runs the
-/// cleanup hook, and the statement's error names the original error before the
-/// cleanup error.
+/// Scenario: `runtime/dispatch-run-loop` — a `run()` error still runs cleanup;
+/// the run error is reported first.
 async fn run_and_cleanup_errors_both_surface(
     conn: &mut Connection,
     udf_object: &str,
@@ -3364,9 +3359,8 @@ async fn run_and_cleanup_errors_both_surface(
     Ok(())
 }
 
-/// Scenario: `runtime/dispatch-run-loop` — the cleanup hook connects back over
-/// a `ConnectionObject` that `run()` resolved and kept in a static, while its
-/// own CONNECTION lookup is refused for the cleanup phase.
+/// Scenario: `runtime/dispatch-run-loop` — cleanup connects back with a
+/// `ConnectionObject` resolved in `run()`; its own lookup is refused.
 async fn cleanup_connects_back_with_a_resolved_connection_object(
     conn: &mut Connection,
     udf_object: &str,
@@ -3397,9 +3391,7 @@ async fn cleanup_connects_back_with_a_resolved_connection_object(
     Ok(())
 }
 
-/// Scenario: `runtime/dispatch-single-call` — the cleanup hook runs after the
-/// export-specification call, and its error fails the `EXPORT` statement over
-/// the UDF error path.
+/// Scenario: `runtime/dispatch-single-call` — a cleanup error fails `EXPORT`.
 async fn export_into_script_fails_on_cleanup_error(
     conn: &mut Connection,
     udf_object: &str,
