@@ -29,7 +29,7 @@ fn compile_fixture(out_dir: &Path, name: &str, source: &str) -> PathBuf {
 
 /// A fixture exporting a vtable under the given `entry_symbol` name with the
 /// specified abi_version and fingerprint (NUL-terminated C string).
-/// The run/destroy fns are no-ops.
+/// The run fn is a no-op and the cleanup slot is unset.
 fn fixture_source(entry_symbol: &str, abi_version: u32, fingerprint_with_nul: &str) -> String {
     format!(
         r#"
@@ -41,13 +41,12 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
 }}
 
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run(_ctx: *mut c_void, _error_out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy() {{}}
 
 static FINGERPRINT: &str = "{fingerprint_with_nul}";
 
@@ -55,7 +54,7 @@ static VTABLE: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi_version},
     fingerprint: FINGERPRINT.as_ptr() as *const c_char,
     run,
-    destroy,
+    cleanup: None,
 }};
 
 #[no_mangle]

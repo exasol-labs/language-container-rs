@@ -44,6 +44,7 @@ const TS_PREC_LIB: &str = "libtimestamp_precision.so";
 const TYPE_PROBE_LIB: &str = "libtype_probe.so";
 const IMPORT_EXPORT_SPEC_LIB: &str = "libimport_export_spec.so";
 const ROWS_IN_GROUP_LIB: &str = "librows_in_group.so";
+const CLEANUP_HOOK_LIB: &str = "libcleanup_hook.so";
 
 /// 100,000-row ordinal source (`ord` = 0..99999) built from a 10-row digit table
 /// cross-joined five times. Large enough that a scalar input or a single SET
@@ -188,6 +189,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     let rows_in_group_path = harness
         .upload_udf(ROWS_IN_GROUP_LIB, read_udf_artifact(ROWS_IN_GROUP_LIB)?)
         .await?;
+    let cleanup_hook_path = harness
+        .upload_udf(CLEANUP_HOOK_LIB, read_udf_artifact(CLEANUP_HOOK_LIB)?)
+        .await?;
 
     scalar_double_returns_42(&mut conn, &scalar_path).await?;
     eprintln!("[it] scenario scalar_double ok");
@@ -318,6 +322,27 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         return Err(e);
     }
     eprintln!("[it] scenario connect_back_stream ok");
+
+    cleanup_ok_statement_succeeds(&mut conn, &cleanup_hook_path).await?;
+    eprintln!("[it] scenario cleanup_ok_statement_succeeds ok");
+    cleanup_reports_per_process_counts(&mut conn, &cleanup_hook_path).await?;
+    eprintln!("[it] scenario cleanup_reports_per_process_counts ok");
+    run_and_cleanup_errors_both_surface(&mut conn, &cleanup_hook_path).await?;
+    eprintln!("[it] scenario run_and_cleanup_errors_both_surface ok");
+    if let Err(e) = cleanup_connects_back_with_a_resolved_connection_object(
+        &mut conn,
+        &cleanup_hook_path,
+        &harness,
+    )
+    .await
+    {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after cleanup_connect_back failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario cleanup_connects_back_with_a_resolved_connection_object ok");
+    export_into_script_fails_on_cleanup_error(&mut conn, &cleanup_hook_path).await?;
+    eprintln!("[it] scenario export_into_script_fails_on_cleanup_error ok");
 
     resolv_udf_resolves_external_host(&mut conn, &resolv_path).await?;
     eprintln!("[it] scenario resolv_udf_resolves_external_host ok");
@@ -3237,6 +3262,171 @@ async fn rows_in_group_reports_live_group_size(
             "rows_in_group over three groups of known size produced {got:?}, expected \
              \"1=4:4,2=7:7,3=1:1\" (reported == iterated == each group's own cardinality)"
         );
+    }
+    Ok(())
+}
+
+/// Scenario: `runtime/dispatch-run-loop` — a cleanup hook that succeeds leaves
+/// the statement's result untouched, because the session still ends with
+/// `MT_FINISHED`.
+async fn cleanup_ok_statement_succeeds(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT cleanup_ok(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let got = query_single_string(conn, "SELECT TO_CHAR(cleanup_ok(21))").await?;
+    if got.as_deref() != Some("21") {
+        bail!("cleanup_ok(21) returned {got:?}, expected 21 after a successful cleanup hook");
+    }
+    Ok(())
+}
+
+/// Scenario: `runtime/dispatch-run-loop` — the cleanup hook runs once per UDF
+/// process, after the last group that process ran, and its error fails the
+/// statement. The database may spread the 8 groups over several processes, so
+/// the reported process ran between 1 and 8 of them, and each contributed its
+/// 3 rows. The hook also proves the `CleanupContext` carries live handshake
+/// metadata and rejects row I/O.
+async fn cleanup_reports_per_process_counts(conn: &mut Connection, udf_object: &str) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SET SCRIPT cleanup_reports(g BIGINT, x BIGINT) \
+         EMITS (n BIGINT) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.cleanup_reports_src (g BIGINT, x BIGINT)")
+        .await?;
+    let rows = (1..=8)
+        .flat_map(|g| (1..=3).map(move |x| format!("({g},{x})")))
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(&format!(
+        "INSERT INTO it_rust.cleanup_reports_src (g, x) VALUES {rows}"
+    ))
+    .await?;
+
+    let msg = match conn
+        .query("SELECT cleanup_reports(g, x) FROM it_rust.cleanup_reports_src GROUP BY g")
+        .await
+    {
+        Ok(_) => bail!("cleanup_reports succeeded; its cleanup hook must fail the statement"),
+        Err(e) => e.to_string(),
+    };
+
+    let groups = parse_meta_u64(&msg, "groups")?;
+    let rows = parse_meta_u64(&msg, "rows")?;
+    if !(1..=8).contains(&groups) || rows != 3 * groups {
+        bail!(
+            "cleanup observed groups={groups} rows={rows}, expected 1..=8 groups of 3 rows \
+             each: {msg:?}"
+        );
+    }
+    for expected in ["script=CLEANUP_REPORTS", "io_rejected=true"] {
+        if !msg.contains(expected) {
+            bail!("cleanup error did not carry {expected:?}: {msg:?}");
+        }
+    }
+    Ok(())
+}
+
+/// Scenario: `runtime/dispatch-run-loop` — a `run()` error still runs the
+/// cleanup hook, and the statement's error names the original error before the
+/// cleanup error.
+async fn run_and_cleanup_errors_both_surface(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT cleanup_after_run_error(\"x\" DECIMAL(18,0)) \
+         EMITS (\"y\" DECIMAL(18,0)) AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let msg = match conn
+        .query("SELECT cleanup_after_run_error(CAST(1 AS DECIMAL(18,0))) FROM DUAL")
+        .await
+    {
+        Ok(_) => bail!("cleanup_after_run_error succeeded; its run() must fail the statement"),
+        Err(e) => e.to_string(),
+    };
+
+    let run = msg
+        .find("run failed on purpose")
+        .ok_or_else(|| anyhow!("statement error lost the run() error: {msg:?}"))?;
+    let cleanup = msg
+        .find("cleanup failed on purpose")
+        .ok_or_else(|| anyhow!("statement error lost the cleanup error: {msg:?}"))?;
+    if run > cleanup {
+        bail!("statement error named the cleanup error before the run() error: {msg:?}");
+    }
+    Ok(())
+}
+
+/// Scenario: `runtime/dispatch-run-loop` — the cleanup hook connects back over
+/// a `ConnectionObject` that `run()` resolved and kept in a static, while its
+/// own CONNECTION lookup is refused for the cleanup phase.
+async fn cleanup_connects_back_with_a_resolved_connection_object(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+) -> Result<()> {
+    let cb_addr = harness.connect_back_sql_address().await?;
+    eprintln!("[it] cleanup_connect_back: CB_SELF address = {cb_addr}");
+    conn.execute(&format!(
+        "CREATE OR REPLACE CONNECTION CB_SELF TO '{cb_addr}' \
+         USER 'sys' IDENTIFIED BY 'exasol'"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT cleanup_connect_back(x BIGINT) RETURNS BIGINT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+
+    let msg = match conn.query("SELECT cleanup_connect_back(21)").await {
+        Ok(_) => bail!("cleanup_connect_back succeeded; its cleanup hook must fail the statement"),
+        Err(e) => e.to_string(),
+    };
+
+    let expected = "cleanup connect-back read 42 connection_refused=true";
+    if !msg.contains(expected) {
+        bail!("cleanup error did not carry {expected:?}: {msg:?}");
+    }
+    Ok(())
+}
+
+/// Scenario: `runtime/dispatch-single-call` — the cleanup hook runs after the
+/// export-specification call, and its error fails the `EXPORT` statement over
+/// the UDF error path.
+async fn export_into_script_fails_on_cleanup_error(
+    conn: &mut Connection,
+    udf_object: &str,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT export_cleanup(...) RETURNS INT AS\n\
+         %udf_object {udf_object};\n/"
+    ))
+    .await?;
+    conn.execute("CREATE OR REPLACE TABLE it_rust.export_cleanup_source (k DECIMAL(18,0))")
+        .await?;
+    conn.execute("INSERT INTO it_rust.export_cleanup_source VALUES (1)")
+        .await?;
+
+    let msg = match conn
+        .execute("EXPORT it_rust.export_cleanup_source INTO SCRIPT it_rust.export_cleanup")
+        .await
+    {
+        Ok(_) => bail!("EXPORT INTO SCRIPT succeeded; the cleanup hook must fail the statement"),
+        Err(e) => e.to_string(),
+    };
+
+    if !msg.contains("F-UDF-CL-RUST-") {
+        bail!("EXPORT error did not arrive over the UDF error path: {msg:?}");
+    }
+    if !msg.contains("cleanup ran after export_spec") {
+        bail!("EXPORT error did not carry the cleanup hook's text: {msg:?}");
     }
     Ok(())
 }

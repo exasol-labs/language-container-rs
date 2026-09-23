@@ -1,4 +1,5 @@
 use super::*;
+use exasol_udf_sdk::test_support::TestContext;
 
 // ---------------------------------------------------------------------------
 // Helpers shared by inline loader tests
@@ -19,19 +20,18 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
 }}
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run_stub(_ctx: *mut c_void, _out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy_stub() {{}}
 
 static FP: &str = "0.0.0:stub\0";
 static VT: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi_version},
     fingerprint: FP.as_ptr() as *const c_char,
     run: run_stub,
-    destroy: destroy_stub,
+    cleanup: None,
 }};
 
 #[no_mangle]
@@ -80,7 +80,7 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
     pub default_output_columns: Option<unsafe extern "C" fn(*mut *mut c_char) -> i32>,
     pub virtual_schema_adapter_call:
         Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32>,
@@ -95,14 +95,13 @@ pub struct ExaUdfVTable {{
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run_stub(_ctx: *mut c_void, _out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy_stub() {{}}
 
 static FP: &str = "{host_fp}\0";
 static VT: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi},
     fingerprint: FP.as_ptr() as *const c_char,
     run: run_stub,
-    destroy: destroy_stub,
+    cleanup: None,
     default_output_columns: None,
     virtual_schema_adapter_call: None,
     generate_sql_for_import_spec: None,
@@ -265,4 +264,78 @@ fn generic_message_when_error_text_empty() {
 fn success_path_returns_written_string() {
     let result = unsafe { call_noarg_hook("my_hook", hook_success) };
     assert_eq!(result.unwrap(), "the value");
+}
+
+/// Lifecycle slot that writes a C-allocated error message into `*error_out`
+/// and returns the user-error code.
+unsafe extern "C" fn slot_error_with_msg(
+    _ctx: *mut std::ffi::c_void,
+    error_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    unsafe {
+        *error_out = libc::strdup(c"cleanup broke".as_ptr());
+    }
+    1
+}
+
+/// Lifecycle slot that returns the panic code without touching `*error_out`.
+unsafe extern "C" fn slot_panic_code(
+    _ctx: *mut std::ffi::c_void,
+    _error_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    2
+}
+
+/// Lifecycle slot that restores the double-indirected context and succeeds only
+/// when it reads the script name the test context carries.
+unsafe extern "C" fn slot_reads_script_name(
+    ctx: *mut std::ffi::c_void,
+    _error_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let ctx = unsafe { &mut *(ctx as *mut &mut dyn UdfContext) };
+    if ctx.script_name() == "PROBE" { 0 } else { 1 }
+}
+
+#[test]
+fn lifecycle_slot_error_carries_the_slot_name_code_and_out_pointer_text() {
+    let mut ctx = TestContext::set(vec![]);
+    let result = unsafe { call_lifecycle_slot("cleanup", slot_error_with_msg, &mut ctx) };
+    match result {
+        Err(RuntimeError::Udf(msg)) => {
+            assert_eq!(msg, "UDF cleanup returned error code 1: cleanup broke")
+        }
+        other => panic!("expected Udf error, got {other:?}"),
+    }
+}
+
+#[test]
+fn lifecycle_slot_error_without_out_pointer_text_names_only_the_code() {
+    let mut ctx = TestContext::set(vec![]);
+    let result = unsafe { call_lifecycle_slot("run", slot_panic_code, &mut ctx) };
+    match result {
+        Err(RuntimeError::Udf(msg)) => assert_eq!(msg, "UDF run returned error code 2"),
+        other => panic!("expected Udf error, got {other:?}"),
+    }
+}
+
+#[test]
+fn lifecycle_slot_receives_the_double_indirected_context() {
+    let mut ctx = TestContext::set(vec![]).with_script_name("PROBE");
+    let result = unsafe { call_lifecycle_slot("run", slot_reads_script_name, &mut ctx) };
+    assert!(
+        result.is_ok(),
+        "slot must read the live context, got {result:?}"
+    );
+}
+
+#[test]
+fn cleanup_is_none_when_the_slot_is_unset() {
+    let dir = make_tempdir();
+    let so = compile_full_vtable_fixture(dir.path(), "no_cleanup", 1);
+    let udf = LoadedUdf::open(&so, "SHAPE").expect("full-vtable fixture must load");
+    let mut ctx = TestContext::set(vec![]);
+    assert!(
+        udf.cleanup(&mut ctx).is_none(),
+        "a vtable without a cleanup slot must report no hook"
+    );
 }

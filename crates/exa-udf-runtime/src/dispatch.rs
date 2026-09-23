@@ -3,12 +3,15 @@ use crate::loader::LoadedUdf;
 use crate::rowset::{BatchFetcher, EmitBuffer, EmitFlusher, HostContextBridge, InputRowSet};
 use crate::wire::{close_error, request};
 use exa_zmq_protocol::{ColumnInfo, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
-use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 use std::cell::{Cell, RefCell};
 
 /// Drive the run phase: process each input group and flush the UDF's output
 /// until the DB signals no more groups.
+///
+/// Returns `Ok` once the DB answers with `MT_CLEANUP` and `Err` when an error
+/// ends dispatch, without sending the session's final message: `Runtime::run`
+/// runs the cleanup hook, then sends `MT_FINISHED` or the error close.
 ///
 /// The DB binds a REP socket, so every wire exchange is strictly
 /// client-send-then-receive. The client opens each group with `MT_RUN`; the DB
@@ -49,8 +52,6 @@ pub fn run_udf(
         }
     }
 
-    // Client-initiated teardown: MT_FINISHED, then the DB echoes it.
-    request(transport, proto, proto.finished_reply())?;
     Ok(())
 }
 
@@ -207,7 +208,7 @@ fn drive_group_rows(
 ) -> Option<RuntimeError> {
     match input_iter {
         IterType::ExactlyOnce => loop {
-            if let Err(e) = invoke_run(bridge, udf) {
+            if let Err(e) = udf.run(bridge) {
                 return Some(e);
             }
             match bridge.advance_row() {
@@ -216,7 +217,7 @@ fn drive_group_rows(
                 Err(e) => return Some(RuntimeError::Udf(e.to_string())),
             }
         },
-        IterType::Multiple => invoke_run(bridge, udf).err(),
+        IterType::Multiple => udf.run(bridge).err(),
     }
 }
 
@@ -235,30 +236,5 @@ fn tail_flush(
     let mut proto = proto_cell.borrow_mut();
     let req = proto.emit_request(table);
     request(transport, &mut proto, req)?;
-    Ok(())
-}
-
-/// Invoke the UDF's `run` shim once over the current context view.
-///
-/// ABI contract: pass a pointer to a `&mut dyn UdfContext` (double
-/// indirection). The run shim restores it via
-/// `&mut *(ctx as *mut &mut dyn UdfContext)`.
-fn invoke_run(bridge: &mut HostContextBridge, udf: &LoadedUdf) -> Result<(), RuntimeError> {
-    let mut dyn_ref: &mut dyn UdfContext = &mut *bridge;
-    let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-    let mut error_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
-    let rc = unsafe { udf.run(ctx_ptr, &mut error_ptr as *mut *mut std::ffi::c_char) };
-    if rc != 0 {
-        let extra = if !error_ptr.is_null() {
-            Some(unsafe { crate::single_call::take_c_string(error_ptr) })
-        } else {
-            None
-        };
-        let msg = match extra {
-            Some(e) => format!("UDF run returned error code {rc}: {e}"),
-            None => format!("UDF run returned error code {rc}"),
-        };
-        return Err(RuntimeError::Udf(msg));
-    }
     Ok(())
 }

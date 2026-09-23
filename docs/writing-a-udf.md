@@ -169,6 +169,61 @@ pub fn emit_k(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 
 Supported annotation types: `i32`, `i64`, `f64`, `f32`, `bool`, `String`, `&str`, `Decimal`, `NaiveDate`, `NaiveDateTime`. `i32`/`i64` validate only against a column whose wire type is genuinely `Int32`/`Int64`; standard Exasol integer types (`BIGINT`, `INT`, `INTEGER`) are all `DECIMAL` and therefore `Decimal`.
 
+### Session-end cleanup: the `cleanup(path)` section
+
+`cleanup(path)` names a function the runtime calls once when the session ends. Use it to flush, report, or release what `run()` accumulated. It combines with every other section, including `input(...)`, `emits(...)`, and the spec hooks of §15:
+
+```rust
+#[exasol_udf(cleanup(report))]
+pub fn count_rows(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+
+fn report(ctx: &mut dyn UdfContext) -> Result<(), UdfError> { /* … */ }
+```
+
+The hook signature is `fn(&mut dyn UdfContext) -> Result<(), UdfError>`. It receives no argument saying whether the session succeeded.
+
+**When it runs.** One UDF process runs one session, and the hook runs once per process, when that process's dispatch ends:
+
+- After the last group (SET), the last row (SCALAR), or the single call (§15) that process ran. It also runs when that process ran no group at all.
+- After `run()` returned an error, and after the database closed the session.
+- Never when the load-time checks fail before dispatch (a RETURNS/EMITS mismatch, or an annotated schema the columns do not match): the session closes with the validation error alone.
+
+The database may start several processes for one statement and give each a share of the groups. State that `run()` keeps in a `static` is per process, so each hook sees only the groups its own process ran.
+
+**Error reporting.** A hook that returns `Err` fails the statement with `F-UDF-CL-RUST-9001` and the hook's error text, in place of the clean `MT_FINISHED` ending. A panic in the hook is caught and fails the statement with `F-UDF-CL-RUST-9001` and `UDF cleanup returned error code 2`, without hook text. When `run()` had already failed, the one error message names the original error first and the cleanup error after it, as `… (cleanup also failed: …)`.
+
+**What the context offers.** The handshake accessors (`script_name()`, `node_id()`, `session_id()`, and the rest) return their live values. `next()`, `get()`, and `emit()` return `Err`, because no input remains and the database accepts no output after `MT_CLEANUP`.
+
+For connect-back (§12), `ctx.connect_back(&conn)` works in cleanup, but `ctx.connection(name)` is refused with `UdfError::ConnectBack`. A CONNECTION lookup is a request to the database (`MT_IMPORT`), and after `MT_CLEANUP` the database accepts no request. Resolve the `ConnectionObject` during `run()` and keep it, for example in a `static`:
+
+```rust
+use exasol_udf_sdk::connect_back::ConnectionObject;
+use std::sync::OnceLock;
+
+static AUDIT_CONN: OnceLock<ConnectionObject> = OnceLock::new();
+
+#[exasol_udf(cleanup(write_audit))]
+pub fn audited(ctx: &mut dyn UdfContext) -> Result<Option<Value>, UdfError> {
+    if AUDIT_CONN.get().is_none() {
+        let conn = ctx.connection("AUDIT_CONN")?;
+        AUDIT_CONN.get_or_init(|| conn);
+    }
+    // ...
+    Ok(None)
+}
+
+fn write_audit(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    let Some(conn) = AUDIT_CONN.get() else {
+        return Ok(());
+    };
+    let mut session = ctx.connect_back(conn)?;
+    session.execute("INSERT INTO audit.udf_runs VALUES (CURRENT_TIMESTAMP)")?;
+    Ok(())
+}
+```
+
+The invoking statement's transaction is still open while the hook runs, so a connect-back write in cleanup follows the §12 session-model rules: write only pre-committed tables that the invoking query does not read.
+
 ## 3. The `UdfContext` interface
 
 Every UDF receives `&mut dyn UdfContext`. The four core operations are:

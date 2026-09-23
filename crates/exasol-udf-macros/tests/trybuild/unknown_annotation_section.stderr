@@ -1,4 +1,4 @@
-error: unknown annotation `spec_import`, expected `name`, `input`, `emits`, `vs_adapter`, `import_spec`, or `export_spec`
+error: unknown annotation `spec_import`, expected `name`, `input`, `emits`, `vs_adapter`, `import_spec`, `export_spec`, or `cleanup`
  --> tests/trybuild/unknown_annotation_section.rs:7:14
   |
 7 | #[exasol_udf(spec_import(some_fn))]

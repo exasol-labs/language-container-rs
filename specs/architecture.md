@@ -63,7 +63,9 @@ exaudfclient (binary)
 - **Lifecycle:** `handshake` (MT_CLIENT/MT_INFO/MT_META, parse the `%udf_object` path) →
   `load` (dlopen the `.so`, resolve `__exa_udf_entry_<NAME>`, validate ABI + fingerprint) →
   `run` loop (MT_RUN; per group: MT_NEXT input batch → UDF `run()` → MT_EMIT output) →
-  `cleanup` (MT_FINISHED, then `exit(0)`).
+  `cleanup` (once the run loop or the single-call loop ends: the UDF's optional `cleanup(path)`
+  hook runs once with a `CleanupContext`, then MT_FINISHED and `exit(0)`, or one error MT_CLOSE
+  and a non-zero exit when dispatch or the hook failed).
 - **Emit path:** `ctx.emit(row)` is checked against the declared output columns, then moves the
   row into an `EmitBuffer` that tracks a running byte estimate and flushes an `MT_EMIT` at the
   4,000,000-byte threshold, with a final tail flush at end of `run`. The row is owned end to

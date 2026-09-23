@@ -85,9 +85,18 @@ Each emitted row carries, in `row_number`, the number of the input row it was
 emitted for. The engine uses it to re-attach the select-list columns it tunnels
 through the UDF instead of emitting, as in `SELECT id, f(x) FROM t`.
 
-**3. Cleanup.** When the DB answers an `MT_RUN` with `MT_CLEANUP`, the client
-replies `MT_FINISHED`; the DB echoes `MT_FINISHED` and the session ends. On a
-UDF error the client sends `MT_CLOSE` carrying an `F-UDF-CL-RUST-####` message.
+**3. Cleanup.** When the DB answers an `MT_RUN`, an `MT_DONE`, or a mid-group
+`MT_NEXT` with `MT_CLEANUP`, the client first runs the UDF's `cleanup(path)`
+hook once, if it registered one, then replies `MT_FINISHED`. The DB echoes
+`MT_FINISHED` and the session ends. The single-call loop ends through this same
+step. After `MT_CLEANUP` the DB accepts only `MT_FINISHED` or `MT_CLOSE`, so
+the hook cannot send `MT_IMPORT`.
+
+On a UDF error, a DB-sent `MT_CLOSE`, or a failing hook, the client sends
+`MT_CLOSE` carrying an `F-UDF-CL-RUST-####` message. The hook still runs after a
+`run()` error or a DB close, and the message names the original error before the
+hook's. A load-time validation failure closes the session before any group runs
+and skips the hook.
 
 The client then exits the process. (`exaudfclient` calls `std::process::exit(0)`
 on success so the DB's `waitpid` reaps it promptly — see

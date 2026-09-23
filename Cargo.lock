@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-exasol-udf"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "exasol-udf-sdk",
  "goblin",
@@ -733,6 +733,14 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
+
+[[package]]
+name = "cleanup-hook"
+version = "0.1.0"
+dependencies = [
+ "exasol-udf-macros",
+ "exasol-udf-sdk",
+]
 
 [[package]]
 name = "cmake"
@@ -1248,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "exa-mock-db"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "bench-schema",
  "chrono",
@@ -1262,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "exa-proto"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -1271,12 +1279,13 @@ dependencies = [
 
 [[package]]
 name = "exa-udf-runtime"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "annotated-fixture",
  "arrow",
  "bench-udfs",
  "chrono",
+ "cleanup-hook",
  "criterion",
  "emit-arrow-batch",
  "emit-k",
@@ -1306,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "exa-zmq-protocol"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "exa-proto",
  "exasol-udf-sdk",
@@ -1351,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-macros"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "exasol-udf-sdk",
  "proc-macro2",
@@ -1362,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "exasol-udf-sdk"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -1374,7 +1383,7 @@ dependencies = [
 
 [[package]]
 name = "exaudfclient"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "exa-udf-runtime",
  "tracing",
@@ -2099,7 +2108,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "it"
-version = "0.29.0"
+version = "0.30.0"
 dependencies = [
  "anyhow",
  "arrow",

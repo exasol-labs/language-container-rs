@@ -28,3 +28,22 @@ impl From<libloading::Error> for RuntimeError {
         RuntimeError::Loader(e.to_string())
     }
 }
+
+impl RuntimeError {
+    /// Append an error the hook's context recorded to a hook's `Udf` error,
+    /// unless the hook text already contains it. This is the one place that
+    /// decides how a hook failure absorbs its context's recorded detail, so
+    /// the cleanup hook and the single-call hooks report it the same way.
+    pub(crate) fn with_recorded_detail(self, detail: Option<String>) -> RuntimeError {
+        match (self, detail) {
+            (RuntimeError::Udf(text), Some(detail)) if !text.contains(&detail) => {
+                RuntimeError::Udf(format!("{text}: {detail}"))
+            }
+            (error, _) => error,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

@@ -1,12 +1,13 @@
 use crate::error::RuntimeError;
 use exa_zmq_protocol::IterType;
 use exasol_udf_sdk::abi::{EXA_SDK_FINGERPRINT, EXA_UDF_ABI_VERSION, ExaUdfVTable, OutputShape};
+use exasol_udf_sdk::context::UdfContext;
 use libloading::{Library, Symbol};
 
 /// A loaded UDF shared object plus its validated vtable.
 ///
 /// The `Library` is held alive for the whole session so the OS does not
-/// `dlclose` the object (which would unmap the `run`/`destroy` code and the
+/// `dlclose` the object (which would unmap the `run`/`cleanup` code and the
 /// `.rodata` the fingerprint pointer references) while the runtime still
 /// dispatches into it.
 pub struct LoadedUdf {
@@ -28,7 +29,7 @@ impl LoadedUdf {
     /// metadata — it is used verbatim to build the symbol name, so it must
     /// already be in the exact form the macro derived (i.e. UPPER_SNAKE_CASE).
     ///
-    /// On any mismatch this returns an error WITHOUT calling `run` or `destroy`.
+    /// On any mismatch this returns an error WITHOUT calling `run` or `cleanup`.
     pub fn open(path: &std::path::Path, script_name: &str) -> Result<Self, RuntimeError> {
         let lib = unsafe { Library::new(path) }?;
 
@@ -117,37 +118,24 @@ impl LoadedUdf {
         Ok(())
     }
 
-    /// Invoke the UDF's `run`.
+    /// Invoke the UDF's `run` over `ctx`.
     ///
-    /// # Safety
-    ///
-    /// `ctx_ptr` must be a pointer to a live `&mut dyn UdfContext` (double
-    /// indirection) per the ABI contract in `exasol_udf_sdk::abi`.
-    ///
-    /// `error_out` is a host-owned out-pointer to a `*mut c_char` initialised to
-    /// null. On the user-error path the shim may write a `malloc`-allocated,
-    /// NUL-terminated C string into it; the caller then owns and frees that
-    /// string via `libc::free` (the C-allocator convention shared with the
-    /// other single-call result strings). On the success and panic paths it is
-    /// left untouched.
-    pub unsafe fn run(
-        &self,
-        ctx_ptr: *mut std::ffi::c_void,
-        error_out: *mut *mut std::ffi::c_char,
-    ) -> i32 {
+    /// A non-zero return code becomes `RuntimeError::Udf` carrying
+    /// `UDF run returned error code <rc>`, followed by `: <text>` when the shim
+    /// wrote an error message. The success path allocates nothing, because a
+    /// SCALAR group calls this once per input row.
+    pub fn run(&self, ctx: &mut dyn UdfContext) -> Result<(), RuntimeError> {
         let vtable = unsafe { &*self.vtable };
-        unsafe { (vtable.run)(ctx_ptr, error_out) }
+        unsafe { call_lifecycle_slot("run", vtable.run, ctx) }
     }
 
-    /// Invoke the UDF's `destroy`. Idempotency is the UDF's responsibility.
-    ///
-    /// # Safety
-    ///
-    /// Must be called at most once per `run` cycle and only after `run` has
-    /// returned, per the ABI contract in `exasol_udf_sdk::abi`.
-    pub unsafe fn destroy(&self) {
+    /// Invoke the UDF's cleanup hook over `ctx`, or return `None` when the UDF
+    /// registered none. A failure reads `UDF cleanup returned error code <rc>`
+    /// in the format [`LoadedUdf::run`] documents.
+    pub fn cleanup(&self, ctx: &mut dyn UdfContext) -> Option<Result<(), RuntimeError>> {
         let vtable = unsafe { &*self.vtable };
-        unsafe { (vtable.destroy)() };
+        let slot = vtable.cleanup?;
+        Some(unsafe { call_lifecycle_slot("cleanup", slot, ctx) })
     }
 
     /// The annotated input schema JSON embedded in the vtable, or `None` when
@@ -250,6 +238,33 @@ impl LoadedUdf {
         let hook = vtable.generate_sql_for_export_spec?;
         Some(unsafe { call_ctx_arg_hook("generate_sql_for_export_spec", ctx, json_spec, hook) })
     }
+}
+
+type LifecycleSlot = unsafe extern "C" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_char) -> i32;
+
+/// Call a `(ctx, error_out) -> i32` slot through the double-indirected context
+/// pointer the ABI prescribes, and take ownership of any error text it wrote.
+unsafe fn call_lifecycle_slot(
+    slot_name: &'static str,
+    slot: LifecycleSlot,
+    ctx: &mut dyn UdfContext,
+) -> Result<(), RuntimeError> {
+    let mut ctx_ref: &mut dyn UdfContext = ctx;
+    let ctx_ptr = &mut ctx_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
+    let mut error_out: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rc = unsafe { slot(ctx_ptr, &mut error_out) };
+    if rc == 0 {
+        return Ok(());
+    }
+    if error_out.is_null() {
+        return Err(RuntimeError::Udf(format!(
+            "UDF {slot_name} returned error code {rc}"
+        )));
+    }
+    let text = unsafe { crate::single_call::take_c_string(error_out) };
+    Err(RuntimeError::Udf(format!(
+        "UDF {slot_name} returned error code {rc}: {text}"
+    )))
 }
 
 /// SQL-facing name for an output shape, used in the mismatch error message.

@@ -184,13 +184,12 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
 }}
 
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run(_ctx: *mut c_void, _error_out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy() {{}}
 
 static FINGERPRINT: &str = "{fingerprint_with_nul}";
 
@@ -198,7 +197,7 @@ static VTABLE: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi_version},
     fingerprint: FINGERPRINT.as_ptr() as *const c_char,
     run,
-    destroy,
+    cleanup: None,
 }};
 "#
     )
@@ -431,19 +430,18 @@ pub struct ExaUdfVTable {
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
 }
 unsafe impl Sync for ExaUdfVTable {}
 
 unsafe extern "C" fn run(_: *mut c_void, _: *mut *mut c_char) -> i32 { 0 }
-unsafe extern "C" fn destroy() {}
 
 static FP: &str = "0.0.0:old\0";
 static VTABLE: ExaUdfVTable = ExaUdfVTable {
     abi_version: 4,
     fingerprint: FP.as_ptr() as *const c_char,
     run,
-    destroy,
+    cleanup: None,
 };
 
 #[no_mangle]

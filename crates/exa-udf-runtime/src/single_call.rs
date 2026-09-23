@@ -13,7 +13,9 @@ use std::ffi::{CStr, c_char};
 /// expects exactly one `MT_RETURN` (the function's JSON result) or
 /// `MT_UNDEFINED_CALL` (the function is not implemented in this container) per
 /// call. The session ends when the DB answers `MT_RUN` (or a call's reply) with
-/// `MT_CLEANUP`, after which the client sends `MT_FINISHED`.
+/// `MT_CLEANUP`. This returns without sending the session's final message:
+/// `Runtime::run` runs the cleanup hook, then sends `MT_FINISHED` or the error
+/// close.
 ///
 /// The wire stays in strict REQ/REP lockstep: every request the client sends is
 /// answered by exactly one DB response. A function call therefore costs two
@@ -33,7 +35,7 @@ pub fn run_single_call(
     let handshake = crate::rowset::HandshakeMeta::from(meta);
     // Mirror the canonical C++ single-call loop:
     //   loop { MT_RUN -> MT_CALL; dispatch; MT_RETURN/-UNDEFINED; MT_DONE }
-    //   then MT_FINISHED.
+    //   then cleanup and MT_FINISHED, which `Runtime::run` owns.
     // The DB acknowledges the container's MT_RETURN with MT_RETURN (not
     // MT_CLEANUP); the session only ends when the DB answers a later MT_RUN or
     // MT_DONE with MT_CLEANUP.
@@ -91,8 +93,6 @@ pub fn run_single_call(
         }
     }
 
-    // Client-initiated teardown: MT_FINISHED, then the DB echoes it.
-    request(transport, proto, proto.finished_reply())?;
     Ok(())
 }
 
@@ -230,12 +230,8 @@ where
     // indirection), exactly as the run loop does.
     let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-    let result = call(ctx_ptr, arg).map(|r| {
-        r.map_err(|e| match bridge.take_last_error() {
-            Some(detail) => RuntimeError::Udf(format!("{e}: {detail}")),
-            None => e,
-        })
-    });
+    let result =
+        call(ctx_ptr, arg).map(|r| r.map_err(|e| e.with_recorded_detail(bridge.take_last_error())));
     hook_outcome(result)
 }
 
