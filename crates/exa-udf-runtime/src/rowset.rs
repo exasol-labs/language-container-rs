@@ -1409,12 +1409,17 @@ pub struct HostContextBridge<'a> {
 
 /// Owned snapshot of the handshake metadata the bridge surfaces to UDF code.
 ///
-/// Bundles the `exascript_info` identity/origin fields, the memory limit and the
-/// declared iteration axes so they thread through the bridge constructors as one
-/// argument. Strings are owned (not borrowed) because the corresponding
-/// `UdfContext` accessors return owned `String`/`Option<String>` across the
-/// `.so` vtable boundary. Built from a `&UdfMeta` via `From`; `Default` yields
-/// the all-neutral value tests use.
+/// Bundles the `exascript_info` identity/origin fields and the memory limit so
+/// they thread through the bridge constructors as one argument. Strings are
+/// owned (not borrowed) because the corresponding `UdfContext` accessors
+/// return owned `String`/`Option<String>` across the `.so` vtable boundary.
+/// Built from a `&UdfMeta` via `From`; `Default` yields the all-neutral value
+/// tests use.
+///
+/// The iteration axes are deliberately not here: `HostContextBridge` already
+/// owns them natively (set by `configure_group_input`), so a copy here would
+/// sit unused; `SingleCallContext` holds its own axis fields for the same
+/// reason instead of reading them off this struct.
 #[derive(Debug, Clone, Default)]
 pub struct HandshakeMeta {
     pub session_id: u64,
@@ -1430,8 +1435,6 @@ pub struct HandshakeMeta {
     pub current_user: Option<String>,
     pub current_schema: Option<String>,
     pub scope_user: Option<String>,
-    pub input_iter: IterType,
-    pub output_iter: IterType,
 }
 
 impl From<&exa_zmq_protocol::UdfMeta> for HandshakeMeta {
@@ -1450,8 +1453,6 @@ impl From<&exa_zmq_protocol::UdfMeta> for HandshakeMeta {
             current_user: meta.current_user.clone(),
             current_schema: meta.current_schema.clone(),
             scope_user: meta.scope_user.clone(),
-            input_iter: meta.input_iter(),
-            output_iter: meta.output_iter(),
         }
     }
 }
@@ -1849,6 +1850,11 @@ pub struct SingleCallContext<'a> {
     /// override the SDK's defaulted `UdfContext` accessors with the live
     /// DB-supplied values, giving parity with `HostContextBridge`.
     handshake: HandshakeMeta,
+    /// Declared iteration axes, read directly (not via `handshake`) for the
+    /// same reason `HostContextBridge` keeps its own copy: single-call mode
+    /// has no group/batch state to derive them from otherwise.
+    input_iter: IterType,
+    output_iter: IterType,
     #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
     /// Anchors the `'a` lifetime when connect-back is disabled (the requester is
@@ -1860,11 +1866,15 @@ pub struct SingleCallContext<'a> {
 impl<'a> SingleCallContext<'a> {
     pub fn new(
         handshake: HandshakeMeta,
+        input_iter: IterType,
+        output_iter: IterType,
         #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
     ) -> Self {
         SingleCallContext {
             last_error: std::cell::Cell::new(None),
             handshake,
+            input_iter,
+            output_iter,
             #[cfg(feature = "connect-back")]
             conn_requester,
             #[cfg(not(feature = "connect-back"))]
@@ -1909,11 +1919,11 @@ impl UdfContext for SingleCallContext<'_> {
     }
 
     fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.handshake.input_iter))
+        Some(input_type_of(self.input_iter))
     }
 
     fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.handshake.output_iter))
+        Some(output_type_of(self.output_iter))
     }
 
     delegate_connect_back_hooks!();

@@ -78,6 +78,8 @@ fn single_call_context_debug_level_returns_valid_level() {
     #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
         Box::new(|_name| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                 "no credential fetcher".into(),
@@ -85,7 +87,11 @@ fn single_call_context_debug_level_returns_valid_level() {
         }),
     );
     #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(HandshakeMeta::default());
+    let ctx = SingleCallContext::new(
+        HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
+    );
 
     let level = ctx.debug_level();
     assert!(
@@ -1013,7 +1019,7 @@ fn rows_in_group_is_carried_from_the_input_batch() {
 
 /// The host bridge reports the same iteration axes `configure_group_input`
 /// installed — the fields the `emit`/`next` gates already read — and the
-/// single-call context reports the axes its `HandshakeMeta` carries.
+/// single-call context reports the axes passed to its constructor.
 #[test]
 fn context_reports_the_declared_iteration_axes() {
     let (table, meta) = single_int_batch();
@@ -1028,18 +1034,19 @@ fn context_reports_the_declared_iteration_axes() {
     assert_eq!(bridge.input_type(), Some(InputType::Scalar));
     assert_eq!(bridge.output_type(), Some(OutputType::Emits));
 
-    let ctx = single_call_ctx_with(HandshakeMeta {
-        input_iter: IterType::Multiple,
-        output_iter: IterType::ExactlyOnce,
-        ..Default::default()
-    });
+    let ctx = single_call_ctx_with(
+        HandshakeMeta::default(),
+        IterType::Multiple,
+        IterType::ExactlyOnce,
+    );
     assert_eq!(ctx.input_type(), Some(InputType::Set));
     assert_eq!(ctx.output_type(), Some(OutputType::Returns));
 }
 
-/// The axes reach the single-call context through `HandshakeMeta`, so a
-/// SCALAR/RETURNS script reports Scalar/Returns with no second call to install
-/// them — there is no construction path that can leave them at SET/EMITS.
+/// The axes reach the single-call context straight from the handshake's
+/// `UdfMeta`, so a SCALAR/RETURNS script reports Scalar/Returns with no second
+/// call to install them — there is no construction path that can leave them
+/// at SET/EMITS.
 #[test]
 fn single_call_context_reports_a_scalar_handshake_as_scalar() {
     use exa_proto::{ExascriptInfo, ExascriptMetadata, IterType as PbIterType};
@@ -1054,7 +1061,11 @@ fn single_call_context_reports_a_scalar_handshake_as_scalar() {
     )
     .unwrap();
 
-    let ctx = single_call_ctx_with(HandshakeMeta::from(&meta));
+    let ctx = single_call_ctx_with(
+        HandshakeMeta::from(&meta),
+        meta.input_iter(),
+        meta.output_iter(),
+    );
 
     assert_eq!(ctx.input_type(), Some(InputType::Scalar));
     assert_eq!(ctx.output_type(), Some(OutputType::Returns));
@@ -1115,7 +1126,6 @@ fn bridge_returns_handshake_metadata() {
         current_user: Some("ALICE".to_string()),
         current_schema: None,
         scope_user: None,
-        ..Default::default()
     };
     let bridge = HostContextBridge::new(
         &mut rs,
@@ -1169,12 +1179,13 @@ fn single_call_context_returns_handshake_metadata() {
         current_user: Some("ALICE".to_string()),
         current_schema: None,
         scope_user: None,
-        ..Default::default()
     };
 
     #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         handshake,
+        IterType::default(),
+        IterType::default(),
         Box::new(|_name| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                 "no credential fetcher in test".into(),
@@ -1182,7 +1193,7 @@ fn single_call_context_returns_handshake_metadata() {
         }),
     );
     #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(handshake);
+    let ctx = SingleCallContext::new(handshake, IterType::default(), IterType::default());
 
     // Numeric accessors return the exact UdfMeta values, no rescaling.
     assert_eq!(ctx.session_id(), 4242);
@@ -1630,6 +1641,8 @@ fn bridge_connection_error_is_recorded_via_record_error() {
 fn single_call_context_connection_error_is_recorded_via_record_error() {
     let mut ctx = SingleCallContext::new(
         HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
         Box::new(|name: &str| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
                 "no such connection: {name}"
@@ -1655,14 +1668,24 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
 /// Construct a `SingleCallContext`, supplying the connect-back arg only when
 /// the feature is enabled so call sites compile either way.
 fn single_call_ctx() -> SingleCallContext<'static> {
-    single_call_ctx_with(HandshakeMeta::default())
+    single_call_ctx_with(
+        HandshakeMeta::default(),
+        IterType::default(),
+        IterType::default(),
+    )
 }
 
-fn single_call_ctx_with(handshake: HandshakeMeta) -> SingleCallContext<'static> {
+fn single_call_ctx_with(
+    handshake: HandshakeMeta,
+    input_iter: IterType,
+    output_iter: IterType,
+) -> SingleCallContext<'static> {
     #[cfg(feature = "connect-back")]
     {
         SingleCallContext::new(
             handshake,
+            input_iter,
+            output_iter,
             Box::new(|_name: &str| {
                 Err(exasol_udf_sdk::error::UdfError::ConnectBack(
                     "no credential fetcher in test".into(),
@@ -1672,7 +1695,7 @@ fn single_call_ctx_with(handshake: HandshakeMeta) -> SingleCallContext<'static> 
     }
     #[cfg(not(feature = "connect-back"))]
     {
-        SingleCallContext::new(handshake)
+        SingleCallContext::new(handshake, input_iter, output_iter)
     }
 }
 

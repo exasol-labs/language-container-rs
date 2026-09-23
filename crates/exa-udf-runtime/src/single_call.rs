@@ -2,7 +2,7 @@ use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
 use crate::wire::{close_error, request};
 use exa_proto::SingleCallFunctionId;
-use exa_zmq_protocol::{HostEvent, Protocol, UdfMeta, ZmqTransport};
+use exa_zmq_protocol::{HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
 use std::ffi::{CStr, c_char};
 
@@ -55,6 +55,8 @@ pub fn run_single_call(
                     transport,
                     proto: &mut *proto,
                     handshake: handshake.clone(),
+                    input_iter: meta.input_iter(),
+                    output_iter: meta.output_iter(),
                 };
                 let outcome = invoke_hook(session, udf, call)?;
                 let undefined = matches!(outcome, HookOutcome::Undefined);
@@ -124,6 +126,8 @@ struct CallSession<'a> {
     transport: &'a ZmqTransport,
     proto: &'a mut Protocol,
     handshake: crate::rowset::HandshakeMeta,
+    input_iter: IterType,
+    output_iter: IterType,
 }
 
 fn invoke_hook(
@@ -198,6 +202,8 @@ where
         transport,
         proto,
         handshake,
+        input_iter,
+        output_iter,
     } = session;
 
     // `transport`/`proto` feed the on-demand MT_IMPORT closure only when
@@ -215,6 +221,8 @@ where
 
     let mut bridge = crate::rowset::SingleCallContext::new(
         handshake,
+        input_iter,
+        output_iter,
         #[cfg(feature = "connect-back")]
         conn_requester,
     );
@@ -222,14 +230,13 @@ where
     // indirection), exactly as the run loop does.
     let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
     let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-    match call(ctx_ptr, arg) {
-        Some(Ok(s)) => Ok(HookOutcome::Returned(s)),
-        Some(Err(e)) => Err(match bridge.take_last_error() {
+    let result = call(ctx_ptr, arg).map(|r| {
+        r.map_err(|e| match bridge.take_last_error() {
             Some(detail) => RuntimeError::Udf(format!("{e}: {detail}")),
             None => e,
-        }),
-        None => Ok(HookOutcome::Undefined),
-    }
+        })
+    });
+    hook_outcome(result)
 }
 
 /// The name reported in `MT_UNDEFINED_CALL`: the SDK hook an author would
