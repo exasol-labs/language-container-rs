@@ -1723,6 +1723,40 @@ macro_rules! delegate_connect_back_session {
     };
 }
 
+/// Row I/O refusals for contexts without a row set; each names its own phase.
+macro_rules! refuse_row_io {
+    (get: $get:expr, emit: $emit:expr, next: $next:expr $(,)?) => {
+        fn input_column_count(&self) -> usize {
+            0
+        }
+
+        fn get(&self, _col: usize) -> Result<&Value, UdfError> {
+            Err(UdfError::Unimplemented($get.into()))
+        }
+
+        fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented($emit.into()))
+        }
+
+        fn next(&mut self) -> Result<bool, UdfError> {
+            Err(UdfError::Unimplemented($next.into()))
+        }
+    };
+}
+
+/// `input_type`/`output_type`, derived from `input_iter`/`output_iter`.
+macro_rules! delegate_iter_types {
+    () => {
+        fn input_type(&self) -> Option<InputType> {
+            Some(input_type_of(self.input_iter))
+        }
+
+        fn output_type(&self) -> Option<OutputType> {
+            Some(output_type_of(self.output_iter))
+        }
+    };
+}
+
 impl UdfContext for HostContextBridge<'_> {
     fn input_column_count(&self) -> usize {
         self.input_cols.len()
@@ -1822,13 +1856,7 @@ impl UdfContext for HostContextBridge<'_> {
         self.input.rows_in_group()
     }
 
-    fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.input_iter))
-    }
-
-    fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.output_iter))
-    }
+    delegate_iter_types!();
 
     delegate_connection_lookup!();
     delegate_connect_back_session!();
@@ -1894,37 +1922,13 @@ impl<'a> SingleCallContext<'a> {
 }
 
 impl UdfContext for SingleCallContext<'_> {
-    fn input_column_count(&self) -> usize {
-        0
-    }
-
     delegate_handshake_meta!();
-
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode has no input columns".into(),
-        ))
+    refuse_row_io! {
+        get: "single-call mode has no input columns",
+        emit: "single-call mode does not emit rows",
+        next: "single-call mode has no input rows",
     }
-
-    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode does not emit rows".into(),
-        ))
-    }
-
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode has no input rows".into(),
-        ))
-    }
-
-    fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.input_iter))
-    }
-
-    fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.output_iter))
-    }
+    delegate_iter_types!();
 
     delegate_connection_lookup!();
     delegate_connect_back_session!();
@@ -1960,35 +1964,13 @@ impl CleanupContext {
 }
 
 impl UdfContext for CleanupContext {
-    fn input_column_count(&self) -> usize {
-        0
-    }
-
     delegate_handshake_meta!();
-
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Unimplemented(
-            "cleanup has no input row to read".into(),
-        ))
+    refuse_row_io! {
+        get: "cleanup has no input row to read",
+        emit: "cleanup cannot emit rows: the database accepts no output after MT_CLEANUP",
+        next: "cleanup has no input rows",
     }
-
-    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
-        Err(UdfError::Unimplemented(
-            "cleanup cannot emit rows: the database accepts no output after MT_CLEANUP".into(),
-        ))
-    }
-
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Err(UdfError::Unimplemented("cleanup has no input rows".into()))
-    }
-
-    fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.input_iter))
-    }
-
-    fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.output_iter))
-    }
+    delegate_iter_types!();
 
     fn connection(
         &self,
