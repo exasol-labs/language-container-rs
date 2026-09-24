@@ -1,4 +1,5 @@
 use super::*;
+use exasol_udf_sdk::test_support::TestContext;
 
 // ---------------------------------------------------------------------------
 // Helpers shared by inline loader tests
@@ -19,19 +20,18 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
 }}
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run_stub(_ctx: *mut c_void, _out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy_stub() {{}}
 
 static FP: &str = "0.0.0:stub\0";
 static VT: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi_version},
     fingerprint: FP.as_ptr() as *const c_char,
     run: run_stub,
-    destroy: destroy_stub,
+    cleanup: None,
 }};
 
 #[no_mangle]
@@ -80,7 +80,7 @@ pub struct ExaUdfVTable {{
     pub abi_version: u32,
     pub fingerprint: *const c_char,
     pub run: unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32,
-    pub destroy: unsafe extern "C" fn(),
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void, *mut *mut c_char) -> i32>,
     pub default_output_columns: Option<unsafe extern "C" fn(*mut *mut c_char) -> i32>,
     pub virtual_schema_adapter_call:
         Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_char) -> i32>,
@@ -95,14 +95,13 @@ pub struct ExaUdfVTable {{
 unsafe impl Sync for ExaUdfVTable {{}}
 
 unsafe extern "C" fn run_stub(_ctx: *mut c_void, _out: *mut *mut c_char) -> i32 {{ 0 }}
-unsafe extern "C" fn destroy_stub() {{}}
 
 static FP: &str = "{host_fp}\0";
 static VT: ExaUdfVTable = ExaUdfVTable {{
     abi_version: {abi},
     fingerprint: FP.as_ptr() as *const c_char,
     run: run_stub,
-    destroy: destroy_stub,
+    cleanup: None,
     default_output_columns: None,
     virtual_schema_adapter_call: None,
     generate_sql_for_import_spec: None,
@@ -265,4 +264,40 @@ fn generic_message_when_error_text_empty() {
 fn success_path_returns_written_string() {
     let result = unsafe { call_noarg_hook("my_hook", hook_success) };
     assert_eq!(result.unwrap(), "the value");
+}
+
+unsafe extern "C" fn slot_error_with_msg(
+    _ctx: *mut std::ffi::c_void,
+    error_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    unsafe {
+        *error_out = libc::strdup(c"cleanup broke".as_ptr());
+    }
+    1
+}
+
+unsafe extern "C" fn slot_panic_code(
+    _ctx: *mut std::ffi::c_void,
+    _error_out: *mut *mut std::ffi::c_char,
+) -> i32 {
+    2
+}
+
+#[test]
+fn lifecycle_slot_error_names_the_slot_code_and_text() {
+    let mut ctx = TestContext::set(vec![]);
+    let mut err = |slot_name, slot| {
+        unsafe { call_lifecycle_slot(slot_name, slot, &mut ctx) }
+            .unwrap_err()
+            .to_string()
+    };
+
+    assert_eq!(
+        err("cleanup", slot_error_with_msg),
+        "UDF error: UDF cleanup returned error code 1: cleanup broke"
+    );
+    assert_eq!(
+        err("run", slot_panic_code),
+        "UDF error: UDF run returned error code 2"
+    );
 }

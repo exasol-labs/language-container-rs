@@ -29,8 +29,6 @@ unsafe extern "C" fn run_shim(_ctx: *mut std::ffi::c_void, _error_out: *mut *mut
     0
 }
 
-unsafe extern "C" fn destroy_shim() {}
-
 unsafe extern "C" fn default_output_columns(result: *mut *mut c_char) -> i32 {
     unsafe {
         write_result(r#"[{"name":"c0","type":"Int64"}]"#, result);
@@ -121,7 +119,7 @@ static VTABLE: exasol_udf_sdk::abi::ExaUdfVTable = exasol_udf_sdk::abi::ExaUdfVT
     abi_version: exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION,
     fingerprint: exasol_udf_sdk::abi::EXA_SDK_FINGERPRINT.as_ptr() as *const c_char,
     run: run_shim,
-    destroy: destroy_shim,
+    cleanup: None,
     default_output_columns: Some(default_output_columns),
     virtual_schema_adapter_call: Some(virtual_schema_adapter_call),
     generate_sql_for_import_spec: Some(generate_sql_for_import_spec),

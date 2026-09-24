@@ -94,7 +94,8 @@ jobs:
             -p timestamp-precision \
             -p type-probe \
             -p import-export-spec \
-            -p rows-in-group
+            -p rows-in-group \
+            -p cleanup-hook
 
       - name: Build IT test binary (compile once)
         run: |

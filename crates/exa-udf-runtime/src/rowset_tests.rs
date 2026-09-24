@@ -1736,6 +1736,27 @@ fn single_call_context_next_is_unimplemented() {
     }
 }
 
+#[test]
+fn cleanup_context_refuses_connection_lookup() {
+    let handshake = HandshakeMeta {
+        script_name: "CLEANUP_PROBE".to_string(),
+        ..HandshakeMeta::default()
+    };
+    let mut ctx = CleanupContext::new(handshake, IterType::Multiple, IterType::Multiple);
+
+    let refusal = match ctx.connection("CB_SELF") {
+        Err(UdfError::ConnectBack(msg)) => msg,
+        other => panic!("expected a ConnectBack refusal, got {other:?}"),
+    };
+    assert!(refusal.contains("unavailable during cleanup") && refusal.contains("run()"));
+    assert_eq!(
+        ctx.take_last_error(),
+        Some(UdfError::ConnectBack(refusal).to_string())
+    );
+    assert_eq!(ctx.script_name(), "CLEANUP_PROBE");
+    assert!(ctx.next().is_err() && ctx.get(0).is_err() && ctx.emit(vec![]).is_err());
+}
+
 // -----------------------------------------------------------------------
 // Permanent regression guard: the string-block fast-path formatters
 // (`value_to_block_string`'s NUMERIC/DATE/TIMESTAMP branches) must stay

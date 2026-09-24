@@ -32,8 +32,8 @@ pub(crate) struct VTableProbe {
     pub(crate) fingerprint: *const std::ffi::c_char,
     /// Offset 16: run fn pointer (8 bytes).
     pub(crate) run: *const std::ffi::c_void,
-    /// Offset 24: destroy fn pointer (8 bytes).
-    pub(crate) destroy: *const std::ffi::c_void,
+    /// Offset 24: optional cleanup fn (Option<fn> = 8 bytes).
+    pub(crate) cleanup: *const std::ffi::c_void,
     /// Offset 32: optional default_output_columns fn (Option<fn> = 8 bytes).
     pub(crate) default_output_columns: *const std::ffi::c_void,
     /// Offset 40: optional virtual_schema_adapter_call fn (8 bytes).

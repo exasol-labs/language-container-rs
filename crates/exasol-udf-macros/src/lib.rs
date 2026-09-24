@@ -21,7 +21,8 @@ impl Parse for SchemaField {
 }
 
 /// The parsed `input(...)` / `emits(...)` / `vs_adapter(path)` /
-/// `import_spec(path)` / `export_spec(path)` / `name = "..."` annotations.
+/// `import_spec(path)` / `export_spec(path)` / `cleanup(path)` /
+/// `name = "..."` annotations.
 #[derive(Default)]
 struct Annotations {
     input: Option<Vec<SchemaField>>,
@@ -37,6 +38,8 @@ struct Annotations {
     /// `generate_sql_for_export_spec` slot; the `&str` is the EXPORT
     /// specification as JSON.
     export_spec: Option<Path>,
+    /// `fn(&mut dyn UdfContext) -> Result<(), UdfError>` for the `cleanup` slot.
+    cleanup: Option<Path>,
     /// Verbatim SQL name override; when absent the SQL name is derived from the
     /// Rust function identifier by uppercasing every ASCII character.
     name: Option<String>,
@@ -73,26 +76,15 @@ impl Parse for Annotations {
                     syn::parenthesized!(content in input);
                     annotations.emits = Some(parse_schema_fields(&content)?);
                 }
-                "vs_adapter" => {
-                    let content;
-                    syn::parenthesized!(content in input);
-                    annotations.vs_adapter = Some(content.parse::<Path>()?);
-                }
-                "import_spec" => {
-                    let content;
-                    syn::parenthesized!(content in input);
-                    annotations.import_spec = Some(content.parse::<Path>()?);
-                }
-                "export_spec" => {
-                    let content;
-                    syn::parenthesized!(content in input);
-                    annotations.export_spec = Some(content.parse::<Path>()?);
-                }
+                "vs_adapter" => annotations.vs_adapter = Some(parse_path_section(input)?),
+                "import_spec" => annotations.import_spec = Some(parse_path_section(input)?),
+                "export_spec" => annotations.export_spec = Some(parse_path_section(input)?),
+                "cleanup" => annotations.cleanup = Some(parse_path_section(input)?),
                 other => {
                     return Err(syn::Error::new(
                         section.span(),
                         format!(
-                            "unknown annotation `{other}`, expected `name`, `input`, `emits`, `vs_adapter`, `import_spec`, or `export_spec`"
+                            "unknown annotation `{other}`, expected `name`, `input`, `emits`, `vs_adapter`, `import_spec`, `export_spec`, or `cleanup`"
                         ),
                     ));
                 }
@@ -110,6 +102,12 @@ impl Parse for Annotations {
 fn parse_schema_fields(content: ParseStream) -> syn::Result<Vec<SchemaField>> {
     let fields = Punctuated::<SchemaField, Token![,]>::parse_terminated(content)?;
     Ok(fields.into_iter().collect())
+}
+
+fn parse_path_section(input: ParseStream) -> syn::Result<Path> {
+    let content;
+    syn::parenthesized!(content in input);
+    content.parse()
 }
 
 /// The output shape derived from a UDF function's return type.
@@ -237,7 +235,6 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output_schema_ident = format_ident!("__EXA_OUTPUT_SCHEMA_{udf_name}");
     let write_c_string_ident = write_c_string_ident_for(&udf_name);
     let run_shim_ident = format_ident!("__exa_run_shim_{udf_name}");
-    let destroy_shim_ident = format_ident!("__exa_destroy_shim_{udf_name}");
     let vtable_ident = format_ident!("__EXA_VTABLE_{udf_name}");
     let entry_ident = format_ident!("__exa_udf_entry_{udf_name}");
 
@@ -267,6 +264,8 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
         &udf_name,
         "generate_sql_for_export_spec",
     );
+    let (cleanup_shim, cleanup_slot) =
+        build_cleanup_tokens(annotations.cleanup.as_ref(), &udf_name);
 
     // Derive the output shape from the return type. EMITS calls the UDF and lets
     // it emit; RETURNS threads the returned `Option<T>` through the `IntoValue`
@@ -293,6 +292,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! { ::exasol_udf_sdk::abi::OutputShape::Returns },
         ),
     };
+    let run_shim = build_lifecycle_shim(&run_shim_ident, &udf_name, run_call_body);
 
     let expanded = quote! {
         #input_fn
@@ -326,45 +326,8 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        unsafe extern "C" fn #run_shim_ident(
-            ctx_ptr: *mut ::std::ffi::c_void,
-            error_out: *mut *mut ::std::ffi::c_char,
-        ) -> i32 {
-            // The closure captures `ctx_ptr` (a raw pointer), which is not
-            // UnwindSafe. AssertUnwindSafe is sound here: nothing observable
-            // is left in a broken state after a panic — the shim simply maps
-            // the panic to error code 2 and returns.
-            let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
-                // SAFETY: `ctx_ptr` is a thin pointer, but `&mut dyn UdfContext`
-                // is a fat pointer (data + vtable), so it cannot be cast directly.
-                // The ABI contract is therefore double-indirection: the host
-                // passes `&mut (&mut dyn UdfContext)` erased to `*mut c_void`.
-                // We restore the outer reference and dereference it to obtain the
-                // fat trait-object reference. The host guarantees the pointer is
-                // valid and outlives this call (see exasol_udf_sdk::abi docs).
-                let ctx: &mut &mut dyn ::exasol_udf_sdk::context::UdfContext = unsafe {
-                    &mut *(ctx_ptr as *mut &mut dyn ::exasol_udf_sdk::context::UdfContext)
-                };
-                #run_call_body
-            }));
-            match result {
-                ::std::result::Result::Ok(::std::result::Result::Ok(())) => 0,
-                ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
-                    if !error_out.is_null() {
-                        unsafe {
-                            #write_c_string_ident(
-                                &::std::string::ToString::to_string(&e),
-                                error_out,
-                            );
-                        }
-                    }
-                    1
-                }
-                ::std::result::Result::Err(_) => 2,
-            }
-        }
-
-        unsafe extern "C" fn #destroy_shim_ident() {}
+        #run_shim
+        #cleanup_shim
 
         #vs_adapter_shim
         #import_spec_shim
@@ -375,7 +338,7 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
             abi_version: ::exasol_udf_sdk::abi::EXA_UDF_ABI_VERSION,
             fingerprint: ::exasol_udf_sdk::abi::EXA_SDK_FINGERPRINT.as_ptr() as *const ::std::ffi::c_char,
             run: #run_shim_ident,
-            destroy: #destroy_shim_ident,
+            cleanup: #cleanup_slot,
             default_output_columns: ::std::option::Option::None,
             virtual_schema_adapter_call: #vs_adapter_slot,
             generate_sql_for_import_spec: #import_spec_slot,
@@ -394,10 +357,68 @@ pub fn exasol_udf(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// The generated helper that hands an owned C string back over the vtable: one
-/// owner of the name, because the run shim and every single-call shim call it.
+/// Name of the generated helper that hands an owned C string over the vtable.
 fn write_c_string_ident_for(udf_name: &str) -> proc_macro2::Ident {
     format_ident!("__exa_write_c_string_{udf_name}")
+}
+
+/// Shim for the `run`/`cleanup` `(ctx, error_out) -> i32` ABI: `Ok` → 0,
+/// `Err` → 1, panic → 2.
+fn build_lifecycle_shim(
+    shim_ident: &proc_macro2::Ident,
+    udf_name: &str,
+    call_body: TokenStream2,
+) -> TokenStream2 {
+    let write_c_string_ident = write_c_string_ident_for(udf_name);
+    quote! {
+        unsafe extern "C" fn #shim_ident(
+            ctx_ptr: *mut ::std::ffi::c_void,
+            error_out: *mut *mut ::std::ffi::c_char,
+        ) -> i32 {
+            // The closure captures `ctx_ptr` (a raw pointer), which is not
+            // UnwindSafe. AssertUnwindSafe is sound here: nothing observable
+            // is left in a broken state after a panic — the shim simply maps
+            // the panic to error code 2 and returns.
+            let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                // SAFETY: `ctx_ptr` is a thin pointer, but `&mut dyn UdfContext`
+                // is a fat pointer (data + vtable), so it cannot be cast directly.
+                // The ABI contract is therefore double-indirection: the host
+                // passes `&mut (&mut dyn UdfContext)` erased to `*mut c_void`.
+                // We restore the outer reference and dereference it to obtain the
+                // fat trait-object reference. The host guarantees the pointer is
+                // valid and outlives this call (see exasol_udf_sdk::abi docs).
+                let ctx: &mut &mut dyn ::exasol_udf_sdk::context::UdfContext = unsafe {
+                    &mut *(ctx_ptr as *mut &mut dyn ::exasol_udf_sdk::context::UdfContext)
+                };
+                #call_body
+            }));
+            match result {
+                ::std::result::Result::Ok(::std::result::Result::Ok(())) => 0,
+                ::std::result::Result::Ok(::std::result::Result::Err(e)) => {
+                    if !error_out.is_null() {
+                        unsafe {
+                            #write_c_string_ident(
+                                &::std::string::ToString::to_string(&e),
+                                error_out,
+                            );
+                        }
+                    }
+                    1
+                }
+                ::std::result::Result::Err(_) => 2,
+            }
+        }
+    }
+}
+
+fn build_cleanup_tokens(path: Option<&Path>, udf_name: &str) -> (TokenStream2, TokenStream2) {
+    let Some(cleanup_fn) = path else {
+        return (quote! {}, quote! { ::std::option::Option::None });
+    };
+    let shim_ident = format_ident!("__exa_cleanup_shim_{udf_name}");
+    let shim = build_lifecycle_shim(&shim_ident, udf_name, quote! { #cleanup_fn(*ctx) });
+    let slot = quote! { ::std::option::Option::Some(#shim_ident) };
+    (shim, slot)
 }
 
 /// Build the shim and vtable-slot expression for one context-taking single-call

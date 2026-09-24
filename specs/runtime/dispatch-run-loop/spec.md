@@ -1,24 +1,16 @@
 # Feature: dispatch-run-loop
 
-Orchestrates driving the scalar/set run loop over the wire protocol — covering iteration-shape dispatch, bridge row materialisation, context-contract enforcement, UDF error propagation, and connect-back availability. The `EmitBuffer`/`InputRowSet` rowset codec this loop drives (output packing, flush-threshold accounting, and any promoted fast-path formatter/parser) is specified separately in `runtime/rowset-codec`; the opt-in Arrow batch-emit path is specified separately in `runtime/emit-arrow-batch`. Loader validation and artifact resolution are specified separately in `runtime/dispatch-loader`. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
+Orchestrates driving the scalar/set run loop over the wire protocol, covering iteration-shape dispatch, UDF error propagation, and connect-back availability. Input row materialization, handshake identity/origin metadata, and output-row validation are specified separately in `runtime/dispatch-context-bridge`. The session-end cleanup hook this loop shares with single-call dispatch is specified separately in `runtime/dispatch-cleanup-hook`. The `EmitBuffer`/`InputRowSet` rowset codec this loop drives (output packing, flush-threshold accounting, and any promoted fast-path formatter/parser) is specified separately in `runtime/rowset-codec`; the opt-in Arrow batch-emit path is specified separately in `runtime/emit-arrow-batch`. Loader validation and artifact resolution are specified separately in `runtime/dispatch-loader`. Single-call dispatch is specified separately in `runtime/dispatch-single-call`. The connect-back host implementation is specified separately in `runtime/connect-back`.
 
 ## Background
 
-The runtime drives dispatch via the pure protocol state machine after a `.so` has been loaded. The `HostContextBridge` adapts the host-internal `UdfMeta` and rowset codec into the `&dyn UdfContext` the UDF sees, threading handshake metadata (memory limit and the `exascript_info` identity/origin fields) in at construction so the bridge can override the SDK's defaulted accessors with live values.
+The runtime drives dispatch via the pure protocol state machine after a `.so` has been loaded. The `HostContextBridge` adapts the host-internal `UdfMeta` and rowset codec into the `&dyn UdfContext` the UDF sees (see `runtime/dispatch-context-bridge`).
 
 The dispatcher MUST branch on the two `UdfMeta` iteration axes. The input axis (`input_iter`: `ExactlyOnce` = scalar, `Multiple` = set) selects who drives the input loop: for scalar the framework owns the per-row loop and invokes `run()` once per input row; for set the UDF drives its own loop via `ctx.next()` and `run()` is invoked once per input group. The output axis (`output_iter`: `ExactlyOnce` = RETURNS, `Multiple` = EMITS) selects the emit contract. The contracts match the reference Exasol containers' rejection semantics; shape is a runtime property (from the handshake metadata), not a Rust compile-time property, so enforcement is at runtime and surfaced through the `F-UDF-CL-RUST-` error-close path.
 
 RETURNS output uses a value-return channel: the UDF function returns its value (`Some(v)` → one row, `None` → SQL NULL), the framework records it through `UdfContext::set_return` and emits the single row, and author-called `ctx.emit()` is banned in RETURNS context. EMITS output is unchanged — the UDF produces rows via `ctx.emit()`. The compiled output shape (from the `.so` vtable marker) is validated against `meta.output_iter` so a mismatch is a clear error rather than UB. The SDK exposes no `reset()` method, so the reference's "`reset()` banned in scalar" rule has no SDK surface to gate.
 
 ## Scenarios
-
-### Scenario: Bridge materializes input rows into typed accessors
-
-* *GIVEN* a `HostContextBridge` over a fake transport delivering one input batch of mixed column types, where the protobuf `ExascriptTableData` lays out values row-major within each type block (non-null cells only)
-* *WHEN* a UDF calls `next` then the typed accessors
-* *THEN* `next` MUST return `true` while rows remain and `false` when input is exhausted
-* *AND* each typed accessor MUST return the correct value for the current row by advancing per-type cursors only on non-null cells — a NULL cell MUST NOT consume a slot in its type block
-* *AND* a NULL cell MUST be returned as `Value::Null`
 
 ### Scenario: Scalar dispatch invokes the UDF once per input row
 
@@ -74,7 +66,7 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 * *GIVEN* a loaded UDF whose `run` returns a non-zero error code
 * *WHEN* the runtime observes the failure
 * *THEN* it MUST serialize the error message into the protocol close path with the `F-UDF-CL-RUST-` prefix
-* *AND* it MUST call the vtable `destroy` and drop the `Library` before returning failure
+* *AND* it MUST run the UDF's cleanup hook, when the UDF registered one, before sending that close, and MUST drop the `Library` before returning failure
 
 ### Scenario: Dispatch reads UDF error text from the run out-pointer
 
@@ -91,20 +83,3 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 * *THEN* the runtime MUST handle the connect-back MT_IMPORT exchange and session open identically for both `iter_type` values — there MUST be no scalar-specific restriction, guard, or branch that prevents connect-back in the scalar path
 * *AND* the ZMQ socket MUST be idle during `run` in both cases (blocked awaiting UDF function return), making the MT_IMPORT exchange safe in both scalar and set dispatch
 * *AND* `std::process::exit(0)` in `main()` MUST flush the connect-back Tokio runtime in both scalar and set execution paths, preventing the 10 s join delay and the resulting Part:40 SIGABRT
-
-### Scenario: Bridge surfaces handshake identity and origin metadata to the UDF
-
-* *GIVEN* a `HostContextBridge` constructed from a `UdfMeta` whose `exascript_info`-derived fields (`session_id`, `statement_id`, `node_id`, `node_count`, `vm_id`, `database_name`, `database_version`, `script_name`, `script_schema`, `current_user`, `current_schema`, `scope_user`) carry live values
-* *WHEN* a UDF calls the corresponding `UdfContext` handshake accessors
-* *THEN* the bridge MUST override each defaulted accessor to return the exact value carried on the originating `UdfMeta` field, performing no rescaling or reinterpretation
-* *AND* the bridge MUST return the optional accessors (`current_user`, `current_schema`, `scope_user`) as `Some(value)` when the proto field was present and `None` when it was absent
-* *AND* the bridge MUST source every value from `UdfMeta` threaded in at construction time, not from any per-call protocol exchange
-
-### Scenario: Bridge validates every output row and surfaces the column metadata
-
-* *GIVEN* a `HostContextBridge` constructed from a `UdfMeta` whose declared input and output columns carry live values
-* *WHEN* a UDF produces an output row, through `emit` or through the framework's `set_return`, or reads its own column metadata
-* *THEN* the bridge MUST reject a row the declared output columns cannot carry with `UdfError::Type`, before the row is buffered, so no part of it reaches the wire
-* *AND* the rejection MUST close the session through the UDF-error path with the `F-UDF-CL-RUST-` prefixed message naming the offending column
-* *AND* the bridge MUST override the defaulted column accessors to return the declared metadata the handshake supplied, for both the input and the output side
-* *AND* a batch-emitted row MUST be validated against the same declared columns, once per batch before any row of it is materialised

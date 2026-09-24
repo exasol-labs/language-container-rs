@@ -1545,4 +1545,62 @@ fn adapter_connection_probe_combines_hook_and_recorded_errors() {
         err_msg.contains("VS_ADAPTER_ERROR") && err_msg.contains("Connect-back error"),
         "runtime error combines both the hook's and the recorded connect-back error: {err_msg:?}"
     );
+    assert!(
+        err_msg.starts_with("UDF error: VS_ADAPTER_ERROR: Connect-back error"),
+        "the recorded detail follows the hook text under a single UDF error prefix: {err_msg:?}"
+    );
+}
+
+#[test]
+fn single_call_cleanup_runs_before_finished() {
+    let conn_id = 120u64;
+    let source = format!(
+        "%udf_object {}",
+        fixture_cdylib_path("cleanup_hook").display()
+    );
+    let endpoint = endpoint_for("cleanupexport");
+    let ctx = zmq::Context::new();
+    let server = ctx.socket(zmq::REP).unwrap();
+    server.bind(&endpoint).unwrap();
+    let client = spawn_runtime(endpoint);
+    handshake_as(
+        &server,
+        conn_id,
+        &source,
+        ScriptIdentity {
+            name: "EXPORT_CLEANUP",
+            ..Default::default()
+        },
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtRun as i32);
+    send_resp(
+        &server,
+        &export_spec_call(conn_id, Some(ExportSpecificationRep::default())),
+    );
+
+    let req = recv_req(&server);
+    assert_eq!(req.r#type, MessageType::MtReturn as i32);
+    assert_eq!(req.call_result.expect("call_result").result, "SELECT 1");
+    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtClose as i32,
+        "a failing cleanup hook must close the session instead of sending MT_FINISHED"
+    );
+    let close_msg = req
+        .close
+        .and_then(|c| c.exception_message)
+        .unwrap_or_default();
+    assert!(
+        close_msg.contains("cleanup failed on purpose"),
+        "close carries the cleanup error: {close_msg:?}"
+    );
+    client
+        .join()
+        .expect("client thread panicked")
+        .expect_err("a cleanup error must surface as Err");
 }

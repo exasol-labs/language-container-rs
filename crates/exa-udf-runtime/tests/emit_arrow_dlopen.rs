@@ -10,7 +10,6 @@
 use exa_proto::ExascriptTableData;
 use exa_udf_runtime::{EmitBuffer, HandshakeMeta, HostContextBridge, InputRowSet, LoadedUdf};
 use exa_zmq_protocol::{ColumnInfo, ExaType};
-use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::value::Value;
 
 mod common;
@@ -51,7 +50,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
         col("label", ExaType::String { size: 1 }),
     ];
 
-    let rc = {
+    let result = {
         let mut bridge = HostContextBridge::new(
             &mut input,
             &mut emit_buf,
@@ -66,12 +65,9 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
                 ))
             }),
         );
-        let mut dyn_ref: &mut dyn UdfContext = &mut bridge;
-        let ctx_ptr = &mut dyn_ref as *mut &mut dyn UdfContext as *mut std::ffi::c_void;
-        let mut error_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
-        unsafe { udf.run(ctx_ptr, &mut error_ptr as *mut *mut std::ffi::c_char) }
+        udf.run(&mut bridge)
     };
-    assert_eq!(rc, 0, "UDF run returned non-zero");
+    assert!(result.is_ok(), "UDF run failed: {result:?}");
 
     let table = emit_buf.take_proto();
     assert_eq!(table.rows, 3, "expected 3 emitted rows");

@@ -48,6 +48,7 @@ tracing-subscriber = { workspace = true }
 # Fixture cdylibs the tests dlopen; the dependency edge is what makes Cargo
 # build and rebuild them. Path resolution: `tests/common/mod.rs`.
 annotated-fixture = { path = "../../test-udfs/annotated-fixture" }
+cleanup-hook = { path = "../../test-udfs/cleanup-hook" }
 emit-k = { path = "../../test-udfs/emit-k" }
 import-export-spec = { path = "../../test-udfs/import-export-spec" }
 returns-with-emit = { path = "../../test-udfs/returns-with-emit" }

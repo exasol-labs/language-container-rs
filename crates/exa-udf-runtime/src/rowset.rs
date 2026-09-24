@@ -12,9 +12,7 @@ fn null_index(row: usize, col: usize, n_cols: usize) -> usize {
     row * n_cols + col
 }
 
-/// Maps the wire's iteration axis onto the SDK's input-axis vocabulary, shared
-/// by `HostContextBridge` and `SingleCallContext` so both report the same
-/// mapping from one declared `IterType`.
+/// Maps the wire's iteration axis onto the SDK's input axis.
 fn input_type_of(iter: IterType) -> InputType {
     match iter {
         IterType::ExactlyOnce => InputType::Scalar,
@@ -1418,8 +1416,7 @@ pub struct HostContextBridge<'a> {
 ///
 /// The iteration axes are deliberately not here: `HostContextBridge` already
 /// owns them natively (set by `configure_group_input`), so a copy here would
-/// sit unused; `SingleCallContext` holds its own axis fields for the same
-/// reason instead of reading them off this struct.
+/// sit unused; the other contexts hold their own axis fields.
 #[derive(Debug, Clone, Default)]
 pub struct HandshakeMeta {
     pub session_id: u64,
@@ -1608,7 +1605,6 @@ fn request_connection(
 }
 
 /// Open a self-connection back to the DB from a resolved [`ConnectionObject`].
-/// Shared by both context bridges.
 #[cfg(feature = "connect-back")]
 fn open_connect_back(
     conn: &exasol_udf_sdk::connect_back::ConnectionObject,
@@ -1623,8 +1619,7 @@ fn open_connect_back(
         .map(|c| Box::new(c) as Box<dyn exasol_udf_sdk::connect_back::ExaConnection>)
 }
 
-/// The `UdfContext` handshake-metadata getters. `HostContextBridge` and
-/// `SingleCallContext` both forward them to their `handshake` field identically.
+/// The `UdfContext` handshake-metadata getters, forwarded to `handshake`.
 macro_rules! delegate_handshake_meta {
     () => {
         fn memory_limit(&self) -> u64 {
@@ -1685,25 +1680,29 @@ macro_rules! delegate_handshake_meta {
     };
 }
 
-/// The `connect-back` `UdfContext` hooks. Both contexts forward them to the
-/// shared machinery identically, each recording the error on failure.
-macro_rules! delegate_connect_back_hooks {
+/// CONNECTION lookup via `MT_IMPORT`; only for contexts that own the channel.
+macro_rules! delegate_connection_lookup {
     () => {
-        #[cfg(feature = "connect-back")]
-        fn cluster_ip(&self) -> Result<String, UdfError> {
-            let result = first_nonloopback_ipv4();
-            if let Err(ref e) = result {
-                self.record_error(e.to_string());
-            }
-            result
-        }
-
         #[cfg(feature = "connect-back")]
         fn connection(
             &self,
             name: &str,
         ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
             let result = request_connection(&self.conn_requester, name);
+            if let Err(ref e) = result {
+                self.record_error(e.to_string());
+            }
+            result
+        }
+    };
+}
+
+/// Connect-back hooks that do not use the control channel.
+macro_rules! delegate_connect_back_session {
+    () => {
+        #[cfg(feature = "connect-back")]
+        fn cluster_ip(&self) -> Result<String, UdfError> {
+            let result = first_nonloopback_ipv4();
             if let Err(ref e) = result {
                 self.record_error(e.to_string());
             }
@@ -1720,6 +1719,40 @@ macro_rules! delegate_connect_back_hooks {
                 self.record_error(e.to_string());
             }
             result
+        }
+    };
+}
+
+/// Row I/O refusals for contexts without a row set; each names its own phase.
+macro_rules! refuse_row_io {
+    (get: $get:expr, emit: $emit:expr, next: $next:expr $(,)?) => {
+        fn input_column_count(&self) -> usize {
+            0
+        }
+
+        fn get(&self, _col: usize) -> Result<&Value, UdfError> {
+            Err(UdfError::Unimplemented($get.into()))
+        }
+
+        fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
+            Err(UdfError::Unimplemented($emit.into()))
+        }
+
+        fn next(&mut self) -> Result<bool, UdfError> {
+            Err(UdfError::Unimplemented($next.into()))
+        }
+    };
+}
+
+/// `input_type`/`output_type`, derived from `input_iter`/`output_iter`.
+macro_rules! delegate_iter_types {
+    () => {
+        fn input_type(&self) -> Option<InputType> {
+            Some(input_type_of(self.input_iter))
+        }
+
+        fn output_type(&self) -> Option<OutputType> {
+            Some(output_type_of(self.output_iter))
         }
     };
 }
@@ -1823,15 +1856,10 @@ impl UdfContext for HostContextBridge<'_> {
         self.input.rows_in_group()
     }
 
-    fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.input_iter))
-    }
+    delegate_iter_types!();
 
-    fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.output_iter))
-    }
-
-    delegate_connect_back_hooks!();
+    delegate_connection_lookup!();
+    delegate_connect_back_session!();
 }
 
 /// A `UdfContext` for single-call mode (e.g. the virtual-schema adapter call).
@@ -1864,7 +1892,7 @@ pub struct SingleCallContext<'a> {
 }
 
 impl<'a> SingleCallContext<'a> {
-    pub fn new(
+    pub(crate) fn new(
         handshake: HandshakeMeta,
         input_iter: IterType,
         output_iter: IterType,
@@ -1883,7 +1911,7 @@ impl<'a> SingleCallContext<'a> {
     }
 
     /// Take the last error message captured from a context method.
-    pub fn take_last_error(&mut self) -> Option<String> {
+    pub(crate) fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
 
@@ -1894,39 +1922,83 @@ impl<'a> SingleCallContext<'a> {
 }
 
 impl UdfContext for SingleCallContext<'_> {
-    fn input_column_count(&self) -> usize {
-        0
-    }
-
     delegate_handshake_meta!();
+    refuse_row_io! {
+        get: "single-call mode has no input columns",
+        emit: "single-call mode does not emit rows",
+        next: "single-call mode has no input rows",
+    }
+    delegate_iter_types!();
 
-    fn get(&self, _col: usize) -> Result<&Value, UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode has no input columns".into(),
-        ))
+    delegate_connection_lookup!();
+    delegate_connect_back_session!();
+}
+
+/// The context passed to the cleanup hook. After `MT_CLEANUP` the DB accepts
+/// only `MT_FINISHED`/`MT_CLOSE`, so `connection()` and row I/O fail;
+/// `connect_back` still works over its own TCP session.
+pub struct CleanupContext {
+    last_error: std::cell::Cell<Option<String>>,
+    handshake: HandshakeMeta,
+    input_iter: IterType,
+    output_iter: IterType,
+}
+
+impl From<&exa_zmq_protocol::UdfMeta> for CleanupContext {
+    fn from(meta: &exa_zmq_protocol::UdfMeta) -> Self {
+        CleanupContext::new(
+            HandshakeMeta::from(meta),
+            meta.input_iter(),
+            meta.output_iter(),
+        )
+    }
+}
+
+impl CleanupContext {
+    pub(crate) fn new(
+        handshake: HandshakeMeta,
+        input_iter: IterType,
+        output_iter: IterType,
+    ) -> Self {
+        CleanupContext {
+            last_error: std::cell::Cell::new(None),
+            handshake,
+            input_iter,
+            output_iter,
+        }
     }
 
-    fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode does not emit rows".into(),
-        ))
+    pub(crate) fn take_last_error(&mut self) -> Option<String> {
+        self.last_error.take()
     }
 
-    fn next(&mut self) -> Result<bool, UdfError> {
-        Err(UdfError::Unimplemented(
-            "single-call mode has no input rows".into(),
-        ))
+    fn record_error(&self, message: String) {
+        self.last_error.set(Some(message));
+    }
+}
+
+impl UdfContext for CleanupContext {
+    delegate_handshake_meta!();
+    refuse_row_io! {
+        get: "cleanup has no input row to read",
+        emit: "cleanup cannot emit rows: the database accepts no output after MT_CLEANUP",
+        next: "cleanup has no input rows",
+    }
+    delegate_iter_types!();
+
+    fn connection(
+        &self,
+        name: &str,
+    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+        let refusal = UdfError::ConnectBack(format!(
+            "CONNECTION lookups are unavailable during cleanup: resolve \"{name}\" in run() \
+             and keep it for cleanup"
+        ));
+        self.record_error(refusal.to_string());
+        Err(refusal)
     }
 
-    fn input_type(&self) -> Option<InputType> {
-        Some(input_type_of(self.input_iter))
-    }
-
-    fn output_type(&self) -> Option<OutputType> {
-        Some(output_type_of(self.output_iter))
-    }
-
-    delegate_connect_back_hooks!();
+    delegate_connect_back_session!();
 }
 
 #[cfg(test)]

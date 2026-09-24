@@ -12,7 +12,7 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 
 * *GIVEN* a function annotated `#[exasol_udf]` (named `fn double_it`) that takes `&mut dyn UdfContext`
 * *WHEN* the crate is compiled as a cdylib
-* *THEN* the macro MUST derive the SQL entry-point name `DOUBLE_IT` by uppercasing the function identifier and generate `extern "C"` `run`/`destroy` shims suffixed with it (`__exa_run_shim_DOUBLE_IT`, `__exa_destroy_shim_DOUBLE_IT`)
+* *THEN* the macro MUST derive the SQL entry-point name `DOUBLE_IT` by uppercasing the function identifier and generate an `extern "C"` `run` shim suffixed with it (`__exa_run_shim_DOUBLE_IT`), plus an `extern "C"` cleanup shim (`__exa_cleanup_shim_DOUBLE_IT`) only when the annotation carries a `cleanup(...)` section
 * *AND* it MUST generate a `static` `__EXA_VTABLE_DOUBLE_IT` (marked `#[used]`) with `abi_version = EXA_UDF_ABI_VERSION` and the baked `sdk_fingerprint`
 * *AND* it MUST generate `#[unsafe(no_mangle)] pub extern "C" fn __exa_udf_entry_DOUBLE_IT() -> *const ExaUdfVTable`
 * *AND* it MUST NOT generate a bare `__exa_udf_entry` symbol (no suffix)
@@ -29,7 +29,7 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 * *GIVEN* a function annotated `#[exasol_udf]` named `fn double_it` with no `name = "..."` attribute
 * *WHEN* the crate is compiled
 * *THEN* the macro MUST translate the snake_case function identifier `double_it` to the UPPER_SNAKE_CASE SQL name `DOUBLE_IT` by ASCII-uppercasing each character (underscores preserved)
-* *AND* every generated symbol (`__EXA_INPUT_SCHEMA_DOUBLE_IT`, `__EXA_OUTPUT_SCHEMA_DOUBLE_IT`, `__exa_write_c_string_DOUBLE_IT`, `__exa_run_shim_DOUBLE_IT`, `__exa_destroy_shim_DOUBLE_IT`, `__EXA_VTABLE_DOUBLE_IT`, `__exa_udf_entry_DOUBLE_IT`) MUST carry that same `DOUBLE_IT` suffix
+* *AND* every generated symbol (`__EXA_INPUT_SCHEMA_DOUBLE_IT`, `__EXA_OUTPUT_SCHEMA_DOUBLE_IT`, `__exa_write_c_string_DOUBLE_IT`, `__exa_run_shim_DOUBLE_IT`, `__EXA_VTABLE_DOUBLE_IT`, `__exa_udf_entry_DOUBLE_IT`, and `__exa_cleanup_shim_DOUBLE_IT` when a `cleanup(...)` section generates it) MUST carry that same `DOUBLE_IT` suffix
 * *AND* the derived SQL name MUST match the bare object name the database sends as `script_name` for a `CREATE SCRIPT DOUBLE_IT`
 
 ### Scenario: name attribute overrides the SQL entry point name
@@ -38,7 +38,7 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 * *WHEN* the crate is compiled
 * *THEN* the macro MUST use the verbatim attribute value `MY_CUSTOM` as the SQL entry-point name instead of deriving it from the function identifier
 * *AND* the exported entry point MUST be `__exa_udf_entry_MY_CUSTOM`
-* *AND* the `name = "..."` value MUST be combinable with the existing `input(...)`, `emits(...)`, `vs_adapter(...)`, `import_spec(...)`, and `export_spec(...)` sections in any order
+* *AND* the `name = "..."` value MUST be combinable with the existing `input(...)`, `emits(...)`, `vs_adapter(...)`, `import_spec(...)`, `export_spec(...)`, and `cleanup(...)` sections in any order
 
 ### Scenario: Two exasol_udf annotations with the same name fail to link
 
@@ -53,7 +53,7 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 * *WHEN* the crate is compiled as a cdylib
 * *THEN* the build MUST succeed
 * *AND* the artifact MUST export two distinct entry-point symbols `__exa_udf_entry_DOUBLE_IT` and `__exa_udf_entry_TRIPLE_IT`, each returning its own `*const ExaUdfVTable`
-* *AND* each entry point MUST resolve to a vtable wired to its own `run`/`destroy` shims and its own annotated schema statics
+* *AND* each entry point MUST resolve to a vtable wired to its own `run` shim, its own cleanup shim when its annotation carries a `cleanup(...)` section, and its own annotated schema statics
 
 ### Scenario: exasol_udf annotation with an unknown type fails to compile
 
@@ -77,4 +77,4 @@ The `#[exasol_udf]` proc-macro turns an annotated function into deployable UDF e
 * *GIVEN* an `#[exasol_udf(...)]` annotation naming a section the macro does not define
 * *WHEN* the crate is compiled
 * *THEN* the macro MUST emit a compile error carrying the offending section's span
-* *AND* the message MUST list every accepted section: `name`, `input`, `emits`, `vs_adapter`, `import_spec`, and `export_spec`
+* *AND* the message MUST list every accepted section: `name`, `input`, `emits`, `vs_adapter`, `import_spec`, `export_spec`, and `cleanup`

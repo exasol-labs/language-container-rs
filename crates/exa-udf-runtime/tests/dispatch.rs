@@ -237,6 +237,16 @@ fn drive_session(
     meta: ExascriptMetadata,
     batches: Vec<ExascriptTableData>,
 ) -> SessionOutcome {
+    drive_groups(script_name, so, meta, vec![batches])
+}
+
+/// [`drive_session`] over one input group per `groups` entry.
+fn drive_groups(
+    script_name: &str,
+    so: &std::path::Path,
+    meta: ExascriptMetadata,
+    groups: Vec<Vec<ExascriptTableData>>,
+) -> SessionOutcome {
     let endpoint = format!(
         "ipc:///tmp/exa-mockdb-{}-{}-{}.ipc",
         script_name,
@@ -278,15 +288,17 @@ fn drive_session(
             m.meta = Some(meta.clone());
             send_resp(&server, &m);
         } else if mt == MessageType::MtRun as i32 {
-            // First MT_RUN opens the single group; the second ends the session.
+            // Each MT_RUN opens the next group; the one after the last ends the session.
             run_seen += 1;
-            let reply = if run_seen == 1 {
+            cursor = 0;
+            let reply = if run_seen <= groups.len() {
                 MessageType::MtRun
             } else {
                 MessageType::MtCleanup
             };
             send_resp(&server, &response(reply, conn_id));
         } else if mt == MessageType::MtNext as i32 {
+            let batches = &groups[run_seen - 1];
             if cursor < batches.len() {
                 let mut next = response(MessageType::MtNext, conn_id);
                 next.next = Some(ExascriptNextDataRep {
@@ -715,6 +727,14 @@ fn mid_group_cleanup_ends_session_cleanly() {
     let req = recv_req(&server);
     assert_eq!(req.r#type, MessageType::MtNext as i32);
     send_resp(&server, &response(MessageType::MtCleanup, MOCK_CONN_ID));
+
+    let req = recv_req(&server);
+    assert_eq!(
+        req.r#type,
+        MessageType::MtFinished as i32,
+        "a mid-group MT_CLEANUP must end with MT_FINISHED"
+    );
+    send_resp(&server, &response(MessageType::MtFinished, MOCK_CONN_ID));
 
     let result = client.join().expect("client thread panicked");
     assert!(
@@ -1240,5 +1260,105 @@ fn advance_row_wire_error_ends_group_as_run_error() {
     assert!(
         result.is_err(),
         "a mid-group wire protocol error must surface as a run error"
+    );
+}
+
+const CLEANUP_HOOK_LIB: &str = "cleanup_hook";
+
+fn drive_cleanup_session(
+    script_name: &str,
+    meta: ExascriptMetadata,
+    groups: Vec<Vec<ExascriptTableData>>,
+) -> SessionOutcome {
+    drive_groups(
+        script_name,
+        &fixture_cdylib_path(CLEANUP_HOOK_LIB),
+        meta,
+        groups,
+    )
+}
+
+#[test]
+fn cleanup_runs_once_after_the_last_group() {
+    let outcome = drive_cleanup_session(
+        "CLEANUP_REPORTS",
+        int64_meta(IterType::PbMultiple, IterType::PbMultiple),
+        vec![
+            vec![int64_batch(&[Some(1), Some(2)])],
+            vec![int64_batch(&[Some(3), Some(4), Some(5)])],
+        ],
+    );
+
+    let msg = outcome
+        .close
+        .expect("a failing hook must close the session");
+    assert!(
+        msg.starts_with("F-UDF-CL-RUST-9001")
+            && msg.contains("cleanup ran: script=CLEANUP_REPORTS groups=2 rows=5"),
+        "the hook ran once after both groups with the handshake metadata, got: {msg}"
+    );
+}
+
+#[test]
+fn successful_cleanup_precedes_mt_finished() {
+    let outcome = drive_cleanup_session(
+        "CLEANUP_OK",
+        int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
+        vec![vec![int64_batch(&[Some(21)])]],
+    );
+
+    assert_eq!(
+        outcome.close, None,
+        "a successful hook must end with MT_FINISHED"
+    );
+    assert!(!outcome.errored);
+}
+
+#[test]
+fn cleanup_runs_when_no_group_ran() {
+    let outcome = drive_cleanup_session(
+        "CLEANUP_AFTER_RUN_ERROR",
+        int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
+        vec![],
+    );
+
+    let msg = outcome
+        .close
+        .expect("a failing hook must close the session");
+    assert!(
+        msg.contains("cleanup failed on purpose") && !msg.contains("run failed on purpose"),
+        "only the hook ran, got: {msg}"
+    );
+}
+
+#[test]
+fn run_error_runs_cleanup_and_reports_both_errors() {
+    let outcome = drive_cleanup_session(
+        "CLEANUP_AFTER_RUN_ERROR",
+        int64_meta(IterType::PbExactlyOnce, IterType::PbMultiple),
+        vec![vec![int64_batch(&[Some(1)])]],
+    );
+
+    let msg = outcome.close.expect("a run error must close the session");
+    assert!(
+        msg.contains("run failed on purpose") && msg.contains("cleanup failed on purpose"),
+        "close carries both errors, got: {msg}"
+    );
+}
+
+#[test]
+fn validation_failure_skips_cleanup() {
+    let outcome = drive_cleanup_session(
+        "CLEANUP_AFTER_RUN_ERROR",
+        int64_meta(IterType::PbExactlyOnce, IterType::PbExactlyOnce),
+        vec![],
+    );
+
+    let msg = outcome
+        .close
+        .expect("a shape mismatch must close the session");
+    assert!(
+        msg.contains("Output shape mismatch") && !msg.contains("cleanup failed on purpose"),
+        "the hook must not run when validation fails before dispatch, got: {msg}"
     );
 }

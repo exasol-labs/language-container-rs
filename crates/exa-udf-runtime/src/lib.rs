@@ -1,4 +1,5 @@
 mod artifact;
+mod cleanup;
 #[cfg(feature = "connect-back")]
 mod connect_back;
 mod dispatch;
@@ -41,9 +42,10 @@ impl Runtime {
     }
 
     /// Execute one UDF session end to end: handshake → meta → resolve artifact
-    /// → load → dispatch → close. On any error the message is serialised into
-    /// the protocol close path with the `F-UDF-CL-RUST-` prefix and `destroy`
-    /// is invoked before returning.
+    /// → load → validate → dispatch → cleanup → final message.
+    ///
+    /// Once dispatch starts, the cleanup hook runs exactly once, however
+    /// dispatch ended. Failures before dispatch skip it, like the C++ client.
     ///
     /// `on_level_resolved` is called once immediately after the handshake, with
     /// the log level parsed from the script's `%udf_debug_level` directive (or
@@ -123,7 +125,6 @@ impl Runtime {
         {
             let req = proto.error_close_request(UDF_ERROR_CLOSE_CODE, &e.to_string());
             let _ = transport.send(&req);
-            unsafe { udf.destroy() };
             return Err(e);
         }
 
@@ -134,30 +135,23 @@ impl Runtime {
         if let Err(e) = schema_check::validate_schema(&udf, &meta) {
             let req = proto.error_close_request(SCHEMA_MISMATCH_CLOSE_CODE, &e.to_string());
             let _ = transport.send(&req);
-            unsafe { udf.destroy() };
             return Err(e);
         }
 
-        let result = if meta.single_call_mode {
+        let dispatched = if meta.single_call_mode {
             single_call::run_single_call(&transport, &mut proto, &udf, &meta)
         } else {
             dispatch::run_udf(&transport, &mut proto, &udf, &meta)
         };
-        tracing::debug!(ok = result.is_ok(), "run loop finished");
+        tracing::debug!(ok = dispatched.is_ok(), "run loop finished");
 
-        match result {
-            Ok(()) => {
-                unsafe { udf.destroy() };
-                Ok(())
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let req = proto.error_close_request(UDF_ERROR_CLOSE_CODE, &msg);
-                let _ = transport.send(&req);
-                unsafe { udf.destroy() };
-                Err(e)
-            }
+        let outcome = cleanup::run_hook(&udf, &meta, dispatched)
+            .and_then(|()| send_finished(&transport, &mut proto));
+        if let Err(e) = &outcome {
+            let req = proto.error_close_request(UDF_ERROR_CLOSE_CODE, &e.to_string());
+            let _ = transport.send(&req);
         }
+        outcome
     }
 
     /// Drive the handshake until the `Meta` event arrives, acking with MT_META.
@@ -191,4 +185,9 @@ impl Runtime {
             }
         }
     }
+}
+
+fn send_finished(transport: &ZmqTransport, proto: &mut Protocol) -> Result<(), RuntimeError> {
+    let finished = proto.finished_reply();
+    wire::request(transport, proto, finished).map(drop)
 }

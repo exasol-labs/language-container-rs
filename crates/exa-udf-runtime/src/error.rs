@@ -28,3 +28,19 @@ impl From<libloading::Error> for RuntimeError {
         RuntimeError::Loader(e.to_string())
     }
 }
+
+impl RuntimeError {
+    /// Append the context's recorded error unless the hook text already has it.
+    pub(crate) fn with_recorded_detail(self, detail: Option<String>) -> RuntimeError {
+        match (self, detail) {
+            (RuntimeError::Udf(text), Some(detail)) if !text.contains(&detail) => {
+                RuntimeError::Udf(format!("{text}: {detail}"))
+            }
+            (error, _) => error,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;

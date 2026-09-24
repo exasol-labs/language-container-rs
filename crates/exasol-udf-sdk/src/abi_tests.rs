@@ -10,12 +10,11 @@ fn vtable_layout_includes_vs_adapter() {
     ) -> i32 {
         0
     }
-    unsafe extern "C" fn destroy_stub() {}
     let vt = ExaUdfVTable {
         abi_version: EXA_UDF_ABI_VERSION,
         fingerprint: EXA_SDK_FINGERPRINT.as_ptr() as *const c_char,
         run: run_stub,
-        destroy: destroy_stub,
+        cleanup: None,
         default_output_columns: None,
         virtual_schema_adapter_call: None,
         generate_sql_for_import_spec: None,
@@ -40,8 +39,14 @@ fn fingerprint_baked_nonempty() {
 }
 
 #[test]
-fn spec_slots_take_context_and_abi_version_is_ten() {
-    assert_eq!(EXA_UDF_ABI_VERSION, 10);
+fn spec_slots_take_context_and_abi_version_is_eleven() {
+    assert_eq!(EXA_UDF_ABI_VERSION, 11);
+    let word = std::mem::size_of::<usize>();
+    assert_eq!(
+        std::mem::offset_of!(ExaUdfVTable, cleanup),
+        std::mem::offset_of!(ExaUdfVTable, run) + word,
+        "cleanup takes the slot destroy held"
+    );
     // Every context-taking single-call slot must take a context pointer as its
     // FIRST argument so the hook can call ctx.connection()/connect_back() and
     // read handshake metadata from single-call mode. This pins the 3-arg ABI
@@ -74,12 +79,11 @@ fn spec_slots_take_context_and_abi_version_is_ten() {
     ) -> i32 {
         0
     }
-    unsafe extern "C" fn destroy_stub() {}
     let vt = ExaUdfVTable {
         abi_version: EXA_UDF_ABI_VERSION,
         fingerprint: EXA_SDK_FINGERPRINT.as_ptr() as *const c_char,
         run: run_stub,
-        destroy: destroy_stub,
+        cleanup: None,
         default_output_columns: None,
         virtual_schema_adapter_call: Some(echo_ctx_presence),
         generate_sql_for_import_spec: Some(echo_ctx_presence),

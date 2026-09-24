@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 /// ABI version — bump only when the vtable layout or the signature of a method
 /// reached through it changes.
-pub const EXA_UDF_ABI_VERSION: u32 = 10;
+pub const EXA_UDF_ABI_VERSION: u32 = 11;
 
 /// Compiled output shape of a UDF, stamped into the vtable so the host can
 /// validate it against the DB's `output_iter_type` at load/run time.
@@ -52,8 +52,11 @@ pub struct ExaUdfVTable {
     /// mixed. On the `0` and `2` return paths the shim leaves `*error_out`
     /// untouched (null).
     pub run: unsafe extern "C" fn(ctx: *mut std::ffi::c_void, error_out: *mut *mut c_char) -> i32,
-    /// Destroy the UDF instance (called after run). No-op for v1 stateless UDFs.
-    pub destroy: unsafe extern "C" fn(),
+    /// Optional cleanup hook, run once per process before the final message.
+    /// Same contract as `run`.
+    pub cleanup: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, error_out: *mut *mut c_char) -> i32,
+    >,
     /// Single-call hook: emit the default output columns as a JSON string.
     /// `None` when the UDF does not implement it. On success writes a
     /// heap-allocated, caller-freed C string to `*result` and returns 0.

@@ -22,18 +22,6 @@ error[E0428]: the name `__exa_run_shim_DUP` is defined multiple times
    = note: `__exa_run_shim_DUP` must be defined only once in the value namespace of this module
    = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0428]: the name `__exa_destroy_shim_DUP` is defined multiple times
-  --> tests/trybuild/dup_entry.rs:12:1
-   |
- 7 | #[exasol_udf(name = "DUP")]
-   | --------------------------- previous definition of the value `__exa_destroy_shim_DUP` here
-...
-12 | #[exasol_udf(name = "DUP")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `__exa_destroy_shim_DUP` redefined here
-   |
-   = note: `__exa_destroy_shim_DUP` must be defined only once in the value namespace of this module
-   = note: this error originates in the attribute macro `exasol_udf` (in Nightly builds, run with -Z macro-backtrace for more info)
-
 error[E0428]: the name `__EXA_VTABLE_DUP` is defined multiple times
   --> tests/trybuild/dup_entry.rs:12:1
    |
