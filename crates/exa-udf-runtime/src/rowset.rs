@@ -1892,7 +1892,7 @@ pub struct SingleCallContext<'a> {
 }
 
 impl<'a> SingleCallContext<'a> {
-    pub fn new(
+    pub(crate) fn new(
         handshake: HandshakeMeta,
         input_iter: IterType,
         output_iter: IterType,
@@ -1911,7 +1911,7 @@ impl<'a> SingleCallContext<'a> {
     }
 
     /// Take the last error message captured from a context method.
-    pub fn take_last_error(&mut self) -> Option<String> {
+    pub(crate) fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
 
@@ -1944,8 +1944,22 @@ pub struct CleanupContext {
     output_iter: IterType,
 }
 
+impl From<&exa_zmq_protocol::UdfMeta> for CleanupContext {
+    fn from(meta: &exa_zmq_protocol::UdfMeta) -> Self {
+        CleanupContext::new(
+            HandshakeMeta::from(meta),
+            meta.input_iter(),
+            meta.output_iter(),
+        )
+    }
+}
+
 impl CleanupContext {
-    pub fn new(handshake: HandshakeMeta, input_iter: IterType, output_iter: IterType) -> Self {
+    pub(crate) fn new(
+        handshake: HandshakeMeta,
+        input_iter: IterType,
+        output_iter: IterType,
+    ) -> Self {
         CleanupContext {
             last_error: std::cell::Cell::new(None),
             handshake,
@@ -1954,7 +1968,7 @@ impl CleanupContext {
         }
     }
 
-    pub fn take_last_error(&mut self) -> Option<String> {
+    pub(crate) fn take_last_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
 

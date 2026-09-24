@@ -249,7 +249,7 @@ unsafe fn call_lifecycle_slot(
     if rc == 0 {
         return Ok(());
     }
-    let text = unsafe { crate::single_call::take_c_string(error_out) };
+    let text = unsafe { take_c_string(error_out) };
     let detail = if text.is_empty() {
         text
     } else {
@@ -258,6 +258,19 @@ unsafe fn call_lifecycle_slot(
     Err(RuntimeError::Udf(format!(
         "UDF {slot_name} returned error code {rc}{detail}"
     )))
+}
+
+/// Take ownership of a `malloc`ed C string a vtable slot wrote, freeing it with
+/// `libc::free` so both sides of the boundary use the C allocator.
+unsafe fn take_c_string(ptr: *mut std::ffi::c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let owned = unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { libc::free(ptr as *mut libc::c_void) };
+    owned
 }
 
 /// SQL-facing name for an output shape, used in the mismatch error message.
@@ -285,14 +298,14 @@ unsafe fn call_noarg_hook(
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(&mut out) };
     if rc != 0 {
-        let msg = unsafe { crate::single_call::take_c_string(out) };
+        let msg = unsafe { take_c_string(out) };
         return Err(RuntimeError::Udf(if msg.is_empty() {
             format!("single-call hook {name} returned error code {rc}")
         } else {
             msg
         }));
     }
-    Ok(unsafe { crate::single_call::take_c_string(out) })
+    Ok(unsafe { take_c_string(out) })
 }
 
 /// Drive a context-plus-argument single-call hook: thread the host context
@@ -314,14 +327,14 @@ unsafe fn call_ctx_arg_hook(
     let mut out: *mut std::ffi::c_char = std::ptr::null_mut();
     let rc = unsafe { hook(ctx, c_arg.as_ptr(), &mut out) };
     if rc != 0 {
-        let msg = unsafe { crate::single_call::take_c_string(out) };
+        let msg = unsafe { take_c_string(out) };
         return Err(RuntimeError::Udf(if msg.is_empty() {
             format!("single-call hook {name} returned error code {rc}")
         } else {
             msg
         }));
     }
-    Ok(unsafe { crate::single_call::take_c_string(out) })
+    Ok(unsafe { take_c_string(out) })
 }
 
 #[cfg(test)]

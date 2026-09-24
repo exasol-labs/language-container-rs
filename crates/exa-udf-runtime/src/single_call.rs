@@ -4,7 +4,6 @@ use crate::wire::{close_error, request};
 use exa_proto::SingleCallFunctionId;
 use exa_zmq_protocol::{HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
 use exasol_udf_sdk::context::UdfContext;
-use std::ffi::{CStr, c_char};
 
 /// Drive a single-call session.
 ///
@@ -245,23 +244,4 @@ fn hook_name(fn_id: SingleCallFunctionId) -> &'static str {
         SingleCallFunctionId::ScFnGenerateSqlForExportSpec => "generate_sql_for_export_spec",
         SingleCallFunctionId::ScFnNil => fn_id.as_str_name(),
     }
-}
-
-/// Consume a heap-allocated C string produced by a vtable single-call hook.
-///
-/// ABI contract: the hook allocates the result with `libc::malloc` (e.g. via a
-/// `CString` copied into a `malloc`ed buffer) and transfers ownership to the
-/// runtime through `*result`. The runtime copies it into an owned `String` and
-/// frees the original with `libc::free`, so allocation and deallocation always
-/// cross the boundary through the C allocator and never mix Rust's global
-/// allocator with the UDF's.
-pub(crate) unsafe fn take_c_string(ptr: *mut c_char) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    let owned = unsafe { CStr::from_ptr(ptr) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { libc::free(ptr as *mut libc::c_void) };
-    owned
 }

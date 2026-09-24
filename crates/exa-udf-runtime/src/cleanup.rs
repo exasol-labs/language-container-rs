@@ -1,6 +1,6 @@
 use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
-use crate::rowset::{CleanupContext, HandshakeMeta};
+use crate::rowset::CleanupContext;
 use exa_zmq_protocol::UdfMeta;
 
 /// Run the cleanup hook, if any, and fold its error into `outcome`, original
@@ -10,11 +10,7 @@ pub(crate) fn run_hook(
     meta: &UdfMeta,
     outcome: Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
-    let mut ctx = CleanupContext::new(
-        HandshakeMeta::from(meta),
-        meta.input_iter(),
-        meta.output_iter(),
-    );
+    let mut ctx = CleanupContext::from(meta);
     let cleanup = match udf.cleanup(&mut ctx) {
         None | Some(Ok(())) => return outcome,
         Some(Err(e)) => e.with_recorded_detail(ctx.take_last_error()),
