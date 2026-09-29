@@ -2,7 +2,7 @@
 
 ![language-container-rs logo](assets/logo.svg)
 
-![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange.svg)
+![Rust 1.98.1](https://img.shields.io/badge/rust-1.98.1-orange.svg)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=exasol-labs_language-container-rs&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=exasol-labs_language-container-rs)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=exasol-labs_language-container-rs&metric=coverage)](https://sonarcloud.io/summary/new_code?id=exasol-labs_language-container-rs)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -27,7 +27,7 @@ The workspace ships three crates for UDF authors, container operators, and build
 
 - **Docker** — to build the language container image
 - **[exapump](https://github.com/exasol-labs/exapump)** — to upload to BucketFS and run SQL
-- **Rust 1.94+** with `cargo` — to compile UDFs
+- **Rust 1.98.1** with `cargo` — to compile UDFs; the SLC checks an ABI fingerprint at load time, so the `rustc` version must match the SLC's exactly
 - An Exasol instance: [Exasol Personal](https://github.com/exasol/exasol-personal), [SaaS free trial](https://cloud.exasol.com), or [Docker image](https://hub.docker.com/r/exasol/docker-db)
 
 ## Install the language container

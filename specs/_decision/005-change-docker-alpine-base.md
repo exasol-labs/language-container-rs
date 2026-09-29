@@ -8,7 +8,7 @@
 
 ### Context
 
-The original Alpine image design compiled `exaudfclient` for the musl target (`x86_64-unknown-linux-musl`) using a `rust:alpine` builder, aligning with the already-musl UDF `.so` artifacts. During implementation, two blockers ruled this out: Rust 1.96+ compiled binaries crashed in the Exasol UDF sandbox due to seccomp/CPU-instruction incompatibility, and the `exaudfclient` binary is executed directly on the glibc Debian Exasol host after BucketFS extraction — a musl binary would be ABI-incompatible there. The adopted approach bundled glibc runtime libs into the Alpine image instead. The decision entry records what was resolved at plan time; the implementation pivot is documented in the plan's spike notes.
+The original Alpine image design compiled `exaudfclient` for the musl target (`x86_64-unknown-linux-musl`) using a `rust:alpine` builder, aligning with the already-musl UDF `.so` artifacts. During implementation, two blockers ruled this out: Rust 1.96+ compiled binaries crashed in the Exasol UDF sandbox due to seccomp/CPU-instruction incompatibility, and the `exaudfclient` binary is executed directly on the glibc Debian Exasol host after BucketFS extraction — a musl binary would be ABI-incompatible there. The adopted approach bundled glibc runtime libs into the Alpine image instead. The "Rust 1.96+ crashes in the sandbox" finding was specific to the musl binaries of that spike: it does not reproduce with glibc-built binaries on either x86_64 or aarch64 (issue #88 spike on 1.97; CI on the 1.98.1 bump). The decision entry records what was resolved at plan time; the implementation pivot is documented in the plan's spike notes.
 
 ### Decision
 

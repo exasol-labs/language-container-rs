@@ -35,14 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.94.
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.98.1.
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy, rustfmt
 
-      - name: Ensure rustfmt/clippy available on 1.94
-        run: rustup component add rustfmt clippy --toolchain 1.94
+      - name: Ensure rustfmt/clippy available on 1.98.1
+        run: rustup component add rustfmt clippy --toolchain 1.98.1
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -125,13 +125,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy, rustfmt
 
-      - name: Ensure rustfmt/clippy available on 1.94
-        run: rustup component add rustfmt clippy --toolchain 1.94
+      - name: Ensure rustfmt/clippy available on 1.98.1
+        run: rustup component add rustfmt clippy --toolchain 1.98.1
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -173,8 +173,8 @@ jobs:
           bash dist/tests/language_definitions_test.sh build_info/language_definitions.json
           bash dist/tests/language_definitions_fixtures_test.sh
 
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
 
@@ -260,9 +260,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.94.
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      # The workspace, Docker builder, and CI all use a single unified toolchain: 1.98.1.
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache cargo registry and build artifacts
         uses: actions/cache@v4
@@ -302,8 +302,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
 
       # Separate cache key from the x86_64 jobs: target/ holds native-triple
       # binaries and must not mix across architectures.
@@ -348,8 +348,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Install Rust 1.94
-        uses: dtolnay/rust-toolchain@1.94
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Install cargo-about
         uses: taiki-e/install-action@v2
@@ -675,7 +675,7 @@ jobs:
       # the token is configured).
       - name: Install Rust toolchain
         if: steps.gate.outputs.release == 'true'
-        uses: dtolnay/rust-toolchain@1.94
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Publish public crates to crates.io
         if: steps.gate.outputs.release == 'true'
