@@ -6,6 +6,8 @@
 **Plan:** `change-toolchain-edition-2024`
 **Status:** Accepted
 
+> Lineage since: 1.92 → 1.94 → 1.98.1 (#88). The musl-only "Rust 1.96+ crashes in the sandbox" finding (ADR `alpine-image-musl-client-binary`) does not apply to glibc builds.
+
 ### Context
 
 The workspace `rust-toolchain.toml` was pinned at `channel = "1.84"`. This was a false floor: `connect-back` feature users already required Rust >= 1.85 (arrow 58 transitively pulls in edition-2024 crates that Rust 1.84 cannot parse), so those crates were excluded from `default-members` and built explicitly with `cargo +1.91` overrides. The CI and Docker builder images always ran 1.91. Three toolchain versions were in play simultaneously — workspace pin (1.84), CI/builder (1.91), and the effective floor for all members (1.85+). Raising the pin to 1.92 unifies all three on one version. 1.92 is the minimum that clears the edition-2024 floor (edition 2024 stabilized in 1.85) and matches the `rust-version = "1.92"` floor on the strata-rs iceberg side. The whole stack is unreleased, so raising the floor carries no downstream cost.
@@ -103,29 +105,3 @@ Remove all three spec delta files from this plan, making it a spec-delta-free pl
 ### Consequences
 
 The spec library's scenario assertions describe what the system does, not how it is built. Implementation details (toolchain version, Rust edition, Docker image tag, FFI attribute form) live only in code and `plan.md` / `decision-log.md` history. Spec-delta-free plans are an established pattern for infrastructure-level changes that preserve all shipped behavior. Prior version-literal leakage (the "Rust toolchain is pinned" scenario with `channel = "1.84"`, the `[workspace.dependencies]` scenario with enumerated version numbers) is cleaned from the permanent spec library during this recording.
-
-## ADR: Raise the workspace toolchain pin from 1.94 to 1.98.1
-
-**ID:** raise-workspace-toolchain-1-94-to-1-98-1
-**Plan:** none — GitHub issue #88 (carved out of #84)
-**Status:** Accepted
-
-### Context
-
-MSRV lineage: 1.84 → 1.92 (ADR `raise-workspace-msrv-1-84-to-1-92`) → 1.94 → 1.98.1. Issue #88 split the toolchain bump out of #84 so that a regression stays attributable and so CI verifies the shipping combination (slim glibc image + new `rustc` on x86_64), which the #84 spike had only exercised on aarch64. The issue targeted 1.97; the bump lands on 1.98.1, the current point release. The musl-only "Rust 1.96+ crashes in the sandbox" observation (ADR `alpine-image-musl-client-binary`) does not apply to glibc builds.
-
-### Decision
-
-Pin `rust-toolchain.toml` to the exact patch release `"1.98.1"`, build the SLC on `rust:1.98.1-trixie`, and install `dtolnay/rust-toolchain@1.98.1` in CI. The Dockerfile keeps `rm rust-toolchain.toml` so a mounted repo pin can never shadow the image toolchain (the #84 spike compiled with 1.94 inside a 1.97 image for that reason).
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Exact patch pin `1.98.1` everywhere | ✓ Chosen — the `rustc` version string is half of the ABI fingerprint; an exact pin keeps rustup, the builder image and CI on one deterministic `rustc_1.98.1` |
-| Minor pin `1.98` (as before with `1.94`) | ✗ Rejected — floats to the newest patch, so rustup and the Docker tag can drift apart and split the fingerprint |
-| Bump to 1.97 as the issue originally listed | ✗ Rejected — 1.98.1 is current and the issue's rationale holds unchanged |
-
-### Consequences
-
-Every UDF `.so` built with 1.94 fails the load-time check with `Fingerprint mismatch: expected <sdk>:rustc_1.98.1__…, found <sdk>:rustc_1.94.1__…` and must be rebuilt with 1.98.1 against the matching SLC. The migration note lives in `docs/writing-a-udf.md` and the release notes.
