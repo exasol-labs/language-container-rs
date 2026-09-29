@@ -21,7 +21,7 @@ This is an attribution and source-offer compliance concern only; it does not cha
 
 ### Scenario: Target set reflects the shipped glibc binary
 
-* *GIVEN* `exaudfclient` is compiled by the `rust:1.98.1-trixie` builder with no `--target`, so the shipped binary is glibc (`<arch>-unknown-linux-gnu`), not musl
+* *GIVEN* `exaudfclient` is compiled by the `rust:<version>-trixie` builder with no `--target`, so the shipped binary is glibc (`<arch>-unknown-linux-gnu`), not musl
 * *WHEN* the `targets` array is chosen
 * *THEN* it MUST include the glibc (`-unknown-linux-gnu`) triple for every shipped architecture so `gnu`-gated dependencies are attributed
 * *AND* it MUST NOT list the corresponding `-unknown-linux-musl` triples, since nothing musl is shipped and the union would over-attribute musl-only dependencies (enforced by `dist/tests/about_toml_test.sh`)
