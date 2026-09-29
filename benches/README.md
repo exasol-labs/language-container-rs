@@ -22,10 +22,10 @@ cargo bench -p exa-udf-runtime --features bench --bench protocol -- set_emits/na
 BENCH_ROWS=10000 cargo bench -p exa-udf-runtime --features bench --bench protocol -- --test  # CI smoke
 ```
 
-| `BENCH_PROFILE` | rows/iteration | warm-up | measure | samples | 25 cells, 4-core Xeon 8488C |
+| `BENCH_PROFILE` | rows/iteration | warm-up | measure | samples | 4-core Xeon 8488C |
 |---|---|---|---|---|---|
-| `quick` (default) | 250,000 | 1 s | 3 s | 10 | 169 s |
-| `full` | 1,000,000 | 3 s | 5 s | 10 | not yet measured |
+| `quick` (default) | 250,000 | 1 s | 3 s | 10 | 169 s (25 cells) |
+| `full` | 1,000,000 | 3 s | 5 s | 10 | 750 s (31 cells) |
 
 `BENCH_ROWS` overrides rows; `BENCH_ROWS_PER_CYCLE` (default 2,000) is how many SCALAR input rows the mock hands
 over per `MT_RUN` cycle, calibrated on docker-db 2026.1.1 from a Tier 2 `--udf-debug` log (row count, not a byte
@@ -52,10 +52,10 @@ Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`, `EXA_DB_MEM_SIZE`, defau
 `EXASOL_HOST`, `EXASOL_PORT`, `BUCKETFS_PORT`, `BUCKETFS_PASSWORD`. Results land in the gitignored `bench-results/`.
 `--udf-debug host:port` sets `%udf_debug_level debug` and redirects the runtime log to a TCP listener on the host.
 
-| `--profile` | rows (strblock table / wide) | warm-up | reps | 44 cells, docker-db 2026.1.1, 4 GiB | band |
+| `--profile` | rows (strblock and wide tables / wide generators) | warm-up | reps | docker-db 2026.1.1, 4 GiB, incl. Docker start | band |
 |---|---|---|---|---|---|
-| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s incl. Docker start | ±15 % |
-| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 264 s incl. Docker start | ±8 % |
+| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s (44 cells) | ±15 % |
+| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 315 s (47 cells) | ±8 % |
 
 Cells: `control_<class>`, `scalar_returns_<class>`, `scalar_emits_gen_<class>_<mode>[_noemit]`, `scalar_emits_pt`,
 `set_returns_<class>_g<G>`, `set_emits_<class>_<mode>_g<G>`, `set_gen_<class>_<mode>`. Every query returns one row and
