@@ -95,9 +95,9 @@ impl ZmqTransport {
     /// is the right default and what backstops it.
     pub fn recv(&self) -> Result<ExascriptResponse, ProtocolError> {
         tracing::debug!("recv: waiting");
-        let bytes = self.retry_transient(|| self.socket.recv_bytes(0), "recv")?;
-        tracing::debug!(len = bytes.len(), "recv: got frame");
-        let resp = ExascriptResponse::decode(bytes.as_slice())?;
+        let frame = self.retry_transient(|| self.socket.recv_msg(0), "recv")?;
+        tracing::debug!(len = frame.len(), "recv: got frame");
+        let resp = ExascriptResponse::decode(&*frame)?;
         tracing::debug!(mt = resp.r#type, "recv: decoded");
         Ok(resp)
     }
