@@ -46,7 +46,8 @@ Tier 1 `full` against `main`: `set_returns` wide_g1 −33 %, strblock_g1 −22 %
 `scalar_emits_gen` strblock −39…−45 %, wide −31…−38 %, varchar −4…−7 %; `set_emits` strblock
 −25…−36 %, wide −13…−34 %. Native cells are unchanged, and so are the `MT_EMIT` counters.
 
-Tier 2 `full`, three alternating runs per side on docker-db 2026.1.1, base the 0.31.0 release:
-`scalar_emits_gen` wide_row −23 %, wide_batch8k −14 %; `set_gen` wide −10…−15 %,
-strblock_batch −11 %. No cell regressed, and VARCHAR emit cells stay within +3 %. The
-strblock and wide input cells are bound by the engine and unchanged.
+Tier 2 `full`, three alternating runs per side on docker-db 2026.1.1 against `main`:
+`scalar_emits_gen` wide_batch8k −22 %, wide_batch64k −16 %, wide_row −12 %, strblock_row −12 %;
+`set_gen` wide_batch8k −15 %, strblock_batch −12 %. No cell regressed; `varchar_row` +5 % and
+`set_returns_native_g1` +5 % are inside the band. The strblock and wide input cells are bound by
+the engine and unchanged.
