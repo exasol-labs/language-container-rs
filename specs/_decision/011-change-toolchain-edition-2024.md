@@ -6,8 +6,6 @@
 **Plan:** `change-toolchain-edition-2024`
 **Status:** Accepted
 
-> Lineage since: 1.92 → 1.94 → 1.98.1 (#88). The musl-only "Rust 1.96+ crashes in the sandbox" finding (ADR `alpine-image-musl-client-binary`) does not apply to glibc builds.
-
 ### Context
 
 The workspace `rust-toolchain.toml` was pinned at `channel = "1.84"`. This was a false floor: `connect-back` feature users already required Rust >= 1.85 (arrow 58 transitively pulls in edition-2024 crates that Rust 1.84 cannot parse), so those crates were excluded from `default-members` and built explicitly with `cargo +1.91` overrides. The CI and Docker builder images always ran 1.91. Three toolchain versions were in play simultaneously — workspace pin (1.84), CI/builder (1.91), and the effective floor for all members (1.85+). Raising the pin to 1.92 unifies all three on one version. 1.92 is the minimum that clears the edition-2024 floor (edition 2024 stabilized in 1.85) and matches the `rust-version = "1.92"` floor on the strata-rs iceberg side. The whole stack is unreleased, so raising the floor carries no downstream cost.
