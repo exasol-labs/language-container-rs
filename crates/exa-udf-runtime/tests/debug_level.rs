@@ -56,7 +56,7 @@ fn empty_rowset(meta: &[ColumnInfo]) -> InputRowSet {
         rows: 0,
         ..Default::default()
     };
-    InputRowSet::from_proto(&table, meta)
+    InputRowSet::from_proto(table, meta)
 }
 
 fn make_bridge<'a>(

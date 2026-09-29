@@ -186,7 +186,7 @@ fn first_nonempty_input(
     input_cols: &[ColumnInfo],
 ) -> Result<Option<InputRowSet>, RuntimeError> {
     while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
-        let rows = InputRowSet::from_proto(&table, input_cols);
+        let rows = InputRowSet::from_proto(table, input_cols);
         if !rows.is_empty() {
             return Ok(Some(rows));
         }

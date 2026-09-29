@@ -31,27 +31,40 @@ fn output_type_of(iter: IterType) -> OutputType {
 
 /// Materialised input rows from one proto `ExascriptTableData` batch.
 ///
-/// Stored as a dense `rows[row][col]` matrix of `Value` for simplicity and
-/// correctness; the per-type proto blocks are decoded once on construction.
+/// Stored as one row-major `Value` buffer (`cells[row * n_cols + col]`); the
+/// per-type proto blocks are decoded once on construction.
 /// `row_numbers` holds the DB's local row number per row; emitted rows echo it
 /// so the engine can place them beside their input row. `rows_in_group` carries
 /// the batch's own group row count through unchanged (a SET group size, or a
 /// SCALAR vector-chunk size), so the host bridge answers `UdfContext::rows_in_group()`
 /// from the current batch without reinterpreting the input shape.
 pub struct InputRowSet {
-    rows: Vec<Vec<Value>>,
+    cells: Vec<Value>,
+    n_rows: usize,
+    n_cols: usize,
     row_numbers: Vec<u64>,
     current_row: usize,
     rows_in_group: u64,
 }
 
 impl InputRowSet {
-    /// Decode a proto batch into a row-major matrix of `Value`s.
+    /// Decode a proto batch into a row-major buffer of `Value`s.
     ///
     /// The proto packs each cell type into its own array, column by column,
     /// with one slot per row (including NULL cells). The NULL bitmap is
     /// row-major across all columns.
-    pub fn from_proto(table: &ExascriptTableData, meta: &[ColumnInfo]) -> Self {
+    pub fn from_proto(table: ExascriptTableData, meta: &[ColumnInfo]) -> Self {
+        Self::decode(table, meta, Vec::new())
+    }
+
+    /// Replace the rows with the next batch's, reusing the cell buffer.
+    pub fn reload(&mut self, table: ExascriptTableData, meta: &[ColumnInfo]) {
+        let mut cells = std::mem::take(&mut self.cells);
+        cells.clear();
+        *self = Self::decode(table, meta, cells);
+    }
+
+    fn decode(mut table: ExascriptTableData, meta: &[ColumnInfo], mut cells: Vec<Value>) -> Self {
         let n_rows = table.rows as usize;
         let n_cols = meta.len();
 
@@ -60,15 +73,14 @@ impl InputRowSet {
         // block is consumed while walking rows then columns. Per-type running
         // cursors advance only when a non-null cell of that type is read, mirroring
         // how `to_proto` packs (and how Exasol lays out emitted/input batches).
-        let mut string_idx = 0usize;
+        let mut strings = table.data_string.into_iter();
         let mut bool_idx = 0usize;
         let mut int32_idx = 0usize;
         let mut int64_idx = 0usize;
         let mut double_idx = 0usize;
 
-        let mut rows: Vec<Vec<Value>> = Vec::with_capacity(n_rows);
+        cells.reserve(n_rows * n_cols);
         for r in 0..n_rows {
-            let mut row: Vec<Value> = Vec::with_capacity(n_cols);
             for (c, col) in meta.iter().enumerate() {
                 let is_null = table
                     .data_nulls
@@ -78,7 +90,7 @@ impl InputRowSet {
                 if is_null {
                     // A NULL cell occupies no slot in its type block; do not
                     // advance the per-type cursor (see `to_proto`).
-                    row.push(Value::Null);
+                    cells.push(Value::Null);
                     continue;
                 }
                 let v = match &col.typ {
@@ -87,9 +99,7 @@ impl InputRowSet {
                     | ExaType::Timestamp { .. }
                     | ExaType::String { .. }
                     | ExaType::Char { .. } => {
-                        let s = table.data_string.get(string_idx).map_or("", String::as_str);
-                        string_idx += 1;
-                        decode_string_block(&col.typ, s)
+                        decode_string_block(&col.typ, strings.next().unwrap_or_default())
                     }
                     ExaType::Boolean => {
                         let b = table.data_bool.get(bool_idx).copied().unwrap_or(false);
@@ -113,21 +123,23 @@ impl InputRowSet {
                     }
                     ExaType::Unsupported => Value::Null,
                 };
-                row.push(v);
+                cells.push(v);
             }
-            rows.push(row);
         }
 
         // A batch that carries no (or a short) `row_number` list falls back to
         // batch-local indices so the emit side always has a number to echo.
         let row_numbers = if table.row_number.len() >= n_rows {
-            table.row_number[..n_rows].to_vec()
+            table.row_number.truncate(n_rows);
+            table.row_number
         } else {
             (0..n_rows as u64).collect()
         };
 
         InputRowSet {
-            rows,
+            cells,
+            n_rows,
+            n_cols,
             row_numbers,
             current_row: 0,
             rows_in_group: table.rows_in_group,
@@ -142,16 +154,16 @@ impl InputRowSet {
     }
 
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.n_rows
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.n_rows == 0
     }
 
     /// Advance to the next row. Returns false when already on the last row.
     pub fn advance(&mut self) -> bool {
-        if self.current_row + 1 < self.rows.len() {
+        if self.current_row + 1 < self.n_rows {
             self.current_row += 1;
             true
         } else {
@@ -160,7 +172,7 @@ impl InputRowSet {
     }
 
     pub fn current_row(&self) -> &[Value] {
-        &self.rows[self.current_row]
+        self.row(self.current_row).unwrap_or(&[])
     }
 
     /// The DB's local row number for the row the cursor sits on.
@@ -172,7 +184,10 @@ impl InputRowSet {
     }
 
     pub fn row(&self, idx: usize) -> Option<&[Value]> {
-        self.rows.get(idx).map(|r| r.as_slice())
+        (idx < self.n_rows).then(|| {
+            let start = idx * self.n_cols;
+            &self.cells[start..start + self.n_cols]
+        })
     }
 }
 
@@ -980,28 +995,28 @@ fn fast_parse_timestamp(s: &str) -> Option<NaiveDateTime> {
 /// `chrono::parse_from_str` chain for anything outside their fixed-width
 /// scope — the same byte-identical-with-fallback shape as the emit-side
 /// `value_to_block_string` fast formatters.
-fn decode_string_block(typ: &ExaType, s: &str) -> Value {
+fn decode_string_block(typ: &ExaType, s: String) -> Value {
     match typ {
-        ExaType::Numeric { .. } => match Decimal::try_from(s) {
+        ExaType::Numeric { .. } => match Decimal::try_from(s.as_str()) {
             Ok(d) => Value::Numeric(d),
             Err(_) => Value::Null,
         },
         ExaType::Date => {
-            match fast_parse_date(s).or_else(|| NaiveDate::parse_from_str(s, DATE_FORMAT).ok()) {
+            match fast_parse_date(&s).or_else(|| NaiveDate::parse_from_str(&s, DATE_FORMAT).ok()) {
                 Some(d) => Value::Date(d),
                 None => Value::Null,
             }
         }
         ExaType::Timestamp { .. } => {
-            match fast_parse_timestamp(s)
-                .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_PARSE).ok())
-                .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT_ISO).ok())
+            match fast_parse_timestamp(&s)
+                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_PARSE).ok())
+                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_FORMAT_ISO).ok())
             {
                 Some(ts) => Value::Timestamp(ts),
                 None => Value::Null,
             }
         }
-        _ => Value::String(s.to_string()),
+        _ => Value::String(s),
     }
 }
 
@@ -1515,7 +1530,7 @@ impl<'a> HostContextBridge<'a> {
         loop {
             match (self.fetcher)()? {
                 Some(table) => {
-                    *self.input = InputRowSet::from_proto(&table, self.input_cols);
+                    self.input.reload(table, self.input_cols);
                     if !self.input.is_empty() {
                         return Ok(true);
                     }
