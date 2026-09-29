@@ -11,7 +11,7 @@ fn decode_frame(frame: &[u8]) -> ExascriptTableData {
 fn table_cost(t: &ExascriptTableData) -> usize {
     (t.data_int64.len() + t.data_double.len()) * FIXED_CELL_BYTES
         + t.data_bool.len()
-        + t.data_string.iter().map(String::len).sum::<usize>()
+        + t.data_string.iter().map(|s| s.len()).sum::<usize>()
 }
 
 fn frames(enc: &EncodedInput) -> usize {

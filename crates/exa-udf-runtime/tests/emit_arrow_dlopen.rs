@@ -36,7 +36,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
         rows: 0,
         ..Default::default()
     };
-    let mut input = InputRowSet::from_proto(empty, &input_cols);
+    let mut input = InputRowSet::from_proto(empty, &input_cols).unwrap();
     let mut emit_buf = EmitBuffer::new();
     // EMITS (id BIGINT, label VARCHAR(1)) -> BIGINT arrives as Numeric.
     let output_meta = vec![
@@ -56,7 +56,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
             &mut emit_buf,
             &input_cols,
             &output_meta,
-            Box::new(|_t: ExascriptTableData| Ok(())),
+            Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
             HandshakeMeta::default(),
             #[cfg(feature = "connect-back")]
             Box::new(|_name| {
@@ -71,7 +71,7 @@ fn emit_arrow_batch_so_round_trips_via_ipc() {
 
     let table = emit_buf.take_proto();
     assert_eq!(table.rows, 3, "expected 3 emitted rows");
-    let rs = InputRowSet::from_proto(table, &output_meta);
+    let rs = InputRowSet::from_proto(table, &output_meta).unwrap();
     assert_eq!(rs.row(0).unwrap()[1], Value::String("a".into()));
     assert_eq!(rs.row(2).unwrap()[1], Value::String("c".into()));
 }

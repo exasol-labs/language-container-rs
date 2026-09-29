@@ -212,10 +212,10 @@ impl Protocol {
     }
 
     /// Build an MT_EMIT request carrying output data.
-    pub fn emit_request(&self, table: exa_proto::ExascriptTableData) -> ExascriptRequest {
-        ExascriptRequest {
-            emit: Some(exa_proto::ExascriptEmitDataReq { table }),
-            ..self.base_request(MessageType::MtEmit)
+    pub fn emit_request<'a>(&self, table: &'a crate::EmitTable) -> crate::EmitRequest<'a> {
+        crate::EmitRequest {
+            connection_id: self.connection_id,
+            table,
         }
     }
 

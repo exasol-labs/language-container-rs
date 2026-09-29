@@ -97,6 +97,7 @@ homepage = "https://github.com/exasol-labs/language-container-rs"
 # Internal SDK, published to crates.io. The `version` here MUST track
 # [workspace.package].version so dependents publish against the matching release.
 exasol-udf-sdk = { path = "crates/exasol-udf-sdk", version = "0.31.0" }
+bytes = "1"
 prost = "0.13"
 prost-build = "0.13"
 prost-types = "0.13"

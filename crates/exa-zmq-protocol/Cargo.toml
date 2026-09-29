@@ -6,6 +6,7 @@ license.workspace = true
 edition = "2024"
 
 [dependencies]
+bytes = { workspace = true }
 exa-proto = { path = "../exa-proto" }
 exasol-udf-sdk = { path = "../exasol-udf-sdk" }
 prost = { workspace = true }

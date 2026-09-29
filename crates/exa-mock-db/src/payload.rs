@@ -166,7 +166,7 @@ fn push_double(table: &mut ExascriptTableData, v: f64) -> usize {
 
 fn push_string(table: &mut ExascriptTableData, s: String) -> usize {
     let len = s.len();
-    table.data_string.push(s);
+    table.data_string.push(s.into());
     table.data_nulls.push(false);
     len
 }

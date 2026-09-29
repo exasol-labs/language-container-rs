@@ -1,5 +1,6 @@
 use crate::error::ProtocolError;
-use exa_proto::{ExascriptRequest, ExascriptResponse};
+use crate::frame::Frame;
+use exa_proto::ExascriptResponse;
 use prost::Message;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,15 @@ const POLL_INTERVAL_MS: i32 = 1000;
 /// reply latency, so it never trips in practice yet still bounds a truly wedged
 /// peer should the engine watchdog ever fail to act.
 const MAX_TOTAL_WAIT: Duration = Duration::from_secs(120);
+
+/// Lets string-block cells borrow the received frame instead of copying it.
+struct RecvFrame(zmq::Message);
+
+impl AsRef<[u8]> for RecvFrame {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 pub struct ZmqTransport {
     socket: zmq::Socket,
@@ -76,10 +86,13 @@ impl ZmqTransport {
     /// it over via `zmq_msg_init_data` instead of copying it into a message of
     /// its own. A failed send frees that message, so the rare retry re-encodes
     /// rather than re-queueing the same frame.
-    pub fn send(&self, req: &ExascriptRequest) -> Result<(), ProtocolError> {
-        tracing::debug!(mt = req.r#type, len = req.encoded_len(), "send");
+    pub fn send(&self, req: &impl Frame) -> Result<(), ProtocolError> {
         self.retry_transient(
-            || self.socket.send(zmq::Message::from(req.encode_to_vec()), 0),
+            || {
+                let frame = req.encode_frame();
+                tracing::debug!(mt = req.message_type(), len = frame.len(), "send");
+                self.socket.send(zmq::Message::from(frame), 0)
+            },
             "send",
         )
     }
@@ -97,7 +110,7 @@ impl ZmqTransport {
         tracing::debug!("recv: waiting");
         let frame = self.retry_transient(|| self.socket.recv_msg(0), "recv")?;
         tracing::debug!(len = frame.len(), "recv: got frame");
-        let resp = ExascriptResponse::decode(&*frame)?;
+        let resp = ExascriptResponse::decode(bytes::Bytes::from_owner(RecvFrame(frame)))?;
         tracing::debug!(mt = resp.r#type, "recv: decoded");
         Ok(resp)
     }

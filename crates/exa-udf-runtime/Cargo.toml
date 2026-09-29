@@ -9,6 +9,7 @@ edition = "2024"
 exa-proto = { path = "../exa-proto" }
 exa-zmq-protocol = { path = "../exa-zmq-protocol" }
 exasol-udf-sdk = { path = "../exasol-udf-sdk" }
+bytes = { workspace = true }
 chrono = { workspace = true }
 libloading = { workspace = true }
 thiserror = { workspace = true }

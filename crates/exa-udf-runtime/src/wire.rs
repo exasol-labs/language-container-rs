@@ -1,7 +1,7 @@
 //! The single lockstep DB exchange shared by both dispatchers, so neither can
 //! drift from the other's wire policy.
 use crate::error::RuntimeError;
-use exa_zmq_protocol::{HostAction, HostEvent, Protocol, ZmqTransport};
+use exa_zmq_protocol::{Frame, HostAction, HostEvent, Protocol, ZmqTransport};
 
 /// Send one request and return the classified response event.
 ///
@@ -12,15 +12,14 @@ use exa_zmq_protocol::{HostAction, HostEvent, Protocol, ZmqTransport};
 pub(crate) fn request(
     transport: &ZmqTransport,
     proto: &mut Protocol,
-    req: exa_proto::ExascriptRequest,
+    req: impl Frame,
 ) -> Result<HostEvent, RuntimeError> {
-    let mut req = req;
+    transport.send(&req)?;
     loop {
-        transport.send(&req)?;
         let resp = transport.recv()?;
         let (event, action) = proto.step(resp)?;
         match action {
-            Some(HostAction::PingReply(s)) => req = proto.ping_reply(&s),
+            Some(HostAction::PingReply(s)) => transport.send(&proto.ping_reply(&s))?,
             _ => return Ok(event),
         }
     }
