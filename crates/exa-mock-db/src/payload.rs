@@ -28,7 +28,7 @@ pub enum ColumnClass {
     Native,
     Strblock,
     Varchar,
-    /// Emit-only: output metadata, no input rows.
+    /// 24 mixed-type columns, 12 nullable: generator output and `set_returns` input.
     Wide,
 }
 
@@ -171,6 +171,74 @@ fn push_string(table: &mut ExascriptTableData, s: String) -> usize {
     len
 }
 
+fn push_bool(table: &mut ExascriptTableData, v: bool) -> usize {
+    table.data_bool.push(v);
+    table.data_nulls.push(false);
+    1
+}
+
+fn push_null(table: &mut ExascriptTableData) -> usize {
+    table.data_nulls.push(true);
+    0
+}
+
+fn big_text(i: u64) -> String {
+    let unscaled = i as i128 * 12_345_678_901 + 987_654_321;
+    format!(
+        "{}.{:010}",
+        unscaled / 10_000_000_000,
+        unscaled % 10_000_000_000
+    )
+}
+
+const WIDE_TEXT: &str = "the quick brown fox jumps over the lazy dog while forty-two \
+    benchmark rows stream through a script language container, each carrying a \
+    reference to a file whose contents are emitted as wide rows with dozens of \
+    columns of mixed types and a sprinkling of nulls";
+
+fn wide_text(i: u64, col: usize) -> String {
+    let max = bench_schema::varchar_size(WIDE_COLUMNS[col].1).expect("VARCHAR(n)") as usize;
+    let len = 1 + (i as usize * 31 + col * 7) % max;
+    let start = (i as usize * 13 + col) % (WIDE_TEXT.len() - len);
+    WIDE_TEXT[start..start + len].to_string()
+}
+
+/// Same NULL pattern as the bench UDF's wide generator: every tenth cell of a
+/// nullable column, staggered by column.
+fn wide_is_null(i: u64, col: usize) -> bool {
+    WIDE_COLUMNS[col].2 && (i + col as u64).is_multiple_of(10)
+}
+
+fn write_wide_row(i: u64, t: &mut ExascriptTableData) -> usize {
+    let k = i as i64;
+    (0..WIDE_COLUMNS.len())
+        .map(|col| {
+            if wide_is_null(i, col) {
+                return push_null(t);
+            }
+            match col {
+                0 => push_int64(t, k),
+                1 => push_int64(t, k * 7),
+                2 => push_int64(t, k % 1_000),
+                3 => push_double(t, k as f64 * 1.5),
+                4 => push_double(t, k as f64 / 3.0),
+                5 => push_double(t, -(k as f64) * 0.25),
+                6 => push_bool(t, i.is_multiple_of(2)),
+                7 => push_bool(t, i.is_multiple_of(3)),
+                8 => push_string(t, amount_text(i)),
+                9 => push_string(t, amount_text(i + 1)),
+                10 => push_string(t, big_text(i)),
+                11 => push_string(t, big_text(i + 1)),
+                12 => push_string(t, date_text(i)),
+                13 => push_string(t, date_text(i + 1)),
+                14 => push_string(t, timestamp_text(i)),
+                15 => push_string(t, timestamp_text(i + 1)),
+                _ => push_string(t, wide_text(i, col)),
+            }
+        })
+        .sum()
+}
+
 impl RowSource for ColumnClass {
     fn columns(&self) -> Vec<ColumnDefinition> {
         match self {
@@ -197,7 +265,7 @@ impl RowSource for ColumnClass {
                     + push_string(table, timestamp_text(i))
             }
             ColumnClass::Varchar => push_int64(table, k) + push_string(table, format!("{i:0>50}")),
-            ColumnClass::Wide => panic!("ColumnClass::Wide has no input rows"),
+            ColumnClass::Wide => write_wide_row(i, table),
         }
     }
 }

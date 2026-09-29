@@ -313,7 +313,7 @@ pub async fn run(opts: RunOpts) -> Result<PathBuf> {
     )
     .await?;
     let mut forms = Vec::new();
-    for class in Class::ALL {
+    for class in Class::SOURCE {
         let t = Instant::now();
         let rows = class.input_rows(profile.rows);
         forms.push(build_table(&mut conn, &class.table(), class, rows).await?);

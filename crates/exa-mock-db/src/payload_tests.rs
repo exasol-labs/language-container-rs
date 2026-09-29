@@ -10,6 +10,7 @@ fn decode_frame(frame: &[u8]) -> ExascriptTableData {
 
 fn table_cost(t: &ExascriptTableData) -> usize {
     (t.data_int64.len() + t.data_double.len()) * FIXED_CELL_BYTES
+        + t.data_bool.len()
         + t.data_string.iter().map(String::len).sum::<usize>()
 }
 
@@ -51,6 +52,33 @@ fn strblock_row_lands_in_the_right_blocks_with_database_rendering() {
     assert_eq!(cost, 8 + 5 + 10 + 26);
     assert_eq!(amount_text(0), "42.00");
     assert_eq!(date_text(3650), "2020-01-01");
+}
+
+#[test]
+fn wide_row_fills_every_block_and_nulls_only_nullable_cells() {
+    let mut t = ExascriptTableData::default();
+    let cost = ColumnClass::Wide.write_row(9, &mut t);
+    assert_eq!(t.data_nulls.len(), 24);
+    let nulls: Vec<usize> = (0..24).filter(|&c| t.data_nulls[c]).collect();
+    assert_eq!(nulls, vec![1, 11, 21]);
+    assert!(nulls.iter().all(|&c| WIDE_COLUMNS[c].2));
+    assert_eq!(t.data_int64, vec![9, 9]);
+    assert_eq!(t.data_double.len(), 3);
+    assert_eq!(t.data_bool, vec![false, true]);
+    assert_eq!(t.data_string.len(), 14);
+    assert_eq!(t.data_string[2], "11.2098764430");
+    assert_eq!(t.data_string[3], "2020-01-10");
+    assert_eq!(cost, table_cost(&t));
+    for (col, s) in (16..24)
+        .filter(|c| !t.data_nulls[*c])
+        .zip(&t.data_string[7..])
+    {
+        assert!(s.len() <= bench_schema::varchar_size(WIDE_COLUMNS[col].1).unwrap() as usize);
+    }
+
+    let mut t = ExascriptTableData::default();
+    ColumnClass::Wide.write_row(0, &mut t);
+    assert!(t.data_nulls.iter().all(|n| !n));
 }
 
 #[test]

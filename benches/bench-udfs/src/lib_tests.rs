@@ -250,6 +250,14 @@ fn set_returns_sum_the_group() {
         (0..3).map(|i| amount(i).unscaled).sum::<i128>()
     );
     assert_eq!(out.scale, 2);
+
+    let rows: Vec<Vec<Value>> = (0..12).map(wide_row).collect();
+    let expected = rows.iter().flatten().filter(|v| **v != Value::Null).count() as i64;
+    assert!(expected < 12 * 24);
+    assert_eq!(
+        set_sum_wide(&mut set_returns_ctx(rows)).unwrap(),
+        Some(expected)
+    );
 }
 
 #[test]
@@ -271,6 +279,14 @@ fn set_emits_reemit_every_input_row() {
         .unwrap();
     assert_eq!(amounts.value(3), amount(3).unscaled);
     assert_eq!(*b.column(1).data_type(), DataType::Decimal128(18, 2));
+
+    let rows: Vec<Vec<Value>> = (0..5).map(wide_row).collect();
+    let mut ctx = TestContext::set(rows.clone());
+    set_emit_wide_row(&mut ctx).unwrap();
+    assert_eq!(ctx.emitted(), rows.as_slice());
+    let mut ctx = BatchCapture::set(rows);
+    set_emit_wide_batch(&mut ctx).unwrap();
+    assert_eq!(ctx.batches, vec![wide_batch(0, 5).unwrap()]);
 
     let rows: Vec<Vec<Value>> = (0..(CHUNK as i64 + 1))
         .map(|i| native_row(i).to_vec())

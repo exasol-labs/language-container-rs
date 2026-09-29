@@ -4,7 +4,7 @@ Provides the canonical example UDF crates that demonstrate connect-back (query a
 
 ## Background
 
-Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` with the `connect-back` feature and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. Connect-back logic is identical whether the registering script is `SCALAR` or `SET` — only the output path (return value versus `emit`) differs. Every fixture that an integration scenario `dlopen`s MUST be wired into the CI "Build UDF .so artifacts (release)" `-p` allowlist. Split out of `examples/test-udfs` to keep each example feature at or under ten scenarios.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` with the `connect-back` feature and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. Connect-back logic is identical whether the registering script is `SCALAR` or `SET` — only the output path (return value versus `emit`) differs. Every fixture that an integration scenario `dlopen`s lives in a `test-udfs/<crate-name>/` directory named after it, which is how `scripts/build-test-udfs.sh` finds it for CI. Split out of `examples/test-udfs` to keep each example feature at or under ten scenarios.
 
 ## Scenarios
 

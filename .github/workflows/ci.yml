@@ -63,39 +63,7 @@ jobs:
             --workspace
 
       - name: Build UDF .so artifacts (release)
-        run: |
-          cargo build --release \
-            -p scalar-double \
-            -p set-filter \
-            -p json-parse \
-            -p single-call-fixture \
-            -p connect-back-cluster-ip \
-            -p connect-back-query \
-            -p connect-back-scalar \
-            -p connect-back-insert \
-            -p connect-back-crunch \
-            -p resolv-udf \
-            -p emit-bulk \
-            -p emit-arrow-batch \
-            -p connect-back-stream \
-            -p timestamp-add-second \
-            -p timestamp-now \
-            -p timestamp-passthrough \
-            -p numeric-temporal-emit \
-            -p numeric-temporal-ingest \
-            -p handshake-meta \
-            -p current-user-meta \
-            -p annotated-fixture \
-            -p set-sum \
-            -p emit-k \
-            -p scalar-next-illegal \
-            -p returns-with-emit \
-            -p column-meta \
-            -p timestamp-precision \
-            -p type-probe \
-            -p import-export-spec \
-            -p rows-in-group \
-            -p cleanup-hook
+        run: bash scripts/build-test-udfs.sh
 
       - name: Build IT test binary (compile once)
         run: |

@@ -7,8 +7,10 @@
 
 Both use `benches/bench-udfs` (one cdylib, every entry point) and `benches/bench-schema`.
 Column classes: `native` (`k DECIMAL(18,0), v DOUBLE`), `strblock` (`k, amount DECIMAL(18,2), d DATE, ts TIMESTAMP`),
-`varchar` (`k, label VARCHAR(100)`), `wide` (24 columns, 12 nullable, emit-only: a SCALAR EMITS UDF expanding one
-input row into millions of wide rows; its batch cells take rows per Arrow batch, 8192 or 65536, as third parameter).
+`varchar` (`k, label VARCHAR(100)`), `wide` (24 columns, 12 nullable: emitted by a SCALAR EMITS UDF expanding one
+input row into millions of wide rows, its batch cells taking rows per Arrow batch, 8192 or 65536, as third parameter;
+read by `set_returns/wide`, the export shape, a SET UDF touching every cell of every input row; and re-emitted by
+`set_emits/wide`).
 Wire bytes per row (Tier 1 `bytes/row`): 13.9, 61.6, 57.9, 473.2.
 
 ## Tier 1
@@ -20,17 +22,18 @@ cargo bench -p exa-udf-runtime --features bench --bench protocol -- set_emits/na
 BENCH_ROWS=10000 cargo bench -p exa-udf-runtime --features bench --bench protocol -- --test  # CI smoke
 ```
 
-| `BENCH_PROFILE` | rows/iteration | warm-up | measure | samples | 25 cells, 4-core Xeon 8488C |
+| `BENCH_PROFILE` | rows/iteration | warm-up | measure | samples | 4-core Xeon 8488C |
 |---|---|---|---|---|---|
-| `quick` (default) | 250,000 | 1 s | 3 s | 10 | 169 s |
-| `full` | 1,000,000 | 3 s | 5 s | 10 | not yet measured |
+| `quick` (default) | 250,000 | 1 s | 3 s | 10 | 169 s (25 cells) |
+| `full` | 1,000,000 | 3 s | 5 s | 10 | 750 s (31 cells) |
 
 `BENCH_ROWS` overrides rows; `BENCH_ROWS_PER_CYCLE` (default 2,000) is how many SCALAR input rows the mock hands
 over per `MT_RUN` cycle, calibrated on docker-db 2026.1.1 from a Tier 2 `--udf-debug` log (row count, not a byte
 budget: native and varchar frames carry the same 2,000 rows at fourfold different sizes).
 
 Groups: `scalar_returns`, `scalar_emits_gen` (incl. `wide_row`, `wide_batch8k`, `wide_batch64k`),
-`scalar_emits_passthrough`, `set_returns` and `set_emits` (1 and 1,000 groups). After each group a counter table
+`scalar_emits_passthrough`, `set_returns` (`native`, `strblock`, `wide`) and `set_emits` (`native`, `strblock`,
+`wide`, each `row` and `batch`), the SET groups over 1 and 1,000 groups. After each group a counter table
 prints `MT_EMIT` messages, rows, bytes, `bytes/row`, `max_bytes` and the count over 4,000,000 bytes, which must be 0
 and is asserted, as is one `row_number` per emitted row.
 
@@ -49,17 +52,17 @@ Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`, `EXA_DB_MEM_SIZE`, defau
 `EXASOL_HOST`, `EXASOL_PORT`, `BUCKETFS_PORT`, `BUCKETFS_PASSWORD`. Results land in the gitignored `bench-results/`.
 `--udf-debug host:port` sets `%udf_debug_level debug` and redirects the runtime log to a TCP listener on the host.
 
-| `--profile` | rows (strblock table / wide) | warm-up | reps | 44 cells, docker-db 2026.1.1, 4 GiB | band |
+| `--profile` | rows (strblock and wide tables / wide generators) | warm-up | reps | docker-db 2026.1.1, 4 GiB, incl. Docker start | band |
 |---|---|---|---|---|---|
-| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s incl. Docker start | ±15 % |
-| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 264 s incl. Docker start | ±8 % |
+| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s (44 cells) | ±15 % |
+| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 255 s (47 cells) | ±8 % |
 
 Cells: `control_<class>`, `scalar_returns_<class>`, `scalar_emits_gen_<class>_<mode>[_noemit]`, `scalar_emits_pt`,
 `set_returns_<class>_g<G>`, `set_emits_<class>_<mode>_g<G>`, `set_gen_<class>_<mode>`. Every query returns one row and
 aggregates a UDF output column. `scalar_emits_pt` reports `incorrect` if an emitted row does not land beside its
 input row. The DB feeds DATE/TIMESTAMP columns into a UDF at 3k to 7k rows/s on 2026.1.1 (builtin Python3 is
-equally slow), so the strblock table is `n / 100` rows and those cells' `x_ctrl` is not comparable to native.
-Wide cells emit `n / 4` rows; generator cells report `MB_per_s` from `WIRE_BYTES_PER_ROW` in `cells.rs`, which
+equally slow), so the strblock and wide tables are `n / 100` rows and those cells' `x_ctrl` is not comparable to
+native. The wide table is filled by `gen_wide_row` (it has no SQL row expression). Wide generator cells emit `n / 4` rows; generator cells report `MB_per_s` from `WIRE_BYTES_PER_ROW` in `cells.rs`, which
 must follow the Tier 1 `bytes/row` when a generator or the encoder changes.
 
 A/B against one DB: `run` from the base checkout (A), from the change checkout (C), repeat both (B, D), then
@@ -78,5 +81,5 @@ Fewer than 8 pooled samples on a side flags `low power`; Tukey outliers are flag
 - `bench-udfs` is an optional dependency of the runtime behind the `bench` feature (it needs `emit-arrow`; a dev-dependency would unify that into every test build) and stays cdylib-only (UDF crates export identical symbols).
 - Tier 2 compares runs, not SLCs: each side builds its own tarball and `.so`.
 - Keys are `DECIMAL(18,0)` so `native` is native on the wire (BIGINT travels as a string).
-- `wide` is synthetic and emit-only: no Parquet reader (that would measure the reader, not the SLC).
+- `wide` is synthetic, generated by the bench UDF itself: no Parquet reader (that would measure the reader, not the SLC).
 - CI runs the Tier 1 smoke only; `quick` is the loop, `full` is the evidence a performance PR quotes.

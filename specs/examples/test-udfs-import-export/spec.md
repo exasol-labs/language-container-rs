@@ -4,7 +4,7 @@ Provides the example UDF crates that demonstrate the IMPORT/EXPORT spec-generati
 
 ## Background
 
-Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. Every fixture that an integration scenario `dlopen`s MUST be wired into the CI "Build UDF .so artifacts (release)" `-p` allowlist. A fixture's unit tests build their `UdfContext` double from the `exasol-udf-sdk` `test-support` feature rather than from a hand-written `impl UdfContext`, so a change to the trait's required method set costs one edit in the SDK instead of one edit per fixture.
+Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` and builds as a glibc-dynamic cdylib via a plain host `cargo build --release`. Every fixture that an integration scenario `dlopen`s lives in a `test-udfs/<crate-name>/` directory named after it, which is how `scripts/build-test-udfs.sh` finds it for CI. A fixture's unit tests build their `UdfContext` double from the `exasol-udf-sdk` `test-support` feature rather than from a hand-written `impl UdfContext`, so a change to the trait's required method set costs one edit in the SDK instead of one edit per fixture.
 
 ## Scenarios
 
@@ -15,7 +15,7 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` and
 * *THEN* the crate MUST enable both the SDK's `import` and `export` features and read each `json_spec` through them rather than through a hand-rolled parser, and each hook MUST return a `SELECT` that names its worker script qualified by `ctx.script_schema()` and passes a summary of the connection name, the parameters, and the column names it read
 * *AND* `IMPORT_WORKER` MUST emit that summary together with the input schema it observed, so the summary reaches the client as imported rows
 * *AND* `EXPORT_WORKER` MUST return its summary as a `UdfError`, because an `EXPORT` statement discards the generated `SELECT`'s result and the error channel is the only path back to the client
-* *AND* the crate MUST appear in the workspace `members` and `default-members` lists and in the CI "Build UDF .so artifacts (release)" `-p` allowlist, because an integration scenario `dlopen`s it
+* *AND* the crate MUST live in a `test-udfs/<crate-name>/` directory named after it and appear in the workspace `members` and `default-members` lists, because an integration scenario `dlopen`s it and `scripts/build-test-udfs.sh` builds every `test-udfs/*/` directory under that name for CI
 
 ### Scenario: import-export-spec's worker reads a variadic input schema at runtime
 
@@ -30,4 +30,4 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` and
 * *WHEN* its `run` reads `ctx.rows_in_group()` once and then iterates the group with `ctx.next()`
 * *THEN* the crate MUST emit one row per group carrying the reported count and the number of rows it iterated
 * *AND* it MUST read the count before the first `next()`, so the fixture proves the value is available up front rather than only after iteration
-* *AND* the crate MUST appear in the workspace `members` and `default-members` lists and in the CI "Build UDF .so artifacts (release)" `-p` allowlist, because an integration scenario `dlopen`s it
+* *AND* the crate MUST live in a `test-udfs/<crate-name>/` directory named after it and appear in the workspace `members` and `default-members` lists, because an integration scenario `dlopen`s it and `scripts/build-test-udfs.sh` builds every `test-udfs/*/` directory under that name for CI

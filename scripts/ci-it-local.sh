@@ -74,35 +74,9 @@ else
 fi
 export SLC_TARBALL="${SLC_TARBALL:-$SLC_DIR/lc-rs.tar.gz}"
 
-# 2. Build the UDF .so artifacts (release) — keep in step with the CI build job
-log "Build UDF .so artifacts (cargo build --release)"
-cargo build --release \
-  -p scalar-double \
-  -p set-filter \
-  -p json-parse \
-  -p single-call-fixture \
-  -p connect-back-cluster-ip \
-  -p connect-back-query \
-  -p connect-back-scalar \
-  -p connect-back-insert \
-  -p connect-back-crunch \
-  -p resolv-udf \
-  -p emit-bulk \
-  -p emit-arrow-batch \
-  -p connect-back-stream \
-  -p timestamp-add-second \
-  -p timestamp-now \
-  -p timestamp-passthrough \
-  -p numeric-temporal-emit \
-  -p numeric-temporal-ingest \
-  -p handshake-meta \
-  -p current-user-meta \
-  -p annotated-fixture \
-  -p set-sum \
-  -p emit-k \
-  -p scalar-next-illegal \
-  -p returns-with-emit \
-  -p column-meta
+# 2. Build the UDF .so artifacts (release), the same set CI builds
+log "Build UDF .so artifacts (scripts/build-test-udfs.sh)"
+bash "$REPO_ROOT/scripts/build-test-udfs.sh"
 
 # 3. Build the IT test binary (it-runner) -------------------------------------
 log "Build IT test binary (it-runner)"
