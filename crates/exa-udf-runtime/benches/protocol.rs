@@ -232,7 +232,8 @@ fn set_sum_col(class: ColumnClass) -> ColumnDefinition {
     match class {
         ColumnClass::Native => payload::double_col("s"),
         ColumnClass::Strblock => payload::numeric_col("s", 36, 2),
-        ColumnClass::Varchar | ColumnClass::Wide => unreachable!(),
+        ColumnClass::Wide => payload::int64_col("s"),
+        ColumnClass::Varchar => unreachable!(),
     }
 }
 
@@ -326,7 +327,11 @@ fn scalar_emits_passthrough(c: &mut Criterion) {
 fn set_returns(c: &mut Criterion) {
     let p = profile();
     let mut g = Group::new(c, "set_returns");
-    for class in [ColumnClass::Native, ColumnClass::Strblock] {
+    for class in [
+        ColumnClass::Native,
+        ColumnClass::Strblock,
+        ColumnClass::Wide,
+    ] {
         for groups in GROUPS {
             let meta = payload::metadata(
                 IterType::PbMultiple,
@@ -349,7 +354,11 @@ fn set_returns(c: &mut Criterion) {
 fn set_emits(c: &mut Criterion) {
     let p = profile();
     let mut g = Group::new(c, "set_emits");
-    for class in [ColumnClass::Native, ColumnClass::Strblock] {
+    for class in [
+        ColumnClass::Native,
+        ColumnClass::Strblock,
+        ColumnClass::Wide,
+    ] {
         for mode in ["row", "batch"] {
             for groups in GROUPS {
                 let meta = payload::metadata(

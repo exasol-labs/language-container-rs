@@ -452,6 +452,39 @@ impl ColumnCollector for VarcharCollector {
     }
 }
 
+struct WideCollector {
+    cols: Vec<Vec<Value>>,
+}
+
+impl Default for WideCollector {
+    fn default() -> Self {
+        WideCollector {
+            cols: vec![Vec::new(); WIDE_COLUMNS.len()],
+        }
+    }
+}
+
+impl ColumnCollector for WideCollector {
+    fn push(&mut self, ctx: &dyn UdfContext) -> Result<(), UdfError> {
+        for (c, col) in self.cols.iter_mut().enumerate() {
+            col.push(ctx.get(c)?.clone());
+        }
+        Ok(())
+    }
+    fn len(&self) -> usize {
+        self.cols[0].len()
+    }
+    fn take_batch(&mut self) -> Result<RecordBatch, UdfError> {
+        let cols = self
+            .cols
+            .iter_mut()
+            .zip(WIDE_COLUMNS)
+            .map(|(col, (_, ty, _))| array(ty, std::mem::take(col).into_iter()))
+            .collect::<Result<Vec<_>, _>>()?;
+        RecordBatch::try_new(schema(&WIDE_COLUMNS), cols).map_err(arrow_err)
+    }
+}
+
 fn reemit_batches<C: ColumnCollector>(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     let mut col = C::default();
     while ctx.next()? {
@@ -570,6 +603,18 @@ pub fn set_sum_strblock(ctx: &mut dyn UdfContext) -> Result<Option<Decimal>, Udf
     }))
 }
 
+/// The export shape: read every cell of every wide row, return the non-NULL count.
+#[exasol_udf]
+pub fn set_sum_wide(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> {
+    let mut non_null = 0i64;
+    while ctx.next()? {
+        for col in 0..WIDE_COLUMNS.len() {
+            non_null += i64::from(!matches!(std::hint::black_box(ctx.get(col)?), Value::Null));
+        }
+    }
+    Ok(Some(non_null))
+}
+
 #[exasol_udf]
 pub fn set_emit_native_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     reemit_rows(ctx)
@@ -598,6 +643,16 @@ pub fn set_emit_varchar_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
 #[exasol_udf]
 pub fn set_emit_varchar_batch(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     reemit_batches::<VarcharCollector>(ctx)
+}
+
+#[exasol_udf]
+pub fn set_emit_wide_row(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    reemit_rows(ctx)
+}
+
+#[exasol_udf]
+pub fn set_emit_wide_batch(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
+    reemit_batches::<WideCollector>(ctx)
 }
 
 #[cfg(test)]

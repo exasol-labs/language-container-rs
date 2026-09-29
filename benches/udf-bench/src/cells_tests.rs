@@ -7,12 +7,12 @@ fn by<'a>(c: &'a [CellSpec], name: &str) -> &'a CellSpec {
 }
 
 #[test]
-fn matrix_is_44_unique_cells_with_resolving_controls_and_passthrough_last() {
+fn matrix_is_47_unique_cells_with_resolving_controls_and_passthrough_last() {
     let c = cells(250_000);
-    assert_eq!(c.len(), 44);
+    assert_eq!(c.len(), 47);
     let names: HashSet<&str> = c.iter().map(|x| x.name.as_str()).collect();
-    assert_eq!(names.len(), 44);
-    assert_eq!(c.iter().filter(|x| x.shape == "control").count(), 3);
+    assert_eq!(names.len(), 47);
+    assert_eq!(c.iter().filter(|x| x.shape == "control").count(), 4);
     for x in c.iter().filter(|x| x.control.is_some()) {
         assert!(names.contains(x.control.as_deref().unwrap()), "{}", x.name);
         assert_ne!(x.shape, "control");
@@ -27,7 +27,7 @@ fn matrix_is_44_unique_cells_with_resolving_controls_and_passthrough_last() {
 #[test]
 fn every_script_is_used_by_a_cell() {
     let list = scripts("/b/x.so", false);
-    assert_eq!(list.len(), 3 + 3 * 2 * 3 + 4 + 1 + 2);
+    assert_eq!(list.len(), 3 + 3 * 2 * 3 + 4 + 1 + 3);
     let all_sql: String = cells(10).iter().map(|c| c.sql.clone()).collect();
     for s in &list {
         assert!(s.ends_with("%udf_object /b/x.so;\n/"), "{s}");
@@ -67,11 +67,22 @@ fn source_table_forms_agree_on_columns() {
     let [create, insert] = source_table_fallback("bench.src_strblock", Class::Strblock, 5);
     assert!(create.contains(Class::Strblock.columns().as_str()));
     assert!(insert.contains("gen_strblock_row(5, 1)"));
+
+    let range = source_table_range("bench.src_wide", Class::Wide, 5);
+    assert_eq!(
+        range,
+        "CREATE TABLE bench.src_wide AS SELECT bench.gen_wide_row(5, 1) FROM DUAL"
+    );
+    let [create, insert] = source_table_fallback("bench.src_wide", Class::Wide, 5);
+    assert!(create.contains(Class::Wide.columns().as_str()));
+    assert!(insert.contains("gen_wide_row(5, 1)"));
 }
 
 #[test]
-fn strblock_input_cells_read_a_smaller_table() {
+fn temporal_input_cells_read_a_smaller_table() {
     assert_eq!(Class::Strblock.input_rows(250_000), 2_500);
+    assert_eq!(Class::Wide.input_rows(250_000), 2_500);
+    assert_eq!(Class::Wide.gen_rows(250_000), 62_500);
     assert_eq!(Class::Strblock.input_rows(1_000_000), 10_000);
     assert_eq!(Class::Strblock.input_rows(10_000), 1_000);
     assert_eq!(Class::Strblock.input_rows(500), 500);
@@ -98,6 +109,24 @@ fn strblock_input_cells_read_a_smaller_table() {
     assert_eq!(by(&c, "scalar_emits_gen_strblock_row").rows, 250_000);
     assert_eq!(by(&c, "set_gen_strblock_batch").expect_count, Some(250_000));
     assert_eq!(by(&c, "scalar_returns_native").rows, 250_000);
+
+    for name in [
+        "control_wide",
+        "set_returns_wide_g1",
+        "set_returns_wide_g1000",
+    ] {
+        assert_eq!(by(&c, name).rows, 2_500, "{name}");
+    }
+    let wide_g1 = by(&c, "set_returns_wide_g1");
+    assert_eq!(wide_g1.expect_count, Some(1));
+    assert_eq!(wide_g1.control.as_deref(), Some("control_wide"));
+    assert!(wide_g1.sql.contains("bench.set_sum_wide(k, i1, i2, d1, "));
+    assert!(
+        wide_g1
+            .sql
+            .contains(", s128, s200) AS s FROM bench.src_wide GROUP BY MOD(k, 1))")
+    );
+    assert_eq!(by(&c, "set_returns_wide_g1000").expect_count, Some(1_000));
 }
 
 #[test]
@@ -113,11 +142,16 @@ fn generator_cells_noemit_twins_and_wide_batch_rows() {
     assert_eq!(yes.wire_bytes_per_row, Some(13.9));
 
     let wide: Vec<&CellSpec> = c.iter().filter(|x| x.class == Some("wide")).collect();
-    assert_eq!(wide.len(), 7);
-    assert!(wide.iter().all(|x| x.rows == 250_000 / WIDE_GEN_DIVISOR));
+    assert_eq!(wide.len(), 10);
+    let generated: Vec<&&CellSpec> = wide
+        .iter()
+        .filter(|x| x.shape == "scalar_emits_gen" || x.shape == "set_gen")
+        .collect();
+    assert_eq!(generated.len(), 7);
     assert!(
-        wide.iter()
-            .all(|x| x.shape == "scalar_emits_gen" || x.shape == "set_gen")
+        generated
+            .iter()
+            .all(|x| x.rows == 250_000 / WIDE_GEN_DIVISOR)
     );
     assert!(
         by(&c, "scalar_emits_gen_wide_batch8k")

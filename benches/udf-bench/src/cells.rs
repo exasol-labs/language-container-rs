@@ -1,7 +1,7 @@
 //! The Tier 2 matrix: classes, scripts, source tables and one single-row query per cell;
 //! every aggregate references a UDF output column so the optimizer cannot skip the call.
 
-use bench_schema::{WIDE_BATCH_ROWS, wide_ddl};
+use bench_schema::{WIDE_BATCH_ROWS, WIDE_COLUMNS, wide_ddl};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
@@ -16,13 +16,17 @@ pub const GROUPS: [u64; 2] = [1, 1_000];
 pub const SMALL_ROWS: u64 = 1_000;
 // DATE/TIMESTAMP input reaches a UDF at a few thousand rows/s on docker-db 2026.1.1; at the
 // full n the seven strblock input cells took 25 of a 26-minute quick run measuring the engine.
-pub const STRBLOCK_INPUT_DIVISOR: u64 = 100;
+// The wide table carries four such columns, so it is read at the same size.
+pub const TEMPORAL_INPUT_DIVISOR: u64 = 100;
 // A wide row is ~25 native rows on the wire; n / 4 keeps the full run inside its time budget.
 pub const WIDE_GEN_DIVISOR: u64 = 4;
 
 impl Class {
+    /// Classes with a SQL row expression, scalar RETURNS and generator scripts.
     pub const ALL: [Class; 3] = [Class::Native, Class::Strblock, Class::Varchar];
     pub const GEN: [Class; 4] = [Class::Native, Class::Strblock, Class::Varchar, Class::Wide];
+    /// Classes with a source table and a control cell.
+    pub const SOURCE: [Class; 4] = [Class::Native, Class::Strblock, Class::Varchar, Class::Wide];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -42,12 +46,16 @@ impl Class {
         }
     }
 
-    fn args(self) -> &'static str {
+    fn args(self) -> String {
         match self {
-            Class::Native => "k, v",
-            Class::Strblock => "k, amount, d, ts",
-            Class::Varchar => "k, label",
-            Class::Wide => unreachable!("wide has no source table"),
+            Class::Native => "k, v".into(),
+            Class::Strblock => "k, amount, d, ts".into(),
+            Class::Varchar => "k, label".into(),
+            Class::Wide => WIDE_COLUMNS
+                .iter()
+                .map(|(name, _, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 
@@ -57,7 +65,7 @@ impl Class {
 
     pub fn input_rows(self, n: u64) -> u64 {
         match self {
-            Class::Strblock => (n / STRBLOCK_INPUT_DIVISOR).max(GROUPS[1]).min(n),
+            Class::Strblock | Class::Wide => (n / TEMPORAL_INPUT_DIVISOR).max(GROUPS[1]).min(n),
             _ => n,
         }
     }
@@ -148,6 +156,12 @@ pub fn scripts(udf_object: &str, debug: bool) -> Vec<String> {
             &strblock,
             "RETURNS DECIMAL(36,2)",
         ),
+        script(
+            "SET",
+            "set_sum_wide",
+            &Class::Wide.columns(),
+            "RETURNS DECIMAL(18,0)",
+        ),
     ]);
     out
 }
@@ -179,15 +193,21 @@ fn row_expr(class: Class) -> &'static str {
         Class::Varchar => {
             "CAST(n AS DECIMAL(18,0)) AS k, CAST(LPAD(TO_CHAR(n), 50, '0') AS VARCHAR(100)) AS label"
         }
-        Class::Wide => unreachable!("wide has no source table"),
+        Class::Wide => unreachable!("wide has no SQL row expression"),
     }
 }
 
+/// The wide table has no SQL form; its generator UDF fills it in both forms.
 pub fn source_table_range(table: &str, class: Class, rows: u64) -> String {
-    format!(
-        "CREATE TABLE {table} AS SELECT {} FROM (VALUES BETWEEN 1 AND {rows}) AS t(n)",
-        row_expr(class)
-    )
+    match class {
+        Class::Wide => {
+            format!("CREATE TABLE {table} AS SELECT bench.gen_wide_row({rows}, 1) FROM DUAL")
+        }
+        _ => format!(
+            "CREATE TABLE {table} AS SELECT {} FROM (VALUES BETWEEN 1 AND {rows}) AS t(n)",
+            row_expr(class)
+        ),
+    }
 }
 
 pub fn source_table_fallback(table: &str, class: Class, rows: u64) -> [String; 2] {
@@ -257,7 +277,7 @@ impl CellSpec {
 
 pub fn cells(n: u64) -> Vec<CellSpec> {
     let mut v = Vec::new();
-    for class in Class::ALL {
+    for class in Class::SOURCE {
         let (c, rows, t) = (class.name(), class.input_rows(n), class.table());
         v.push(CellSpec::new(
             format!("control_{c}"),
@@ -312,7 +332,7 @@ pub fn cells(n: u64) -> Vec<CellSpec> {
             }
         }
     }
-    for class in [Class::Native, Class::Strblock] {
+    for class in [Class::Native, Class::Strblock, Class::Wide] {
         let (c, rows, t, a) = (
             class.name(),
             class.input_rows(n),
@@ -335,6 +355,14 @@ pub fn cells(n: u64) -> Vec<CellSpec> {
                 .control(class),
             );
         }
+    }
+    for class in [Class::Native, Class::Strblock] {
+        let (c, rows, t, a) = (
+            class.name(),
+            class.input_rows(n),
+            class.table(),
+            class.args(),
+        );
         for mode in MODES {
             for g in GROUPS {
                 v.push(
