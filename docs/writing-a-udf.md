@@ -6,7 +6,7 @@
 
 ## Prerequisites
 
-- Rust 1.94+.
+- Rust 1.98.1 — the SLC's own toolchain. The ABI fingerprint pairs the SDK version with the exact `rustc` version, so a `.so` built with any other release is rejected at load time (see the upgrade note below).
 - `cargo-exasol-udf` installed from crates.io (or `--path crates/cargo-exasol-udf` from this workspace):
   ```bash
   cargo install cargo-exasol-udf
@@ -35,10 +35,17 @@ the container build and `cargo exasol-udf validate` read. Otherwise:
   A macOS host also cannot cross-compile a Linux ELF natively (no Linux linker or
   sysroot) — build inside a Linux container of the target architecture instead.
 
-Build inside `rust:1.94-trixie` (or an equivalent Linux host of the SLC's
+Build inside `rust:1.98.1-trixie` (or an equivalent Linux host of the SLC's
 architecture whose glibc is ≤ the floor) to guarantee a loadable artifact. Use
 `--target <triple>` only for a native build on another installed target, not to
 cross the glibc boundary.
+
+> **Upgrade note (SLC on Rust 1.98.1):** the SLC's `exaudfclient` and every UDF
+> `.so` must be compiled by the same `rustc`; its version is half of the ABI
+> fingerprint. A `.so` built with an earlier toolchain fails at load time with
+> `Fingerprint mismatch: expected <sdk>:rustc_1.98.1__…, found <sdk>:rustc_1.94.1__…`.
+> Rebuild it with Rust 1.98.1 (`cargo exasol-udf build`) and upload it again;
+> no source change is needed.
 
 ### The SLC library surface
 

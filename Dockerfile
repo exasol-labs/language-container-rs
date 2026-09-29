@@ -1,6 +1,6 @@
 # Stage 1: Builder — compiles the client on the same Debian release the staging
 # stage donates its runtime from, so the shipped binary and the bundled glibc match.
-FROM rust:1.94-trixie AS builder
+FROM rust:1.98.1-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # No libzmq3-dev: zmq-sys falls back to zeromq-src (static zmq), eliminating
 # the libzmq runtime dependency from the exported binary.
 # Force bzip2-sys to build from vendored source instead of linking the system
-# libbz2: rust:1.94-trixie ships libbz2-dev on aarch64 but not x86_64, so
+# libbz2: the rust trixie image (seen on rust:1.94-trixie) ships libbz2-dev
+# on aarch64 but not x86_64, so
 # without this pin the aarch64 binary picks up a DT_NEEDED for libbz2.so.1.0.
 ENV BZIP2_NO_PKG_CONFIG=1
 
@@ -21,8 +22,9 @@ COPY crates/ ./crates/
 COPY test-udfs/ ./test-udfs/
 COPY benches/ ./benches/
 
-# The workspace toolchain pin and the image toolchain are both 1.94; drop the
-# pin so the image's own 1.94 toolchain is used (no version split).
+# The workspace toolchain pin and the image toolchain are both 1.98.1; drop
+# the pin so the image's own 1.98.1 toolchain is used (no version split). A
+# pin left in place would silently shadow the image toolchain.
 RUN rm rust-toolchain.toml
 
 RUN cargo build --release -p exaudfclient
