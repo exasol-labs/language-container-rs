@@ -6,6 +6,7 @@ license.workspace = true
 edition = "2024"
 
 [dependencies]
+bytes = { workspace = true }
 prost = { workspace = true }
 
 [build-dependencies]

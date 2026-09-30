@@ -1,5 +1,34 @@
 use super::*;
 
+fn written(write: impl FnOnce(&mut Vec<u8>) -> bool) -> Option<String> {
+    let mut out = Vec::new();
+    write(&mut out).then(|| String::from_utf8(out).unwrap())
+}
+
+fn value_to_block_string(v: &Value) -> String {
+    written(|out| {
+        write_block_value(out, v);
+        true
+    })
+    .unwrap()
+}
+
+fn fast_decimal_to_string(d: &Decimal) -> String {
+    written(|out| {
+        write_decimal(out, d);
+        true
+    })
+    .unwrap()
+}
+
+fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
+    written(|out| write_fast_date(out, d))
+}
+
+fn fast_timestamp_to_string(ts: &NaiveDateTime) -> Option<String> {
+    written(|out| write_fast_timestamp(out, ts))
+}
+
 /// Encode one batch through a fresh `EmitBuffer`, the way `push_batch` packs it
 /// when the batch cannot reach the flush threshold.
 #[cfg(feature = "emit-arrow")]
@@ -37,7 +66,7 @@ fn host_bridge_debug_level_returns_valid_level() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let bridge = HostContextBridge::new(
         &mut rs,
@@ -127,7 +156,7 @@ fn make_bridge<'a>(
         emit,
         cols,
         cols, // output_meta: reuse the same schema for test simplicity
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
         #[cfg(feature = "connect-back")]
         Box::new(|_name| {
@@ -153,7 +182,7 @@ fn single_int_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
 #[test]
 fn scalar_input_bans_next() {
     let (table, meta) = single_int_batch();
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     bridge.configure_group_input(
@@ -173,7 +202,7 @@ fn scalar_input_bans_next() {
 #[test]
 fn returns_output_bans_emit() {
     let (table, meta) = single_int_batch();
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     bridge.configure_group_input(
@@ -193,7 +222,7 @@ fn returns_output_bans_emit() {
 #[test]
 fn set_return_records_some_as_row_and_none_as_null() {
     let (table, meta) = single_int_batch();
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     {
         let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
@@ -233,7 +262,7 @@ fn mixed_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
         rows: n_rows as u64,
         rows_in_group: 0,
         // string block (col1): row0="x", row1=placeholder ""
-        data_string: vec!["x".into(), String::new()],
+        data_string: vec!["x".into(), "".into()],
         data_nulls,
         data_bool: vec![true, false],
         data_int32: vec![],
@@ -247,7 +276,7 @@ fn mixed_batch() -> (ExascriptTableData, Vec<ColumnInfo>) {
 #[test]
 fn bridge_materializes_input_rows() {
     let (table, meta) = mixed_batch();
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(rs.len(), 2);
     assert_eq!(
         rs.row(0).unwrap(),
@@ -275,13 +304,13 @@ fn bridge_materializes_input_rows() {
 fn input_rows_keep_their_row_number_or_fall_back_to_indices() {
     let (mut table, meta) = mixed_batch();
     assert!(table.row_number.is_empty());
-    let mut rs = InputRowSet::from_proto(table.clone(), &meta);
+    let mut rs = InputRowSet::from_proto(table.clone(), &meta).unwrap();
     assert_eq!(rs.current_row_number(), 0);
     assert!(rs.advance());
     assert_eq!(rs.current_row_number(), 1);
 
     table.row_number = vec![41, 42];
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(rs.current_row_number(), 41);
     assert!(rs.advance());
     assert_eq!(rs.current_row_number(), 42);
@@ -293,7 +322,7 @@ fn zero_column_batch_keeps_its_row_count() {
         rows: 3,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &[]);
+    let mut rs = InputRowSet::from_proto(table, &[]).unwrap();
     assert_eq!(rs.len(), 3);
     assert_eq!(rs.row(2), Some(&[][..]));
     assert_eq!(rs.row(3), None);
@@ -309,7 +338,7 @@ fn emitted_rows_carry_the_input_row_number() {
     let (mut table, meta) = mixed_batch();
     table.row_number = vec![41, 42];
     let out_meta = vec![col("v", ExaType::Int64)];
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     {
         let mut bridge = HostContextBridge::new(
@@ -350,7 +379,7 @@ fn string_block_keeps_push_order() {
 #[test]
 fn bridge_typed_accessors() {
     let (table, meta) = mixed_batch();
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
 
@@ -401,7 +430,7 @@ fn emit_buffer_roundtrips_through_proto() {
     let table = emit.take_proto();
     // Decoding the emitted batch back must reproduce the original rows,
     // proving from_proto/to_proto are symmetric (dense per-type blocks).
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(
         rs.row(0).unwrap(),
         &[
@@ -447,7 +476,7 @@ fn emit_packs_by_declared_type_not_value_variant() {
     assert_eq!(table.data_string, vec!["EU", "1", "EU", "2"]);
     assert!(table.data_int64.is_empty());
 
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(
         rs.row(0).unwrap(),
         &[
@@ -500,7 +529,7 @@ fn emit_string_block_is_row_major_across_columns() {
     let table = emit.take_proto();
     assert_eq!(table.data_string, vec!["100", "AAA", "200", "BBB"]);
 
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(
         rs.row(0).unwrap(),
         &[
@@ -548,7 +577,7 @@ fn emit_null_cell_occupies_no_type_block_slot() {
     assert_eq!(table.data_string, vec!["AAA", "5", "BBB"]);
     assert_eq!(table.data_nulls, vec![true, false, false, false]);
 
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(
         rs.row(0).unwrap(),
         &[Value::Null, Value::String("AAA".into())]
@@ -591,7 +620,7 @@ fn bridge_typed_getters_return_typed_options() {
         ..Default::default()
     };
 
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     let expected_date = NaiveDate::from_ymd_opt(2026, 6, 14).unwrap();
     let expected_ts = expected_date.and_hms_micro_opt(9, 30, 15, 250_000).unwrap();
     let decoded = rs.row(0).unwrap();
@@ -606,7 +635,7 @@ fn bridge_typed_getters_return_typed_options() {
     let mut emit = EmitBuffer::new();
     emit.push(decoded.to_vec(), 0, &meta);
     let reproto = emit.take_proto();
-    let reread = InputRowSet::from_proto(reproto, &meta);
+    let reread = InputRowSet::from_proto(reproto, &meta).unwrap();
     assert_eq!(reread.row(0).unwrap(), decoded);
 }
 
@@ -631,8 +660,21 @@ fn corrupt_string_block_value_decodes_to_null() {
         data_nulls: vec![false, false],
         ..Default::default()
     };
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(rs.row(0).unwrap(), &[Value::Null, Value::Null]);
+}
+
+#[test]
+fn non_utf8_string_cell_fails_the_batch() {
+    let meta = vec![col("s", ExaType::String { size: 10 })];
+    let table = ExascriptTableData {
+        rows: 1,
+        data_string: vec![bytes::Bytes::from_static(b"\xff")],
+        data_nulls: vec![false],
+        ..Default::default()
+    };
+    let err = InputRowSet::from_proto(table, &meta).err().unwrap();
+    assert!(err.to_string().contains("not valid UTF-8"), "{err}");
 }
 
 #[test]
@@ -701,7 +743,7 @@ fn bridge_emit_rejects_wrong_arity_and_types() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(empty, &meta);
+    let mut rs = InputRowSet::from_proto(empty, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
 
@@ -796,14 +838,14 @@ fn bridge_exposes_input_and_output_column_metadata() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(empty, &input);
+    let mut rs = InputRowSet::from_proto(empty, &input).unwrap();
     let mut emit = EmitBuffer::new();
     let bridge = HostContextBridge::new(
         &mut rs,
         &mut emit,
         &input,
         &output,
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
         #[cfg(feature = "connect-back")]
         Box::new(|_name| {
@@ -833,7 +875,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(empty_table, &meta);
+    let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let flush_count = std::cell::Cell::new(0usize);
     let flush_count_ref = &flush_count;
@@ -846,7 +888,7 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
             &mut emit,
             &meta,
             &meta,
-            Box::new(move |t: exa_proto::ExascriptTableData| {
+            Box::new(move |t: &exa_zmq_protocol::EmitTable| {
                 if t.rows > 0 {
                     flush_count_ref.set(flush_count_ref.get() + 1);
                 }
@@ -910,14 +952,14 @@ fn timestamp_emit_nanosecond_roundtrip() {
     let table = emit.take_proto();
 
     // THEN the emitted string contains exactly 9 fractional digits.
-    let emitted_str = &table.data_string[0];
+    let emitted_str = std::str::from_utf8(&table.data_string[0]).unwrap();
     assert!(
         emitted_str.ends_with(".123456789"),
         "expected 9-digit nanosecond fraction, got: {emitted_str}"
     );
 
     // AND it round-trips losslessly via from_proto.
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(
         rs.row(0).unwrap(),
         &[Value::Timestamp(ts)],
@@ -932,7 +974,7 @@ fn empty_batch_next_is_false() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     assert!(!bridge.next().unwrap());
@@ -947,7 +989,7 @@ fn refill_skips_empty_batches_until_a_nonempty_one_arrives() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(empty_table, &meta);
+    let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
 
@@ -991,7 +1033,7 @@ fn rows_in_group_is_carried_from_the_input_batch() {
     let meta = vec![col("a", ExaType::Int64)];
 
     let (no_group_table, no_group_meta) = single_int_batch();
-    let rs = InputRowSet::from_proto(no_group_table, &no_group_meta);
+    let rs = InputRowSet::from_proto(no_group_table, &no_group_meta).unwrap();
     assert_eq!(rs.rows_in_group(), 0);
 
     let first_batch = ExascriptTableData {
@@ -1001,7 +1043,7 @@ fn rows_in_group_is_carried_from_the_input_batch() {
         data_nulls: vec![false],
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(first_batch, &meta);
+    let mut rs = InputRowSet::from_proto(first_batch, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     bridge.configure_group_input(
@@ -1037,7 +1079,7 @@ fn rows_in_group_is_carried_from_the_input_batch() {
 #[test]
 fn context_reports_the_declared_iteration_axes() {
     let (table, meta) = single_int_batch();
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
     bridge.configure_group_input(
@@ -1092,7 +1134,7 @@ fn bridge_returns_memory_limit() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let limit_bytes: u64 = 512 * 1024 * 1024;
     let bridge = HostContextBridge::new(
@@ -1100,7 +1142,7 @@ fn bridge_returns_memory_limit() {
         &mut emit,
         &meta,
         &meta, // output_meta
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta {
             memory_limit: limit_bytes,
             ..Default::default()
@@ -1122,7 +1164,7 @@ fn bridge_returns_handshake_metadata() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     // A present optional (current_user) and absent optionals (current_schema,
     // scope_user) prove the bridge mirrors the proto present/absent distinction.
@@ -1146,7 +1188,7 @@ fn bridge_returns_handshake_metadata() {
         &mut emit,
         &meta,
         &meta,
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         handshake,
         #[cfg(feature = "connect-back")]
         Box::new(|_name| {
@@ -1426,7 +1468,7 @@ fn input_rowset_decodes_int32_column() {
         data_nulls: vec![false, true, false],
         ..Default::default()
     };
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(rs.row(0).unwrap(), &[Value::Int32(7)]);
     assert_eq!(rs.row(1).unwrap(), &[Value::Null]);
     assert_eq!(rs.row(2).unwrap(), &[Value::Int32(-8)]);
@@ -1445,7 +1487,7 @@ fn input_rowset_unsupported_column_decodes_to_null() {
         data_nulls: vec![false, false],
         ..Default::default()
     };
-    let rs = InputRowSet::from_proto(table, &meta);
+    let rs = InputRowSet::from_proto(table, &meta).unwrap();
     assert_eq!(rs.row(0).unwrap(), &[Value::Int64(5), Value::Null]);
 }
 
@@ -1481,6 +1523,16 @@ fn value_to_block_string_bool_and_null_render_as_text_and_empty() {
     assert_eq!(value_to_block_string(&Value::Bool(true)), "true");
     assert_eq!(value_to_block_string(&Value::Bool(false)), "false");
     assert_eq!(value_to_block_string(&Value::Null), "");
+    for v in [i32::MIN as i64, -1, 0, i64::MAX] {
+        assert_eq!(value_to_block_string(&Value::Int64(v)), v.to_string());
+    }
+    assert_eq!(
+        value_to_block_string(&Value::Int32(i32::MIN)),
+        i32::MIN.to_string()
+    );
+    for f in [0.0, -0.25, 1.5e300, f64::NAN, f64::INFINITY] {
+        assert_eq!(value_to_block_string(&Value::Double(f)), f.to_string());
+    }
 }
 
 /// `value_to_i64`/`value_to_f64`/`value_to_bool` coerce every `Value` variant
@@ -1589,7 +1641,7 @@ fn bridge_cluster_ip_delegates_to_first_nonloopback_ipv4() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let bridge = make_bridge(&mut rs, &mut emit, &meta);
 
@@ -1619,14 +1671,14 @@ fn bridge_connection_error_is_recorded_via_record_error() {
         rows: 0,
         ..Default::default()
     };
-    let mut rs = InputRowSet::from_proto(table, &meta);
+    let mut rs = InputRowSet::from_proto(table, &meta).unwrap();
     let mut emit = EmitBuffer::new();
     let mut bridge = HostContextBridge::new(
         &mut rs,
         &mut emit,
         &meta,
         &meta,
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
         Box::new(|name: &str| {
             Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
@@ -2117,7 +2169,7 @@ mod fast_string_block_ingest_tests {
                 "mismatch for {s}, expected {expected:?}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Date, s.into()),
+                decode_string_block(&ExaType::Date, s),
                 expected,
                 "decode_string_block mismatch for {s}"
             );
@@ -2149,12 +2201,12 @@ mod fast_string_block_ingest_tests {
                 "mismatch for {s}, expected {expected:?}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp { precision: 3 }, s.into()),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block mismatch for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp { precision: 3 }, s.into()),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block (Timestamp/LTZ) mismatch for {s}"
             );
@@ -2184,7 +2236,7 @@ mod fast_string_block_ingest_tests {
                 "test setup: {s} should be chrono-valid"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Date, s.into()),
+                decode_string_block(&ExaType::Date, s),
                 expected,
                 "decode_string_block must still succeed via fallback for {s}"
             );
@@ -2204,7 +2256,7 @@ mod fast_string_block_ingest_tests {
                 "test setup: {s} should be chrono-valid"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp { precision: 3 }, s.into()),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 expected,
                 "decode_string_block must still succeed via fallback for {s}"
             );
@@ -2233,7 +2285,7 @@ mod fast_string_block_ingest_tests {
                 "fast_parse_date should defer/reject for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Date, s.into()),
+                decode_string_block(&ExaType::Date, s),
                 Value::Null,
                 "decode_string_block(Date) should be Null for {s}"
             );
@@ -2258,7 +2310,7 @@ mod fast_string_block_ingest_tests {
                 "fast_parse_timestamp should defer/reject for {s}"
             );
             assert_eq!(
-                decode_string_block(&ExaType::Timestamp { precision: 3 }, s.into()),
+                decode_string_block(&ExaType::Timestamp { precision: 3 }, s),
                 Value::Null,
                 "decode_string_block(Timestamp) should be Null for {s}"
             );
@@ -2440,7 +2492,7 @@ mod arrow_tests {
         let mut flushed_tables: Vec<exa_proto::ExascriptTableData> = Vec::new();
         batch_buf
             .push_batch(&batch, &meta, 0, &mut |t| {
-                flushed_tables.push(t);
+                flushed_tables.push(t.to_proto());
                 Ok(())
             })
             .unwrap();
@@ -2467,7 +2519,7 @@ mod arrow_tests {
         assert_eq!(row_table.rows, batch_table.rows, "row count");
 
         // Also decode the batch-path result and verify values.
-        let rs = InputRowSet::from_proto(batch_table, &meta);
+        let rs = InputRowSet::from_proto(batch_table, &meta).unwrap();
         assert_eq!(
             rs.row(0).unwrap(),
             &[
@@ -2814,7 +2866,7 @@ mod arrow_tests {
         );
 
         // Round-trip via from_proto.
-        let rs = InputRowSet::from_proto(table, &meta);
+        let rs = InputRowSet::from_proto(table, &meta).unwrap();
         assert_eq!(
             rs.row(0).unwrap(),
             &[
@@ -3015,7 +3067,7 @@ mod arrow_tests {
             emit,
             meta,
             meta,
-            Box::new(move |t: exa_proto::ExascriptTableData| {
+            Box::new(move |t: &exa_zmq_protocol::EmitTable| {
                 if t.rows > 0 {
                     flush_count.set(flush_count.get() + 1);
                 }
@@ -3045,7 +3097,7 @@ mod arrow_tests {
             rows: 0,
             ..Default::default()
         };
-        let mut rs = InputRowSet::from_proto(empty_table, &meta);
+        let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
         let mut emit = EmitBuffer::new();
         let flush_count = std::cell::Cell::new(0usize);
         {
@@ -3072,7 +3124,7 @@ mod arrow_tests {
             rows: 0,
             ..Default::default()
         };
-        let mut rs = InputRowSet::from_proto(empty_table, &meta);
+        let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
         let mut emit = EmitBuffer::new();
         let flush_count = std::cell::Cell::new(0usize);
         let mut bridge = make_emit_bridge_with_counter(&mut rs, &mut emit, &meta, &flush_count);
@@ -3095,7 +3147,7 @@ mod arrow_tests {
             rows: 0,
             ..Default::default()
         };
-        let mut rs = InputRowSet::from_proto(empty_table, &meta);
+        let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
         let mut emit = EmitBuffer::new();
         let flush_count = std::cell::Cell::new(0usize);
         {
@@ -3111,7 +3163,7 @@ mod arrow_tests {
         assert_eq!(emit.len(), 3, "both styles append to the one buffer");
 
         let table = emit.take_proto();
-        let rs2 = InputRowSet::from_proto(table, &meta);
+        let rs2 = InputRowSet::from_proto(table, &meta).unwrap();
         assert_eq!(rs2.row(0).unwrap(), &[Value::Int64(1)]);
         assert_eq!(rs2.row(1).unwrap(), &[Value::Int64(2)]);
         assert_eq!(rs2.row(2).unwrap(), &[Value::Int64(3)]);
@@ -3640,7 +3692,7 @@ mod arrow_tests {
             rows: 0,
             ..Default::default()
         };
-        let mut rs = InputRowSet::from_proto(empty_table, &meta);
+        let mut rs = InputRowSet::from_proto(empty_table, &meta).unwrap();
         let mut emit = EmitBuffer::new();
         let mut bridge = make_bridge(&mut rs, &mut emit, &meta);
         bridge.configure_group_input(

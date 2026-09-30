@@ -56,7 +56,7 @@ fn empty_rowset(meta: &[ColumnInfo]) -> InputRowSet {
         rows: 0,
         ..Default::default()
     };
-    InputRowSet::from_proto(table, meta)
+    InputRowSet::from_proto(table, meta).unwrap()
 }
 
 fn make_bridge<'a>(
@@ -69,7 +69,7 @@ fn make_bridge<'a>(
         emit,
         cols,
         cols,
-        Box::new(|_t: exa_proto::ExascriptTableData| Ok(())),
+        Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
         #[cfg(feature = "connect-back")]
         Box::new(|_name| {

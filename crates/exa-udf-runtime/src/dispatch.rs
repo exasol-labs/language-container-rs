@@ -2,7 +2,9 @@ use crate::error::RuntimeError;
 use crate::loader::LoadedUdf;
 use crate::rowset::{BatchFetcher, EmitBuffer, EmitFlusher, HostContextBridge, InputRowSet};
 use crate::wire::{close_error, request};
-use exa_zmq_protocol::{ColumnInfo, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport};
+use exa_zmq_protocol::{
+    ColumnInfo, EmitTable, HostEvent, IterType, Protocol, UdfMeta, ZmqTransport,
+};
 use exasol_udf_sdk::error::UdfError;
 use std::cell::{Cell, RefCell};
 
@@ -126,18 +128,15 @@ fn emit_flusher<'a>(
     transport: &'a ZmqTransport,
     proto_cell: &'a RefCell<&'a mut Protocol>,
 ) -> EmitFlusher<'a> {
-    Box::new(
-        move |table: exa_proto::ExascriptTableData| -> Result<(), UdfError> {
-            if table.rows == 0 {
-                return Ok(());
-            }
-            let mut proto = proto_cell.borrow_mut();
-            let req = proto.emit_request(table);
-            request(transport, &mut proto, req)
-                .map_err(|e| UdfError::ConnectBack(e.to_string()))?;
-            Ok(())
-        },
-    )
+    Box::new(move |table: &EmitTable| -> Result<(), UdfError> {
+        if table.rows == 0 {
+            return Ok(());
+        }
+        let mut proto = proto_cell.borrow_mut();
+        let req = proto.emit_request(table);
+        request(transport, &mut proto, req).map_err(|e| UdfError::ConnectBack(e.to_string()))?;
+        Ok(())
+    })
 }
 
 /// Pull the next `MT_NEXT` batch: `Ok(Some)` a batch, `Ok(None)` the group
@@ -186,7 +185,8 @@ fn first_nonempty_input(
     input_cols: &[ColumnInfo],
 ) -> Result<Option<InputRowSet>, RuntimeError> {
     while let Some(table) = fetch().map_err(|e| RuntimeError::Udf(e.to_string()))? {
-        let rows = InputRowSet::from_proto(table, input_cols);
+        let rows = InputRowSet::from_proto(table, input_cols)
+            .map_err(|e| RuntimeError::Udf(e.to_string()))?;
         if !rows.is_empty() {
             return Ok(Some(rows));
         }
@@ -230,9 +230,9 @@ fn tail_flush(
         return Ok(());
     }
     emit_buf.record_flush_telemetry();
-    let table = emit_buf.take_proto();
-    let mut proto = proto_cell.borrow_mut();
-    let req = proto.emit_request(table);
-    request(transport, &mut proto, req)?;
-    Ok(())
+    emit_buf.flush(|table| {
+        let mut proto = proto_cell.borrow_mut();
+        let req = proto.emit_request(table);
+        request(transport, &mut proto, req).map(drop)
+    })
 }

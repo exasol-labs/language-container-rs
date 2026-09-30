@@ -80,6 +80,12 @@ The exact wire-format strings the Exasol engine parses are fixed contracts: `DAT
 * *AND* the decoder MUST accept every format the emit path can produce — TIMESTAMP with 0..9 fractional-second digits (`%.f`), DATE as `%Y-%m-%d`, and fixed-point DECIMAL — with no loss of precision
 * *AND* a NULL cell MUST NOT consume a slot in its type block, preserving the per-type cursor advancement `from_proto` guarantees
 
+### Scenario: A string-block input cell that is not UTF-8 fails the call
+
+* *GIVEN* an input batch whose string block carries a cell that is not valid UTF-8
+* *WHEN* `InputRowSet::from_proto` decodes the batch
+* *THEN* decoding MUST fail with an error naming the cell's row and column, which ends the call, instead of yielding a value or NULL for that cell
+
 ### Scenario: InputRowSet carries the group row count of the input batch
 
 * *GIVEN* an `ExascriptTableData` the database sent for a set-input group, carrying `rows_in_group`

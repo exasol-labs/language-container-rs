@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use exa_proto::ExascriptTableData;
-use exa_zmq_protocol::{ColumnInfo, ExaType, IterType};
+use exa_zmq_protocol::{ColumnInfo, EmitTable, ExaType, IterType};
 use exasol_udf_sdk::context::{InputType, OutputType, UdfContext};
 use exasol_udf_sdk::error::UdfError;
 use exasol_udf_sdk::value::{Decimal, Value};
@@ -52,19 +52,29 @@ impl InputRowSet {
     ///
     /// The proto packs each cell type into its own array, column by column,
     /// with one slot per row (including NULL cells). The NULL bitmap is
-    /// row-major across all columns.
-    pub fn from_proto(table: ExascriptTableData, meta: &[ColumnInfo]) -> Self {
+    /// row-major across all columns. A string-block cell that is not UTF-8
+    /// fails the batch.
+    pub fn from_proto(table: ExascriptTableData, meta: &[ColumnInfo]) -> Result<Self, UdfError> {
         Self::decode(table, meta, Vec::new())
     }
 
     /// Replace the rows with the next batch's, reusing the cell buffer.
-    pub fn reload(&mut self, table: ExascriptTableData, meta: &[ColumnInfo]) {
+    pub fn reload(
+        &mut self,
+        table: ExascriptTableData,
+        meta: &[ColumnInfo],
+    ) -> Result<(), UdfError> {
         let mut cells = std::mem::take(&mut self.cells);
         cells.clear();
-        *self = Self::decode(table, meta, cells);
+        *self = Self::decode(table, meta, cells)?;
+        Ok(())
     }
 
-    fn decode(mut table: ExascriptTableData, meta: &[ColumnInfo], mut cells: Vec<Value>) -> Self {
+    fn decode(
+        mut table: ExascriptTableData,
+        meta: &[ColumnInfo],
+        mut cells: Vec<Value>,
+    ) -> Result<Self, UdfError> {
         let n_rows = table.rows as usize;
         let n_cols = meta.len();
 
@@ -72,7 +82,7 @@ impl InputRowSet {
         // so a column's value for row `r` is the `r`-th time that column's type
         // block is consumed while walking rows then columns. Per-type running
         // cursors advance only when a non-null cell of that type is read, mirroring
-        // how `to_proto` packs (and how Exasol lays out emitted/input batches).
+        // how `EmitBuffer` packs (and how Exasol lays out emitted/input batches).
         let mut strings = table.data_string.into_iter();
         let mut bool_idx = 0usize;
         let mut int32_idx = 0usize;
@@ -89,7 +99,7 @@ impl InputRowSet {
                     .unwrap_or(false);
                 if is_null {
                     // A NULL cell occupies no slot in its type block; do not
-                    // advance the per-type cursor (see `to_proto`).
+                    // advance the per-type cursor (see `EmitBuffer::push_costed`).
                     cells.push(Value::Null);
                     continue;
                 }
@@ -99,7 +109,13 @@ impl InputRowSet {
                     | ExaType::Timestamp { .. }
                     | ExaType::String { .. }
                     | ExaType::Char { .. } => {
-                        decode_string_block(&col.typ, strings.next().unwrap_or_default())
+                        let cell = strings.next().unwrap_or_default();
+                        let s = std::str::from_utf8(&cell).map_err(|_| {
+                            UdfError::Type(format!(
+                                "input row {r} column {c}: string cell is not valid UTF-8"
+                            ))
+                        })?;
+                        decode_string_block(&col.typ, s)
                     }
                     ExaType::Boolean => {
                         let b = table.data_bool.get(bool_idx).copied().unwrap_or(false);
@@ -136,14 +152,14 @@ impl InputRowSet {
             (0..n_rows as u64).collect()
         };
 
-        InputRowSet {
+        Ok(InputRowSet {
             cells,
             n_rows,
             n_cols,
             row_numbers,
             current_row: 0,
             rows_in_group: table.rows_in_group,
-        }
+        })
     }
 
     /// The group row count the database reported for the batch this row set
@@ -213,7 +229,7 @@ const BYTES_ROW_NUMBER: usize = 10;
 const NUMERIC_COST_BASE: usize = 40;
 
 /// Conservative O(1) byte cost for one cell, approximating the width its
-/// non-null value occupies in `to_proto`'s type block. NULL cells cost 0
+/// non-null value occupies in its wire type block. NULL cells cost 0
 /// because they take no type-block slot; the estimate slightly over-counts
 /// (fixed widths for Numeric/Date/Timestamp) so the buffer flushes early rather
 /// than late.
@@ -265,23 +281,17 @@ fn current_debug_level() -> tracing::Level {
         .unwrap_or(tracing::Level::INFO)
 }
 
-/// Accumulates emitted output rows directly in the wire's proto type blocks, so
-/// a flush is a `mem::take` and the row and Arrow batch paths share one buffer.
+/// Accumulates emitted output rows directly in the wire's type blocks, so the
+/// row and Arrow batch paths share one buffer and a flush encodes it in place.
 ///
 /// Each type block is dense (one slot per non-null cell) and filled row-major,
 /// so columns sharing a block interleave; the NULL bitmap is row-major too.
 /// `InputRowSet::from_proto` reads back exactly this layout.
 #[derive(Default)]
 pub struct EmitBuffer {
-    strings: Vec<String>,
-    nulls: Vec<bool>,
-    bools: Vec<bool>,
-    int32: Vec<i32>,
-    int64: Vec<i64>,
-    doubles: Vec<f64>,
-    /// Local row number of the input row each buffered output row came from.
-    row_numbers: Vec<u64>,
-    rows: usize,
+    /// `row_numbers` holds the local row number of the input row each buffered
+    /// output row came from.
+    table: EmitTable,
     /// Running approximate serialised size of the buffered rows.
     byte_estimate: usize,
     /// Total bytes emitted across all flushes (running sum, never reset).
@@ -311,7 +321,7 @@ impl EmitBuffer {
     /// in the pass that validates the row, so the row is not walked for it twice.
     pub fn push_costed(
         &mut self,
-        mut values: Vec<Value>,
+        values: Vec<Value>,
         row_number: u64,
         meta: &[ColumnInfo],
         row_cost: usize,
@@ -327,36 +337,40 @@ impl EmitBuffer {
         );
         self.account(1, row_cost);
         for (c, col) in meta.iter().enumerate() {
-            match values.get_mut(c).filter(|v| !matches!(v, Value::Null)) {
+            match values.get(c).filter(|v| !matches!(v, Value::Null)) {
                 // Exasol consumes type-block entries only for non-null cells, so
                 // a placeholder here would shift every later cell of that type
                 // into the wrong column.
-                None => self.nulls.push(true),
+                None => self.table.nulls.push(true),
                 Some(v) => {
-                    self.nulls.push(false);
+                    self.table.nulls.push(false);
                     self.push_cell(&col.typ, v);
                 }
             }
         }
-        self.row_numbers.push(row_number);
-        self.rows += 1;
+        self.table.row_numbers.push(row_number);
+        self.table.rows += 1;
     }
 
     /// Pack one non-NULL cell into the block dictated by the declared column
     /// type, not the runtime `Value` variant: a connect-back SELECT may hand an
     /// `ExaType::Numeric` column a `Value::Int64`, which still goes to the
     /// string block.
-    fn push_cell(&mut self, typ: &ExaType, v: &mut Value) {
+    fn push_cell(&mut self, typ: &ExaType, v: &Value) {
+        let t = &mut self.table;
         match typ {
             ExaType::Numeric { .. }
             | ExaType::Date
             | ExaType::Timestamp { .. }
             | ExaType::String { .. }
-            | ExaType::Char { .. } => self.strings.push(value_take_block_string(v)),
-            ExaType::Boolean => self.bools.push(value_to_bool(v)),
-            ExaType::Int32 => self.int32.push(value_to_i64(v) as i32),
-            ExaType::Int64 => self.int64.push(value_to_i64(v)),
-            ExaType::Double => self.doubles.push(value_to_f64(v)),
+            | ExaType::Char { .. } => match v {
+                Value::String(s) => t.push_string(s.as_bytes()),
+                other => t.push_string_with(|out| write_block_value(out, other)),
+            },
+            ExaType::Boolean => t.bools.push(value_to_bool(v)),
+            ExaType::Int32 => t.int32.push(value_to_i64(v) as i32),
+            ExaType::Int64 => t.int64.push(value_to_i64(v)),
+            ExaType::Double => t.doubles.push(value_to_f64(v)),
             ExaType::Unsupported => {}
         }
     }
@@ -381,43 +395,34 @@ impl EmitBuffer {
         self.byte_estimate >= EMIT_BUFFER_LIMIT_BYTES
     }
 
-    /// Take the accumulated blocks as an `ExascriptTableData`, leaving the
-    /// buffer empty and ready for the next batch.
+    /// Hand the buffered blocks to `send`, then empty the buffer for the
+    /// next batch, keeping its allocations.
+    pub fn flush<E>(&mut self, send: impl FnOnce(&EmitTable) -> Result<(), E>) -> Result<(), E> {
+        let result = send(&self.table);
+        self.clear();
+        result
+    }
+
+    /// Take the buffered blocks as an `ExascriptTableData`, leaving the buffer
+    /// empty.
     pub fn take_proto(&mut self) -> ExascriptTableData {
-        let table = ExascriptTableData {
-            rows: self.rows as u64,
-            rows_in_group: 0,
-            data_string: std::mem::take(&mut self.strings),
-            data_nulls: std::mem::take(&mut self.nulls),
-            data_bool: std::mem::take(&mut self.bools),
-            data_int32: std::mem::take(&mut self.int32),
-            data_int64: std::mem::take(&mut self.int64),
-            data_double: std::mem::take(&mut self.doubles),
-            row_number: std::mem::take(&mut self.row_numbers),
-        };
+        let table = self.table.to_proto();
         self.clear();
         table
     }
 
     pub fn clear(&mut self) {
         self.flush_count += 1;
-        self.strings.clear();
-        self.nulls.clear();
-        self.bools.clear();
-        self.int32.clear();
-        self.int64.clear();
-        self.doubles.clear();
-        self.row_numbers.clear();
-        self.rows = 0;
+        self.table.clear(2 * EMIT_BUFFER_LIMIT_BYTES);
         self.byte_estimate = 0;
     }
 
     pub fn len(&self) -> usize {
-        self.rows
+        self.table.rows as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rows == 0
+        self.table.rows == 0
     }
 
     /// Emit a `debug!` event with RSS, buffer state, and cumulative counters.
@@ -437,7 +442,7 @@ impl EmitBuffer {
             cumulative_bytes = self.cumulative_bytes,
             cumulative_rows = self.cumulative_rows,
             flush_count = self.flush_count + 1,
-            buffered_rows = self.rows,
+            buffered_rows = self.table.rows,
             "MT_EMIT flush"
         );
     }
@@ -459,7 +464,7 @@ impl EmitBuffer {
         batch: &arrow::record_batch::RecordBatch,
         meta: &[ColumnInfo],
         row_number: u64,
-        flush: &mut dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError>,
+        flusher: &mut dyn FnMut(&EmitTable) -> Result<(), UdfError>,
     ) -> Result<(), UdfError> {
         let n_rows = batch.num_rows();
         if n_rows == 0 {
@@ -487,7 +492,7 @@ impl EmitBuffer {
             self.push_arrow_row(&accessors, &nulls, r, row_number);
             if self.should_flush() {
                 self.record_flush_telemetry();
-                flush(self.take_proto())?;
+                self.flush(&mut *flusher)?;
             }
         }
         Ok(())
@@ -505,19 +510,20 @@ impl EmitBuffer {
         r: usize,
         row_number: u64,
     ) {
+        let t = &mut self.table;
         for (c, acc) in accessors.iter().enumerate() {
             if nulls[c].as_ref().is_some_and(|nb| nb.is_null(r)) {
-                self.nulls.push(true);
+                t.nulls.push(true);
                 continue;
             }
-            self.nulls.push(false);
+            t.nulls.push(false);
             match acc {
-                ColAccessor::Int32(arr) => self.int32.push(arr.value(r)),
-                ColAccessor::Int64(arr) => self.int64.push(arr.value(r)),
-                ColAccessor::Float64(arr) => self.doubles.push(arr.value(r)),
-                ColAccessor::Boolean(arr) => self.bools.push(arr.value(r)),
-                ColAccessor::Utf8(arr) => self.strings.push(arr.value(r).to_string()),
-                ColAccessor::LargeUtf8(arr) => self.strings.push(arr.value(r).to_string()),
+                ColAccessor::Int32(arr) => t.int32.push(arr.value(r)),
+                ColAccessor::Int64(arr) => t.int64.push(arr.value(r)),
+                ColAccessor::Float64(arr) => t.doubles.push(arr.value(r)),
+                ColAccessor::Boolean(arr) => t.bools.push(arr.value(r)),
+                ColAccessor::Utf8(arr) => t.push_string(arr.value(r).as_bytes()),
+                ColAccessor::LargeUtf8(arr) => t.push_string(arr.value(r).as_bytes()),
                 ColAccessor::Date32(_)
                 | ColAccessor::TsSecond(_)
                 | ColAccessor::TsMillisecond(_)
@@ -526,14 +532,15 @@ impl EmitBuffer {
                 | ColAccessor::Decimal128(_, _)
                 | ColAccessor::NumericFromInt32(_)
                 | ColAccessor::NumericFromInt64(_)
-                | ColAccessor::NumericFromFloat64(_) => self
-                    .strings
-                    .push(value_into_block_string(accessor_value(acc, r))),
+                | ColAccessor::NumericFromFloat64(_) => {
+                    let v = accessor_value(acc, r);
+                    t.push_string_with(|out| write_block_value(out, &v));
+                }
                 ColAccessor::Unsupported => {}
             }
         }
-        self.row_numbers.push(row_number);
-        self.rows += 1;
+        t.row_numbers.push(row_number);
+        t.rows += 1;
     }
 }
 
@@ -564,7 +571,7 @@ enum ColAccessor<'a> {
     Decimal128(&'a arrow::array::Decimal128Array, i8),
     /// Int32/Int64/Float64 Arrow column declared as `ExaType::Numeric` (BIGINT
     /// widening): extract value as the natural type; `push_arrow_row`
-    /// stringifies it into the string block via `value_into_block_string`.
+    /// stringifies it into the string block via `write_block_value`.
     NumericFromInt32(&'a arrow::array::Int32Array),
     NumericFromInt64(&'a arrow::array::Int64Array),
     NumericFromFloat64(&'a arrow::array::Float64Array),
@@ -917,7 +924,7 @@ fn parse_4digit(b: &[u8]) -> Option<u32> {
 /// Hand-rolled fixed-format parser for the DATE wire form `YYYY-MM-DD`,
 /// replacing `NaiveDate::parse_from_str`'s generic strptime-style interpreter
 /// with direct byte-position digit reads (the mirror image of
-/// `fast_date_to_string`). Scoped to the exact 10-byte fixed-width layout the
+/// `write_fast_date`). Scoped to the exact 10-byte fixed-width layout the
 /// DB always sends (see the module doc comment above `DATE_FORMAT`); anything
 /// that doesn't match this exact shape (non-standard digit widths, wrong
 /// separators, garbage) returns `None` so the caller falls back to
@@ -940,7 +947,7 @@ fn fast_parse_date(s: &str) -> Option<NaiveDate> {
 /// `YYYY-MM-DD HH:MM:SS[.f]` (0 to 9 fractional digits; also accepts the
 /// `T`-separated ISO variant), replacing the two generic
 /// `NaiveDateTime::parse_from_str` attempts with direct byte-position digit
-/// reads — the mirror image of `fast_timestamp_to_string`. Anything that
+/// reads — the mirror image of `write_fast_timestamp`. Anything that
 /// doesn't match this exact fixed shape (non-standard digit widths, a leap
 /// second, more than 9 fractional digits, an unrecognised separator, garbage)
 /// returns `None` so the caller falls back to the existing two-attempt chrono
@@ -994,88 +1001,82 @@ fn fast_parse_timestamp(s: &str) -> Option<NaiveDateTime> {
 /// (`fast_parse_date`/`fast_parse_timestamp`), falling back to the original
 /// `chrono::parse_from_str` chain for anything outside their fixed-width
 /// scope — the same byte-identical-with-fallback shape as the emit-side
-/// `value_to_block_string` fast formatters.
-fn decode_string_block(typ: &ExaType, s: String) -> Value {
+/// `write_block_value` fast writers.
+fn decode_string_block(typ: &ExaType, s: &str) -> Value {
     match typ {
-        ExaType::Numeric { .. } => match Decimal::try_from(s.as_str()) {
+        ExaType::Numeric { .. } => match Decimal::try_from(s) {
             Ok(d) => Value::Numeric(d),
             Err(_) => Value::Null,
         },
         ExaType::Date => {
-            match fast_parse_date(&s).or_else(|| NaiveDate::parse_from_str(&s, DATE_FORMAT).ok()) {
+            match fast_parse_date(s).or_else(|| NaiveDate::parse_from_str(s, DATE_FORMAT).ok()) {
                 Some(d) => Value::Date(d),
                 None => Value::Null,
             }
         }
         ExaType::Timestamp { .. } => {
-            match fast_parse_timestamp(&s)
-                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_PARSE).ok())
-                .or_else(|| NaiveDateTime::parse_from_str(&s, TIMESTAMP_FORMAT_ISO).ok())
+            match fast_parse_timestamp(s)
+                .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_PARSE).ok())
+                .or_else(|| NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT_ISO).ok())
             {
                 Some(ts) => Value::Timestamp(ts),
                 None => Value::Null,
             }
         }
-        _ => Value::String(s),
+        _ => Value::String(s.to_owned()),
     }
 }
 
 /// Hand-rolled digit-writer replacing `Decimal`'s `Display` impl for the
 /// emit-side string block. `itoa::Buffer::format` writes the `i128`/`u128`
-/// digit run into a stack buffer with no intermediate `String`
-/// allocation-then-reparse; the decimal point is then spliced in directly.
+/// digit run into a stack buffer; the decimal point is then spliced in directly.
 /// Mirrors `Decimal::fmt` exactly (see `value.rs`), verified byte-identical by
 /// `fast_string_block_tests::fast_decimal_matches_display_for_all_cases`.
-fn fast_decimal_to_string(d: &Decimal) -> String {
+fn write_decimal(out: &mut Vec<u8>, d: &Decimal) {
     let mut buf = itoa::Buffer::new();
     if d.scale == 0 {
-        return buf.format(d.unscaled).to_string();
+        out.extend_from_slice(buf.format(d.unscaled).as_bytes());
+        return;
     }
 
-    let negative = d.unscaled < 0;
-    let digits = buf.format(d.unscaled.unsigned_abs());
+    let digits = buf.format(d.unscaled.unsigned_abs()).as_bytes();
     let scale = d.scale as usize;
-
-    let mut out = String::with_capacity(digits.len() + scale + 2);
-    if negative {
-        out.push('-');
+    if d.unscaled < 0 {
+        out.push(b'-');
     }
     if digits.len() <= scale {
-        out.push_str("0.");
-        for _ in 0..(scale - digits.len()) {
-            out.push('0');
-        }
-        out.push_str(digits);
+        out.extend_from_slice(b"0.");
+        out.resize(out.len() + scale - digits.len(), b'0');
+        out.extend_from_slice(digits);
     } else {
         let point = digits.len() - scale;
-        out.push_str(&digits[..point]);
-        out.push('.');
-        out.push_str(&digits[point..]);
+        out.extend_from_slice(&digits[..point]);
+        out.push(b'.');
+        out.extend_from_slice(&digits[point..]);
     }
-    out
 }
 
 /// Write a zero-padded 2-digit decimal number (0..=99) directly as ASCII
 /// bytes, avoiding `core::fmt`'s width/padding machinery.
-fn push_2digit(out: &mut String, v: u32) {
-    out.push((b'0' + (v / 10) as u8) as char);
-    out.push((b'0' + (v % 10) as u8) as char);
+fn push_2digit(out: &mut Vec<u8>, v: u32) {
+    out.push(b'0' + (v / 10) as u8);
+    out.push(b'0' + (v % 10) as u8);
 }
 
 /// Write a zero-padded `width`-digit decimal number as ASCII bytes via plain
 /// division/modulo — a fixed-width zero-padded digit writer with no runtime
 /// format-string interpretation.
-fn push_ndigit(out: &mut String, v: u32, width: u32) {
+fn push_ndigit(out: &mut Vec<u8>, v: u32, width: u32) {
     let mut divisor = 10u32.pow(width - 1);
     let mut remaining = v;
     for _ in 0..width {
-        out.push((b'0' + (remaining / divisor) as u8) as char);
+        out.push(b'0' + (remaining / divisor) as u8);
         remaining %= divisor;
         divisor /= 10;
     }
 }
 
-/// Fast `YYYY-MM-DD` formatter for `NaiveDate`, replacing chrono's generic
+/// Fast `YYYY-MM-DD` writer for `NaiveDate`, replacing chrono's generic
 /// `.format()` (which re-parses the `"%Y-%m-%d"` pattern on every call) with
 /// direct accessor reads (`year()`/`month()`/`day()` are O(1)) and hand-rolled
 /// zero-padded digit writes.
@@ -1086,106 +1087,88 @@ fn push_ndigit(out: &mut String, v: u32, width: u32) {
 /// variable-width `+`/`-`-prefixed field instead (see
 /// `fast_date_defers_for_out_of_common_range_years`); Exasol's DATE type only
 /// ever carries `0001-01-01..=9999-12-31`, so this covers every value that can
-/// actually reach the wire. Returns `None` for out-of-range years so the
-/// caller falls back to `NaiveDate::format`, preserving byte-identical output
-/// for every representable date.
-fn fast_date_to_string(d: &NaiveDate) -> Option<String> {
+/// actually reach the wire. Writes nothing and returns `false` for out-of-range
+/// years so the caller falls back to `NaiveDate::format`, preserving
+/// byte-identical output for every representable date.
+fn write_fast_date(out: &mut Vec<u8>, d: &NaiveDate) -> bool {
     use chrono::Datelike;
 
     let year = d.year();
     if !(0..=9999).contains(&year) {
-        return None;
+        return false;
     }
 
-    let mut out = String::with_capacity(10);
-    push_ndigit(&mut out, year as u32, 4);
-    out.push('-');
-    push_2digit(&mut out, d.month());
-    out.push('-');
-    push_2digit(&mut out, d.day());
-    Some(out)
+    push_ndigit(out, year as u32, 4);
+    out.push(b'-');
+    push_2digit(out, d.month());
+    out.push(b'-');
+    push_2digit(out, d.day());
+    true
 }
 
-/// Fast `YYYY-MM-DD HH:MM:SS.fffffffff` formatter for `NaiveDateTime`,
-/// replacing chrono's generic `.format()` the same way `fast_date_to_string`
-/// does for the date part, plus hand-rolled zero-padded time and always-9-digit
-/// nanosecond fields.
+/// Fast `YYYY-MM-DD HH:MM:SS.fffffffff` writer for `NaiveDateTime`, replacing
+/// chrono's generic `.format()` the same way `write_fast_date` does for the
+/// date part, plus hand-rolled zero-padded time and always-9-digit nanosecond
+/// fields.
 ///
-/// Defers to `None` (letting the caller fall back to `NaiveDateTime::format`)
-/// when the date part is out of the common year range (see
-/// `fast_date_to_string`) or when `nanosecond()` reports a leap-second value
+/// Writes nothing and returns `false` (letting the caller fall back to
+/// `NaiveDateTime::format`) when the date part is out of the common year range
+/// (see `write_fast_date`) or when `nanosecond()` reports a leap-second value
 /// (`>= 1_000_000_000`, per chrono's `Timelike::nanosecond` docs) — an edge
 /// case Exasol TIMESTAMP values never produce, kept out of the fast path
 /// rather than reverse-engineering chrono's undocumented leap-second
 /// rendering.
-fn fast_timestamp_to_string(ts: &NaiveDateTime) -> Option<String> {
+fn write_fast_timestamp(out: &mut Vec<u8>, ts: &NaiveDateTime) -> bool {
     use chrono::Timelike;
 
-    let date_part = fast_date_to_string(&ts.date())?;
     let nanos = ts.nanosecond();
-    if nanos >= 1_000_000_000 {
-        return None;
+    if nanos >= 1_000_000_000 || !write_fast_date(out, &ts.date()) {
+        return false;
     }
 
-    let mut out = String::with_capacity(29);
-    out.push_str(&date_part);
-    out.push(' ');
-    push_2digit(&mut out, ts.hour());
-    out.push(':');
-    push_2digit(&mut out, ts.minute());
-    out.push(':');
-    push_2digit(&mut out, ts.second());
-    out.push('.');
-    push_ndigit(&mut out, nanos, 9);
-    Some(out)
+    out.push(b' ');
+    push_2digit(out, ts.hour());
+    out.push(b':');
+    push_2digit(out, ts.minute());
+    out.push(b':');
+    push_2digit(out, ts.second());
+    out.push(b'.');
+    push_ndigit(out, nanos, 9);
+    true
 }
 
-/// Render a non-null `Value` as the text form for a string/numeric/temporal
-/// block. Typed variants are serialised back to their wire form; numeric integer
-/// and double variants are stringified so a DECIMAL EMITS column receiving a
+/// Append a non-null `Value`'s text form for a string/numeric/temporal block.
+/// Typed variants are serialised back to their wire form; numeric integer and
+/// double variants are stringified so a DECIMAL EMITS column receiving a
 /// `Value::Int64`/`Value::Double` from a connect-back SELECT still serialises.
 ///
-/// NUMERIC/DATE/TIMESTAMP use the hand-rolled fast formatters above, falling
-/// back to the `chrono`/`Display` path for the (rare, out-of-Exasol-range)
-/// cases they defer on — see `fast_date_to_string`/`fast_timestamp_to_string`.
-/// The `fast_string_block_tests` regression suite proves this is byte-identical
-/// to the `chrono`/`Display` path for every representable value.
-fn value_to_block_string(v: &Value) -> String {
+/// NUMERIC/DATE/TIMESTAMP use the hand-rolled fast writers above, falling back
+/// to the `chrono` path for the (rare, out-of-Exasol-range) cases they defer
+/// on. The `fast_string_block_tests` regression suite proves this is
+/// byte-identical to the `chrono`/`Display` path for every representable value.
+fn write_block_value(out: &mut Vec<u8>, v: &Value) {
+    use std::io::Write;
+
     match v {
-        Value::String(s) => s.clone(),
-        Value::Numeric(d) => fast_decimal_to_string(d),
+        Value::String(s) => out.extend_from_slice(s.as_bytes()),
+        Value::Numeric(d) => write_decimal(out, d),
         Value::Date(d) => {
-            fast_date_to_string(d).unwrap_or_else(|| d.format(DATE_FORMAT).to_string())
+            if !write_fast_date(out, d) {
+                let _ = write!(out, "{}", d.format(DATE_FORMAT));
+            }
         }
         Value::Timestamp(ts) => {
-            fast_timestamp_to_string(ts).unwrap_or_else(|| ts.format(TIMESTAMP_EMIT).to_string())
+            if !write_fast_timestamp(out, ts) {
+                let _ = write!(out, "{}", ts.format(TIMESTAMP_EMIT));
+            }
         }
-        Value::Int32(i) => i.to_string(),
-        Value::Int64(i) => i.to_string(),
-        Value::Double(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-    }
-}
-
-/// `value_to_block_string` for a `Value` the caller owns, so a `Value::String`
-/// moves into the block instead of being cloned. Same bytes for every variant.
-#[cfg(feature = "emit-arrow")]
-fn value_into_block_string(v: Value) -> String {
-    match v {
-        Value::String(s) => s,
-        other => value_to_block_string(&other),
-    }
-}
-
-/// `value_to_block_string` for a cell the caller is about to discard: a
-/// `Value::String`'s buffer moves into the block, leaving an empty string
-/// behind. Every other variant formats exactly as the borrowing form, with no
-/// move — the cell is left as it was.
-fn value_take_block_string(v: &mut Value) -> String {
-    match v {
-        Value::String(s) => std::mem::take(s),
-        other => value_to_block_string(other),
+        Value::Int32(i) => out.extend_from_slice(itoa::Buffer::new().format(*i).as_bytes()),
+        Value::Int64(i) => out.extend_from_slice(itoa::Buffer::new().format(*i).as_bytes()),
+        Value::Double(f) => {
+            let _ = write!(out, "{f}");
+        }
+        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Null => {}
     }
 }
 
@@ -1193,7 +1176,7 @@ fn value_take_block_string(v: &mut Value) -> String {
 /// Reject an output row that the declared columns cannot carry losslessly, and
 /// return its buffered byte cost from the same pass.
 ///
-/// `take_proto` packs by declared column type, so an arity or variant mismatch
+/// `EmitBuffer` packs by declared column type, so an arity or variant mismatch
 /// would otherwise land as a NULL, a truncated number or a stringified variant
 /// with no error anywhere: the DB acknowledges `MT_EMIT` before it reads the
 /// row and never reports a per-row problem. NULL is valid in every column.
@@ -1373,12 +1356,10 @@ pub type BatchFetcher<'a> =
 pub type ConnRequester<'a> =
     Box<dyn Fn(&str) -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>;
 
-/// Flushes one pre-built proto table to the DB mid-run. Receives the
-/// already-serialised `ExascriptTableData` so the row path and the batch path
-/// share the same wire-send logic. Feature-independent: mid-run flushing is not gated on
+/// Sends the buffered blocks to the DB as one `MT_EMIT`, for the row and batch
+/// paths alike. Feature-independent: mid-run flushing is not gated on
 /// `connect-back`.
-pub type EmitFlusher<'a> =
-    Box<dyn FnMut(exa_proto::ExascriptTableData) -> Result<(), UdfError> + 'a>;
+pub type EmitFlusher<'a> = Box<dyn FnMut(&EmitTable) -> Result<(), UdfError> + 'a>;
 
 pub struct HostContextBridge<'a> {
     input: &'a mut InputRowSet,
@@ -1530,7 +1511,7 @@ impl<'a> HostContextBridge<'a> {
         loop {
             match (self.fetcher)()? {
                 Some(table) => {
-                    self.input.reload(table, self.input_cols);
+                    self.input.reload(table, self.input_cols)?;
                     if !self.input.is_empty() {
                         return Ok(true);
                     }
@@ -1555,8 +1536,7 @@ impl<'a> HostContextBridge<'a> {
         );
         if self.emit_buf.should_flush() {
             self.emit_buf.record_flush_telemetry();
-            let table = self.emit_buf.take_proto();
-            (self.flusher)(table)?;
+            self.emit_buf.flush(&mut self.flusher)?;
         }
         Ok(())
     }
@@ -1834,7 +1814,7 @@ impl UdfContext for HostContextBridge<'_> {
             .map_err(|e| UdfError::Type(format!("emit_batch: IPC reader init: {e}")))?;
         for batch in reader {
             let batch = batch.map_err(|e| UdfError::Type(format!("emit_batch: IPC read: {e}")))?;
-            emit_buf.push_batch(&batch, meta, row_number, &mut |table| (flusher)(table))?;
+            emit_buf.push_batch(&batch, meta, row_number, flusher)?;
         }
         Ok(())
     }

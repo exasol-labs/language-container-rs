@@ -54,7 +54,7 @@ message exascript_table_data {
     required uint64 rows_in_group = 8;
 
     // Storage for following types: NUMERIC, TIMESTAMP, DATE and STRING
-    repeated string data_string = 2;
+    repeated bytes data_string = 2;
 
     repeated bool data_nulls = 3 [packed = true];
     repeated bool data_bool = 4 [packed = true];
