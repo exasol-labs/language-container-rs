@@ -21,7 +21,7 @@
 #                                              set MEMSWAP=-1 for unlimited swap)
 #   SHM             docker --shm-size         (default: 2g)
 #   DB_MEM          EXA_DB_MEM_SIZE           (default: unset → docker-db auto-sizes)
-#   EXASOL_VERSION  docker-db image tag       (default: 2026.1.0)
+#   EXASOL_VERSION  docker-db image tag       (default: 2026.1.1)
 #   SKIP_SLC_BUILD  reuse existing SLC tarball (requires SLC_TARBALL)
 #   DB_PORT         host port -> DB 8563      (default: 8563)
 #   BFS_PORT        host port -> BucketFS 2581 (default: 2581)
@@ -39,7 +39,7 @@ MEM="${MEM:-6g}"
 MEMSWAP="${MEMSWAP:-$MEM}"
 SHM="${SHM:-2g}"
 DB_MEM="${DB_MEM:-}"
-EXASOL_VERSION="${EXASOL_VERSION:-2026.1.0}"
+EXASOL_VERSION="${EXASOL_VERSION:-2026.1.1}"
 CONTAINER="exasol-db"
 IMAGE="exasol/docker-db:${EXASOL_VERSION}"
 # Host port mappings. Override (e.g. DB_PORT=18563 BFS_PORT=12581) to run
