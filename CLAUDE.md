@@ -34,7 +34,7 @@ Project mission in: @specs/mission.md
 - Both `SCALAR` and `SET` scripts support connect-back; choose whichever UDF type fits the logic.
 - Address must be `<container-eth0-ip>:8563` via `ctx.cluster_ip()`; never `127.0.0.1` or the Docker host gateway (both → SIGABRT). `cluster_ip()` reads the first non-loopback IPv4 via `getifaddrs`; tests get it from `container_inner_ip()`.
 - Connect-back is a plain SQL login using CONNECTION-object credentials, running in its own independent transaction. Read-only is always safe; write-back must not write-write/schema-conflict with the invoking query (else WAIT FOR COMMIT → deadlock abort, Part:40 SIGABRT ~T+11s).
-- Transport (native binary vs WebSocket) is irrelevant — UDF type is the differentiator.
+- Transport (native binary vs WebSocket) does not affect connect-back.
 
 ## exaudfclient lifecycle
 
@@ -45,14 +45,14 @@ Project mission in: @specs/mission.md
 - `EMIT_BUFFER_LIMIT_BYTES = 4_000_000` is a **flush target**, not a DB-enforced wire limit. The value matches the reference C++ SLC's `SWIG_MAX_VAR_DATASIZE = 4_000_000` (4 million bytes, not 4 MiB). The DB accepts larger `MT_EMIT` messages.
 - Every emitted row carries the `row_number` of the input row it came from; the engine needs it to place pass-through select-list columns (`SELECT id, f(x) FROM t`). An `MT_EMIT` without it makes the DB read out of range and closes the session.
 - `ctx.emit` must **not** send a message per call. Buffer rows and flush to `MT_EMIT` only when the byte estimate reaches 4,000,000 bytes.
-- **Always flush at end of `run()`** — even if the threshold was not reached. The architect rule: "beim buffern ist auch wichtig, das man flushed, wenn die Run Methode durch ist".
+- **Always flush at end of `run()`** — even if the threshold was not reached.
 - A single row can be up to 2 GB — this limit cannot be avoided. A row that alone exceeds the 4,000,000-byte threshold must still be sent as a single-row `MT_EMIT` (no way to split it).
 - `EmitBuffer` must maintain a running byte-size estimate updated on each `push`, not recomputed on flush.
 
 ## Connect-back streaming
 
 - `ExaConnection::query` is **collect-all** — the entire result set materialises in memory as `Vec<Vec<Value>>`. Use it only for small, bounded result sets.
-- For table-scale reads, use the streaming API: fetch Arrow batches one at a time, convert each batch → `Vec<Value>` chunk, yield/callback to the caller, then **drop the batch before fetching the next one**. The architect rule: "du musst resultset in batches lesen und dann gleich emitten".
+- For table-scale reads, use the streaming API: fetch Arrow batches one at a time, convert each batch → `Vec<Value>` chunk, yield/callback to the caller, then **drop the batch before fetching the next one**.
 - Never accumulate all `RecordBatch`es before converting — that creates two in-memory copies (Arrow + Value) of the entire result simultaneously.
 - The `ExaConnection` trait (SDK/FFI boundary) must remain **Arrow-free**: only `Vec<Value>` chunks cross the `.so` boundary; Arrow `TypeId` is not stable across dynamic library boundaries.
 - The natural consumer pattern is emit-as-you-read: `conn.query_for_each(sql, |row| ctx.emit(row))` — read a chunk, emit it, discard it, repeat.

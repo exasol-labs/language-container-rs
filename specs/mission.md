@@ -107,4 +107,4 @@ exapump bfs upload \
 
 - Architecture, project structure, and the Exasol data-type mapping: [`architecture.md`](architecture.md).
 - User-facing documentation: [`docs/`](../docs/index.md) — installation, writing a UDF, the wire protocol, the cargo ecosystem.
-- Architectural decisions: [`decision-log.md`](decision-log.md).
+- Architectural decisions: [`_decision/`](_decision/).
