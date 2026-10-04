@@ -26,32 +26,6 @@ Declare verbosity as a `%udf_debug_level debug|info|warn|error` directive in the
 
 Any author who can write `CREATE SCRIPT` SQL can tune SLC verbosity without a container rebuild or environment variable change. The directive is parsed after the handshake, so early `main()`/handshake lines always use the process-default level (`info`).
 
-## ADR: Apply post-handshake log level via `tracing_subscriber::reload` + `rebuild_interest_cache`
-
-**ID:** post-handshake-log-level-tracing-reload
-**Plan:** `add-debug-output-redirect`
-**Status:** Accepted
-
-### Context
-
-The `%udf_debug_level` directive is parsed only after the handshake, but the `tracing-subscriber` is already installed in `main()`. The plan originally specified `tracing::level_filters::LevelFilter::set_max_level` as the one-line mechanism to raise the global max level at runtime. During implementation it was found that `set_max_level` does not exist in `tracing 0.1` — the API is not part of the public surface of that version.
-
-### Decision
-
-Install a `tracing_subscriber::reload`-wrapped `EnvFilter` in `main()`. After parsing `%udf_debug_level` post-handshake, call `reload_handle.reload(new_filter)` followed by `tracing::callsite::rebuild_interest_cache()`, which propagates the new level to the callsite interest cache and updates the value returned by `LevelFilter::current()`. This is a one-time mutation (no further reloads); no new crate dependency is added (`tracing-subscriber` already uses `reload` internally and the feature is available). The `reload::Handle` is stored as a field on `Runtime`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| `tracing_subscriber::reload` handle + `rebuild_interest_cache()` | ✓ Chosen — works correctly in `tracing 0.1`; one mutation, no extra dependency |
-| `tracing::level_filters::LevelFilter::set_max_level` | ✗ Rejected (does not exist) — this API is absent from `tracing 0.1`'s public surface |
-| Reinstall the entire subscriber post-handshake | ✗ Rejected — `init()` panics if called twice; requires unsafe global state reset |
-
-### Consequences
-
-The user-facing behavior (one-time post-handshake global level change, no subscriber reinstall) is identical to what the plan specified. The mechanism is `reload` + `rebuild_interest_cache()` rather than the originally cited `set_max_level`. The `reload` feature of `tracing-subscriber` is used but no new crate dependency is introduced. Events before the handshake use the process-default level.
-
 ## ADR: Output redirect is the database's job (fd-level dup2), not an SLC-managed TCP sink
 
 **ID:** output-redirect-is-database-job-fd-dup2

@@ -51,6 +51,8 @@ A RETURNS function returns `Result<Option<T>, UdfError>`: `None` maps to SQL NUL
 
 RETURNS UDFs read as idiomatic Rust (the function returns its value), `None → NULL` is first-class, and the compiled output shape is validated against `meta.output_iter` at load/run, turning a mismatch into a clear error instead of undefined behavior. Enforcement relies on Rust types plus a load/run check rather than an interpreter-level ban, but the observable semantics match the reference.
 
+The framework delivers a RETURNS value through the dedicated `UdfContext::set_return` method rather than `emit()`, and the macro-generated shim records the output shape (RETURNS vs EMITS) in the vtable, validated against `meta.output_iter`; this bumps `EXA_UDF_ABI_VERSION` from 6 to 7.
+
 ## ADR: Group boundary anchored to the MT_RUN/MT_DONE outer loop
 
 **ID:** group-boundary-mt-run-mt-done
@@ -101,29 +103,3 @@ Scope the `EmitBuffer` to the whole input group, accumulating across scalar per-
 ### Consequences
 
 Output stays correctly attributed to its group and batched efficiently regardless of dispatch shape. The dispatcher must track a group-scoped buffer lifecycle instead of a per-`run()`-call one.
-
-## ADR: Return value crosses the .so boundary via a dedicated context method, not the emit path
-
-**ID:** return-value-set-return-not-emit
-**Plan:** fix-run-dispatch-iteration-type
-**Status:** Accepted
-
-### Context
-
-The RETURNS value-return channel needs a way to deliver the UDF's returned value to the host bridge across the `.so` boundary, distinct from the author-facing `emit()` the bridge must reject in RETURNS context. An arbitrary `Value` (Numeric, Timestamp, String) has no simple C-ABI blob form.
-
-### Decision
-
-The macro-generated RETURNS shim converts the returned `Option<T>` to `Option<Value>` and delivers it through a dedicated `UdfContext::set_return(&mut self, value: Option<Value>)` method (default `Unimplemented`), separate from `emit()`. A new `ExaUdfVTable` output-shape marker records RETURNS versus EMITS, validated against `meta.output_iter`. `EXA_UDF_ABI_VERSION` bumps `6 → 7`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Dedicated `set_return` method on `UdfContext` | ✓ Chosen — keeps the author-`emit()` ban cleanly separable and reuses the proven `Value`-over-trait-object path |
-| Reuse `ctx.emit()` internally for the returned row | ✗ Rejected — the bridge could not distinguish the framework's sanctioned emit from a banned author `emit()` |
-| Return-value out-pointer on the `run` vtable signature | ✗ Rejected — an arbitrary `Value` has no simple C-ABI blob form, unlike the existing trait-object vtable path |
-
-### Consequences
-
-The ban on author `emit()` in RETURNS stays structurally enforceable, and a compiled/registered output-shape mismatch fails loudly at load/run rather than corrupting the wire. The ABI version bump means a `.so` built against ABI 6 must be rebuilt before it loads under this host.

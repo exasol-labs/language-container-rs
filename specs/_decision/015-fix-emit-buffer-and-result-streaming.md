@@ -1,56 +1,5 @@
 # Decisions: fix-emit-buffer-and-result-streaming
 
-## ADR: Thread an emit-flusher closure into HostContextBridge, mirroring conn_requester
-
-**ID:** emit-flusher-closure-host-context-bridge
-**Plan:** `fix-emit-buffer-and-result-streaming`
-**Status:** Accepted
-
-### Context
-
-The prior `ctx.emit` accumulated rows in `EmitBuffer` indefinitely — there was no size check, so a UDF emitting millions of rows per input batch would grow the buffer without bound. A flush was only sent after `run()` returned, so peak memory was the full batch output. A mechanism was needed to flush mid-run when the buffer crossed a threshold, matching the C++ SLC reference (`SWIG_MAX_VAR_DATASIZE = 4_000_000`).
-
-### Decision
-
-Add a `flusher: EmitFlusher` closure to `HostContextBridge`, threaded in by `run_batch` exactly like the existing `conn_requester`. `HostContextBridge::emit` pushes the row then invokes the flusher when `should_flush()` is true.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Thread a `flusher` closure into the bridge (mirroring `conn_requester`) | ✓ Chosen — reuses the established closure-injection pattern; keeps the ZMQ socket out of `EmitBuffer`; `EmitBuffer` stays a pure, trivially-unit-testable data type |
-| Give `EmitBuffer` an owned `Option<Box<dyn FnMut>>` flush callback | ✗ Rejected — pulls socket-touching behavior into what should stay a pure data type |
-
-### Consequences
-
-The bridge now carries two closures: `conn_requester` (connect-back) and `flusher` (emit). Both closures are injected by `run_batch` and must share the same `RefCell<&mut Protocol>` (see ADR-042). `EmitBuffer` remains a pure data structure with no I/O dependencies.
-
-## ADR: Both bridge closures share one RefCell<&mut Protocol>
-
-**ID:** bridge-closures-share-one-refcell-protocol
-**Plan:** `fix-emit-buffer-and-result-streaming`
-**Status:** Accepted
-
-### Context
-
-The emit flusher (ADR-041) and the existing `conn_requester` both need `&mut Protocol` to send wire messages. In `run_batch`, both closures are live at the same time. A sound mechanism was needed to share access to the single `&mut Protocol`.
-
-### Decision
-
-The emit flusher and the connect-back `conn_requester` borrow the same `RefCell<&mut Protocol>` in `run_batch`. Calls are strictly serial because the dispatch loop is blocked inside `run_batch` awaiting the UDF function return.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Single shared `RefCell<&mut Protocol>` for both closures | ✓ Chosen — calls are serial; one cell yields non-overlapping borrows; simplest sound option |
-| Two separate `RefCell`s over the same `&mut Protocol` | ✗ Rejected — aliasing a unique borrow is unsound |
-| `Rc<RefCell<>>` | ✗ Rejected — unnecessary heap/refcount overhead for a strictly-serial call pattern |
-
-### Consequences
-
-A single `RefCell<&mut Protocol>` is shared between `flusher` and `conn_requester`. Simultaneous borrows cannot occur because the dispatch loop is blocked during UDF execution, so the serial constraint is structural rather than enforced at compile time.
-
 ## ADR: query_for_each as a default trait method; query delegates to it
 
 **ID:** query-for-each-default-trait-method

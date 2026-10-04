@@ -54,32 +54,6 @@ Do not attempt to change the `localzmq` transport prefix in `SCRIPT_LANGUAGES`. 
 
 The ZMQ socket transport (IPC on single-node Docker, TCP on multi-node clusters) remains DB-controlled and opaque to the SLC. No code or configuration change can force a TCP ZMQ endpoint on single-node Docker. The `cluster_ip()` fix (ADR-025) does not depend on the ZMQ transport at all.
 
-## ADR: Cargo features declare supported versions; runtime env var selects the active one
-
-**ID:** cargo-features-declare-versions-env-var-selects
-**Plan:** `fix-connect-back-version-matrix`
-**Status:** Accepted
-
-### Context
-
-The CI matrix runs three Exasol versions (`2025.1`, `2025.2`, `2026.1`). The `build-artifacts` job compiles `it-runner` once and every matrix job reuses that single binary. Cargo features are compile-time, so a reused binary cannot have a different feature set per matrix entry.
-
-### Decision
-
-Add `db-2025-1`, `db-2025-2`, `db-2026-1` features to `crates/it/Cargo.toml` with `default = ["db-2026-1"]`. These features are capability declarations only — no `cfg`-gated test bodies. Actual per-version branching (image tag selection) happens at runtime via `EXASOL_DB_SERIES`, falling back to the compiled default when unset. Unknown values are rejected with a clear error.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Compile-time features as declarations; runtime `EXASOL_DB_SERIES` for selection | ✓ Chosen — single artifact; honours "Cargo feature per version" intent; runtime env is flexible per matrix entry |
-| Compile one `it-runner` per version (matrix in `build-artifacts`) | ✗ Rejected — triples build time and cache size for no behavioural gain |
-| Use `cfg`-gated test bodies per feature | ✗ Rejected — binary compiled once cannot carry per-matrix `cfg` |
-
-### Consequences
-
-`build-artifacts` compiles `it-runner` once with `--features integration,db-2026-1`. Every matrix job sets `EXASOL_DB_SERIES` to select version behaviour at runtime. Local `cargo test` with no env var runs the `2026-1` series (the default). Unrecognised values fail fast.
-
 ## ADR: cluster_ip() reads the node IP from the network interface instead of parsing the ZMQ endpoint
 
 **ID:** cluster-ip-reads-network-interface
@@ -107,29 +81,3 @@ The original `cluster_ip()` parsed the node IP out of the ZMQ endpoint string (`
 ### Consequences
 
 `cluster_ip()` returns a valid IPv4 on both single-node Docker and multi-node TCP deployments. `parse_cluster_ip()` is dead code and is removed. The `connect_back_cluster_ip_emits_node_ip` integration scenario has no severity branch and no unconditional skip — it is a hard assertion on every version in the matrix. The `EXASOL_DB_SERIES` flag remains available for other future version-specific behaviour but no longer gates `cluster_ip`.
-
-## ADR: CB_SELF address is deployment-mode-aware via Harness::connect_back_sql_address()
-
-**ID:** cb-self-address-deployment-mode-aware
-**Plan:** `fix-connect-back-version-matrix`
-**Status:** Accepted
-
-### Context
-
-The `CB_SELF` address must be a direct TCP path to the node's SQL endpoint reachable from the UDF sandbox. In testcontainers mode the harness `host:db_port` is the NAT-mapped ephemeral host port (the original crashing path), so the container's `eth0` address must be used instead. In external mode (a real cluster, `EXASOL_HOST` set) there is no container to `docker exec` into, so `container_inner_ip()` would fail and `host:db_port` is the correct address.
-
-### Decision
-
-Add `Harness::connect_back_sql_address()` to `crates/it/src/lib.rs`. In testcontainers mode (`self._container.is_some()`) it returns `format!("{}:8563", self.container_inner_ip().await?)`. In external mode (`self._container.is_none()`) it returns `format!("{}:{}", self.host, self.db_port)`. No new env var is introduced. `container_connect_back_address()` is removed as dead code.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Mode-aware `connect_back_sql_address()` branching on `self._container.is_some()` | ✓ Chosen — reuses state the `Harness` already carries; correct for both local Docker and real clusters; no new env var |
-| Hard-code `container_inner_ip():8563` for all modes | ✗ Rejected — `container_inner_ip()` requires `docker exec`; fails on real non-Docker clusters |
-| Reuse `host:db_port` for all modes | ✗ Rejected — in testcontainers mode `host:db_port` is the NAT-mapped ephemeral port (the original crashing path) |
-
-### Consequences
-
-`CB_SELF` is always a direct TCP path to the node's SQL endpoint regardless of deployment mode. `container_connect_back_address()` is removed. The mode distinction is transparent to test scenarios — they call `connect_back_sql_address()` uniformly.

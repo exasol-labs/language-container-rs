@@ -51,31 +51,6 @@ The runtime owns a `CONNECT_BACK_RT: OnceLock<tokio::runtime::Runtime>` (current
 
 Async is strictly contained to connect-back calls. The ZMQ dispatch loop remains synchronous and I/O-free as designed. The current_thread runtime means connect-back queries cannot overlap; this is acceptable since the dispatch loop is sequential.
 
-## ADR: JIT explicitly out of scope; compiler.rs returns UnsupportedFeature
-
-**ID:** jit-out-of-scope-v2
-**Plan:** `add-v2-rust-udf-complete`
-**Status:** Accepted
-
-### Context
-
-The design document describes an Option C (JIT) compilation path alongside Option A (precompiled `.so`). v1 had already deferred JIT. A decision was needed on whether to implement JIT in v2 as part of completing the Rust SLC.
-
-### Decision
-
-Do not spec or implement JIT in v2. `compiler.rs` remains returning `UnsupportedFeature`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Keep JIT out of scope | ✓ Chosen — keeps v2 focused on the four declared capability areas; avoids the ~1.4 GB jit container surface |
-| Implement Option C in-container compilation in v2 | ✗ Rejected — deferred by user; not required for the connect-back, single-call, annotation, or CLI goals |
-
-### Consequences
-
-The slim image supports only `.so` artifacts uploaded to BucketFS. JIT/Option C must be added in a future plan. The `compiler.rs` entry point returns a clear unsupported error.
-
 ## ADR: cargo-exaudf hides the musl target triple from authors
 
 **ID:** cargo-exaudf-hides-musl-target-triple

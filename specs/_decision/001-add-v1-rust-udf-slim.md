@@ -25,31 +25,6 @@ Implement only the precompiled `.so` execution path (Option A) in v1. The runtim
 
 The slim image supports only `.so` artifacts uploaded to BucketFS. JIT/Option C must be added in a future plan. The `compiler.rs` entry point returns a clear unsupported error, making the limitation explicit rather than silent.
 
-## ADR: Connect-back excluded from v1; connect-back Cargo feature is a no-op
-
-**ID:** connect-back-excluded-from-v1
-**Plan:** `add-v1-rust-udf-slim`
-**Status:** Accepted
-
-### Context
-
-The SDK design includes a connect-back API (`ExaConnection`, `exa()`, `exa_named()`, `exa_connect()`) that lets UDFs query the database mid-execution. This requires `tokio`, `exarrow-rs` on the UDF/runtime side, and a credential-resolution path for `PB_IMPORT_CONNECTION_INFORMATION` and named `CONNECTION` objects. None of the three v1 proof scenarios (scalar doubler, set filter, JSON parse) need connect-back.
-
-### Decision
-
-Do not implement connect-back in v1. The `connect-back` Cargo feature is declared in the SDK but compiles to nothing.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Exclude connect-back from v1 | ✓ Chosen — shrinks v1 surface, avoids async/sync duality risk, not needed for proof scenarios |
-| Wire connect-back feature now | ✗ Rejected — pulls in `tokio` + `exarrow-rs` on the UDF side and a whole credential path that none of the v1 scenarios require |
-
-### Consequences
-
-UDF authors cannot call `exa()` in v1. The feature stub ensures the SDK API surface is declared but guards against accidental use at compile time. Connect-back must be implemented in a future plan.
-
 ## ADR: Integration tests use testcontainers-rs with a pinned DB image in privileged mode
 
 **ID:** testcontainers-privileged-db-image
@@ -151,28 +126,3 @@ The only FFI boundary is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable
 ### Consequences
 
 A `.so` built with a mismatched toolchain or SDK version is rejected at load time with a diagnostic error. Panic in user UDF code is caught and converted to an error code rather than unwinding across FFI. Rich trait objects and generics remain host-side only.
-
-## ADR: Toolchain pinned to stable-1.84; exarrow-rs patched via [patch.crates-io] from the start
-
-**ID:** toolchain-pinned-stable-1-84-exarrow-rs-patch
-**Plan:** `add-v1-rust-udf-slim`
-**Status:** Accepted
-
-### Context
-
-The slim Docker image is built `FROM rust:1.84-bookworm`. The `EXA_SDK_FINGERPRINT` embeds a rustc hash, so it must be deterministic with respect to the container toolchain. The `exarrow-rs` crate lives at a local path and is not on crates.io; the IT harness and future connect-back phases need it as a shared dependency with deduplicated `arrow = "58"`.
-
-### Decision
-
-`rust-toolchain.toml` pins `channel = "1.84"` (with `targets = ["x86_64-unknown-linux-musl"]`). The root `Cargo.toml` includes `[patch.crates-io]` pointing `exarrow-rs` to `/home/talos/code/exarrow-rs` even though connect-back is out of v1.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Pin to 1.84; patch exarrow-rs now | ✓ Chosen — fingerprint is deterministic against the container toolchain; manifest stable for future phases; IT harness gets shared arrow = "58" |
-| Float toolchain; add exarrow-rs patch later | ✗ Rejected — floating toolchain breaks fingerprint determinism; adding the patch later risks arrow deduplication conflicts |
-
-### Consequences
-
-All workspace crates build on Rust 1.84. The `it` crate has a `rust-version = "1.85"` due to a transitive dependency (`getrandom v0.4.2`), requiring integration tests to run with a separately installed toolchain (`cargo +1.91 test`). The musl `.so` artifacts use a custom target spec because Rust 1.84's built-in musl target has `dynamic-linking=false`.

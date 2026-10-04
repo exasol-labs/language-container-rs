@@ -105,32 +105,6 @@ Stage OpenSSL 3 (with `ossl-modules` and `engines-3`), `zlib`, `bzip2` and `zstd
 
 The library surface is a published contract paired with a build-time check, so authors learn about a violation on their own machine instead of in a UDF failure.
 
-## ADR: exaudfclient links no bzip2 at all; drop the libbz2-dev pin and its CI assertion
-
-**ID:** exaudfclient-no-bzip2-link
-**Plan:** change-slc-runtime-debian
-**Status:** Accepted
-
-### Context
-
-The plan originally assumed `exaudfclient` links bzip2, dynamically or statically, with only the link mode undetermined. Verified via `readelf` on three independent builds (a fresh `rust:1.94-trixie` build, the previously shipped Alpine-based artifact, and a local host build): `exaudfclient`'s `DT_NEEDED` set and `.dynsym` carry zero bzip2 references in any of the three. Traced in the `exarrow-rs` 0.13.0 source, its only use of the `bzip2` crate gates CSV `IMPORT`/`EXPORT` local-file compression — a code path this project's `ExaConnection` usage (`query`/`query_for_each`/`execute` only) never reaches, so Rust's dead-code elimination drops the unit at link time on both profiles and both architectures.
-
-### Decision
-
-Do not install `libbz2-dev` in the builder, and do not assert a bzip2 `DT_NEEDED` entry on the shipped `exaudf/exaudfclient` anywhere in CI. `libbz2.so.1` stays staged in `/slc` — that guarantee is for UDF authors' own crates that link `bzip2-sys` dynamically, not for the client binary.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Drop the pin and the CI assertion; keep `libbz2.so.1` staged for authors | ✓ Chosen — a CI assertion should verify a real property of the shipped artifact; this one can never be true given the current `ExaConnection` surface |
-| Keep `libbz2-dev` as a dormant pin against a future reachable code path | ✗ Rejected — it currently does nothing observable and invites the same false "this is exercised" reading that caused the original mistake |
-| Force a reachable bzip2 call via a fixture UDF so the original assertion becomes true | ✗ Rejected — pure scope creep to satisfy a test, not a real UDF need |
-
-### Consequences
-
-CI no longer asserts a `DT_NEEDED` entry that could never appear. The compression-library staging story is unaffected: `libbz2.so.1` ships because real UDF `-sys` crates reach for it, independent of the SLC's own client.
-
 ## ADR: The glibc floor is 2.41, measured on this plan's own image pair, and lives in one committed file
 
 **ID:** glibc-floor-241-single-source
