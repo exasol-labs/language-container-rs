@@ -22,6 +22,7 @@ Project specifics:
 ## Code style
 
 - A comment states a non-obvious why: an invariant, an external-system quirk, or a spec or issue constraint. Keep it to 1 or 2 lines. Never restate the code, narrate history, or add banners. Update or delete comments when behavior changes.
+- A test implementing a spec scenario carries one `/// Scenario: <title>` line per scenario, quoting the title verbatim.
 - Unit tests live in `<module>_tests.rs` beside `<module>.rs`, declared as the last item of the module with `#[cfg(test)] #[path = "<module>_tests.rs"] mod tests;`. The name must match `[0-9a-zA-Z_-]+[_-]tests.rs`, or `cargo llvm-cov` counts it as production code. Test-only helpers live in that file without `#[cfg(test)]`.
 
 ## Specs and issues
