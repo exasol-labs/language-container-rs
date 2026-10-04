@@ -8,22 +8,22 @@
 
 ### Context
 
-Connect-back lets UDFs query the database mid-execution. The SDK design requires a connect-back API (`ExaConnection`, `exa()`, `exa_named()`, `exa_connect()`). A decision was needed on where to locate the trait and its concrete implementation — specifically whether to expose the exarrow-rs concrete type directly from `ctx.connect_back()` or to hide it behind a trait.
+Exposing the exarrow-rs concrete type from `ctx.connect_back()` would force every connect-back UDF to statically link exarrow-rs into its musl `.so`.
 
 ### Decision
 
-Connect-back is exposed as an `ExaConnection` trait defined in `exasol-udf-sdk` (behind the `connect-back` feature). The `exa-udf-runtime` crate provides the only implementation, backed by exarrow-rs. UDFs depend only on `exasol-udf-sdk` + `arrow`.
+`exasol-udf-sdk` defines the `ExaConnection` trait behind the `connect-back` feature. `exa-udf-runtime` provides the only implementation, backed by exarrow-rs. UDFs depend only on `exasol-udf-sdk` and `arrow`.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| ExaConnection trait in SDK, impl in runtime | ✓ Chosen — UDFs avoid statically linking exarrow-rs; the host process already owns the connection infrastructure (design §11.3) |
-| Return `exarrow_rs::adbc::Connection` directly | ✗ Rejected — forces every connect-back UDF to statically link exarrow-rs into its musl `.so`, expensive and unnecessary |
+| Trait in SDK, implementation in runtime | ✓ Chosen, the host already owns the connection infrastructure |
+| Return `exarrow_rs::adbc::Connection` directly | ✗ Statically links exarrow-rs into every connect-back `.so` |
 
 ### Consequences
 
-UDFs have no compile-time dependency on exarrow-rs or tokio when the `connect-back` feature is absent. The runtime is the single owner of the exarrow-rs link. Adding new connect-back methods requires updating the trait in the SDK and the implementation in the runtime.
+Without the `connect-back` feature, UDFs have no dependency on exarrow-rs or tokio. New connect-back methods need changes in both the SDK trait and the runtime.
 
 ## ADR: Dedicated OnceLock current_thread runtime for connect-back
 
@@ -33,7 +33,7 @@ UDFs have no compile-time dependency on exarrow-rs or tokio when the `connect-ba
 
 ### Context
 
-Connect-back requires calling async exarrow-rs APIs from inside the synchronous ZMQ dispatch loop. A decision was needed on how to bridge the sync/async boundary without restructuring the dispatch loop.
+Connect-back calls async exarrow-rs APIs from the synchronous ZMQ dispatch loop. The bridge must not restructure that loop.
 
 ### Decision
 
@@ -43,13 +43,13 @@ The runtime owns a `CONNECT_BACK_RT: OnceLock<tokio::runtime::Runtime>` (current
 
 | Option | Verdict |
 |--------|---------|
-| OnceLock current_thread runtime, block_on at call site | ✓ Chosen — ZMQ loop stays blocking; async is strictly contained; no cross-contamination with the protocol state machine |
-| Make the whole dispatch loop async | ✗ Rejected — requires restructuring the I/O-free state machine invariant established in v1 |
-| Spawn a multi-thread tokio runtime | ✗ Rejected — unnecessary concurrency for a sequentially-driven connect-back call; harder to reason about |
+| OnceLock current_thread runtime, `block_on` at call site | ✓ Chosen, async stays contained |
+| Async dispatch loop | ✗ Breaks the I/O-free state machine invariant |
+| Multi-thread tokio runtime | ✗ Unneeded concurrency for sequential calls |
 
 ### Consequences
 
-Async is strictly contained to connect-back calls. The ZMQ dispatch loop remains synchronous and I/O-free as designed. The current_thread runtime means connect-back queries cannot overlap; this is acceptable since the dispatch loop is sequential.
+Connect-back queries cannot overlap, which the sequential dispatch loop allows.
 
 ## ADR: cargo-exaudf hides the musl target triple from authors
 
@@ -59,23 +59,23 @@ Async is strictly contained to connect-back calls. The ZMQ dispatch loop remains
 
 ### Context
 
-All deployable Rust UDF artifacts must target `x86_64-unknown-linux-musl` for fully-static linking. Authors must install this target via `rustup` before building. A decision was needed on whether to expose this detail or abstract it away in the CLI.
+Deployable Rust UDF artifacts must target `x86_64-unknown-linux-musl` for fully-static linking.
 
 ### Decision
 
-`cargo exaudf build` always targets `x86_64-unknown-linux-musl`, auto-installing the target via `rustup target add` if absent, and never exposes the triple to the author.
+`cargo exaudf build` always targets `x86_64-unknown-linux-musl`, runs `rustup target add` if the target is absent, and never exposes the triple to the author.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Hide the triple; auto-install via rustup | ✓ Chosen — fully-static musl is the only supported deploy artifact; hiding the triple removes a class of author error; matches the mission's documented author workflow |
-| Require authors to pass `--target` | ✗ Rejected — exposes an implementation detail authors should not need to know |
-| Require authors to pre-install the musl target | ✗ Rejected — breaks first-run experience; error messages from cargo are unhelpful for newcomers |
+| Hide the triple, auto-install via rustup | ✓ Chosen |
+| Require `--target` | ✗ Exposes an implementation detail |
+| Require pre-installed musl target | ✗ Breaks first run, unhelpful cargo errors |
 
 ### Consequences
 
-Authors interact only with `cargo exaudf new/build/validate`. The musl target is an implementation detail of the CLI. The `rustup` binary must be available on the author's host.
+Authors use only `cargo exaudf new/build/validate`. The author's host needs `rustup`.
 
 ## ADR: Connect-back uses named-connection metadata, not an internal proxy
 
@@ -85,22 +85,22 @@ Authors interact only with `cargo exaudf new/build/validate`. The musl target is
 
 ### Context
 
-The connect-back mechanism lets UDFs connect to the database from inside the UDF sandbox. The v1 implementation treated the named connection as an internal proxy and pointed it at the container's own loopback/eth0 `:8563`, causing a SIGABRT on `2026.1.0`. Investigation of `exasol/script-languages` revealed the true mechanism.
+The reference SLC (`exasol/script-languages`) treats a named connection as a routable endpoint plus password, not as an internal proxy token. Pointing it at the container's loopback/eth0 `:8563` causes a SIGABRT on `2026.1.0`.
 
 ### Decision
 
-The runtime opens the connect-back connection to the `address`/`user`/`password` returned by the on-demand `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) response, connecting exactly as an external client would. There is no dedicated internal connect-back proxy endpoint.
+The runtime opens the connect-back connection to the `address`/`user`/`password` returned by the on-demand `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) response, connecting as an external client. There is no internal connect-back proxy endpoint.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Connect to `connection_information_rep.address` as an external client | ✓ Chosen — matches the reference SLC (Python/Java); `CREATE CONNECTION ... TO '<address>'` is a routable endpoint + password, not a proxy token |
-| Keep treating the named connection as an internal proxy at loopback/eth0 `:8563` | ✗ Rejected — caused the `2026.1.0` SIGABRT; contradicts how the reference SLC works |
+| Connect to `connection_information_rep.address` as an external client | ✓ Chosen, matches the reference SLC |
+| Internal proxy at loopback/eth0 `:8563` | ✗ Causes the `2026.1.0` SIGABRT |
 
 ### Consequences
 
-The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'` reachable from the UDF sandbox network namespace. The `exa.get_connection(name)` pattern passes metadata to UDF code, which connects using that metadata as an ordinary external client.
+The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'`, reachable from the UDF sandbox network namespace. `exa.get_connection(name)` passes the metadata to UDF code, which connects as an ordinary external client.
 
 ## ADR: Native binary protocol is the mandatory connect-back transport
 
@@ -110,20 +110,20 @@ The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'` re
 
 ### Context
 
-Connect-back opens a new connection from inside the UDF sandbox back to a routable Exasol endpoint. exarrow-rs supports two transports: `native` (binary protocol, the default) and `websocket`. The v1 code hard-pinned `transport=websocket`. Task 6.2 was originally an open "empirically compare and choose" question.
+exarrow-rs supports the `native` binary protocol (default) and `websocket` transports. The native protocol is faster and matches the main-session transport.
 
 ### Decision
 
-The connect-back connection MUST use the exarrow-rs native binary protocol. The runtime achieves this by building the DSN with no `transport=` override, relying on exarrow-rs's default `native` feature. The `transport=websocket` pin is removed.
+The connect-back connection MUST use the exarrow-rs native binary protocol. The runtime builds the DSN with no `transport=` override and relies on the default `native` feature.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Native binary protocol (no transport= override) | ✓ Chosen — faster than WebSocket; matches the main-session transport; simpler DSN; user mandated it |
-| Keep `transport=websocket` | ✗ Rejected — was only assumed necessary due to the address-misuse SIGABRT (decision ADR-012), not a transport requirement |
-| Empirically benchmark native vs WebSocket | ✗ Rejected — user made the call; an open comparison is unnecessary |
+| Native protocol, no `transport=` override | ✓ Chosen, faster, simpler DSN |
+| `transport=websocket` | ✗ Pin was never a transport requirement |
+| Benchmark native vs WebSocket | ✗ Decision already made |
 
 ### Consequences
 
-The WebSocket connect-back path is left untested and unsupported. `transport=websocket` is no longer emitted in the DSN. If a future Exasol DB version rejects or breaks the native connect-back handshake, this decision must be re-evaluated.
+The WebSocket connect-back path is untested and unsupported. A future DB version that breaks the native connect-back handshake requires re-evaluation.

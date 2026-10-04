@@ -8,22 +8,22 @@
 
 ### Context
 
-The connect-back API needs a public credential struct for UDF authors. The protocol layer already has `exa-zmq-protocol::ConnInfo` with the same four fields (`kind`, `address`, `user`, `password`). A decision was needed on whether to re-export `ConnInfo` from the SDK or introduce a dedicated public type.
+UDF authors need a public credential struct. `exa-zmq-protocol::ConnInfo` has the same four fields (`kind`, `address`, `user`, `password`) but belongs to the wire layer.
 
 ### Decision
 
-Add a public `ConnectionObject { kind, address, user, password }` struct in `exasol-udf-sdk::connect_back`. The protocol-layer `ConnInfo` remains internal; the runtime bridge maps `ConnInfo` ↔ `ConnectionObject` at the boundary.
+`exasol-udf-sdk::connect_back` defines the public `ConnectionObject { kind, address, user, password }`. `ConnInfo` stays internal, and the runtime bridge maps `ConnInfo` and `ConnectionObject` at the boundary.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Dedicated public DTO (`ConnectionObject`) in the SDK | ✓ Chosen — keeps the SDK free of transport dependencies; lets the public field set evolve independently; lets authors construct a `ConnectionObject` directly for foreign systems |
-| Re-export `ConnInfo` from the SDK | ✗ Rejected — pulls `exa-zmq-protocol` into the SDK's public surface and couples the author-facing API to wire-format evolution |
+| Dedicated public `ConnectionObject` | ✓ Chosen, SDK stays free of transport dependencies |
+| Re-export `ConnInfo` | ✗ Couples the author-facing API to wire-format changes |
 
 ### Consequences
 
-A dedicated DTO keeps the SDK free of transport dependencies (the feature-gate scenario already forbids `tokio`/`exarrow-rs`). Authors can construct a `ConnectionObject` directly for foreign systems without going through `MT_IMPORT`. The runtime bridge performs the `ConnInfo` ↔ `ConnectionObject` mapping at the ZMQ boundary.
+Authors can construct a `ConnectionObject` for foreign systems without `MT_IMPORT`. The feature-gate scenario forbids `tokio`/`exarrow-rs` in the SDK.
 
 ## ADR: cluster_ip() returns the raw node IP with no port appended
 
@@ -58,19 +58,19 @@ Authors receive a bare IP string and select the port themselves. The method is a
 
 ### Context
 
-`connection(name)` must retrieve raw credentials for a named database `CONNECTION` object. Two timing options were considered: fetch at handshake (MT_META phase, requiring all names to be declared in the `%connection` header) or fetch on demand during `run_batch`.
+`connection(name)` must retrieve raw credentials for a named database `CONNECTION` object. Fetching at handshake would require every name in the `%connection` header.
 
 ### Decision
 
-`connection(name)` sends `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`, `script_name = name`) synchronously while the outer dispatch loop is blocked awaiting the UDF function return, then maps the `connection_information_rep` into a `ConnectionObject`. It does not open any session.
+`connection(name)` sends `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`, `script_name = name`) synchronously while the outer dispatch loop is blocked awaiting the UDF function return, then maps the `connection_information_rep` into a `ConnectionObject`. It opens no session.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| On-demand MT_IMPORT during `run_batch` (blocked dispatch loop) | ✓ Chosen — protocol already parses `MT_IMPORT` in any phase; existing `conn_requester` closure proves run-phase exchange is safe; name need not be known at registration |
-| Fetch all connections at handshake (MT_META phase) | ✗ Rejected — requires all connection names to be declared in the `%connection` header at script registration time; less flexible |
+| On-demand `MT_IMPORT` during `run_batch` | ✓ Chosen, name need not be known at registration |
+| Fetch all connections at handshake (MT_META) | ✗ Requires all names in the `%connection` header |
 
 ### Consequences
 
-The generalised `conn_requester` closure takes the connection name as a parameter. The ZMQ socket is idle while the UDF function executes, making the synchronous MT_IMPORT exchange safe. No protocol changes are needed; the run-phase MT_IMPORT path was already proven by the existing implementation.
+The `conn_requester` closure takes the connection name as a parameter. The ZMQ socket is idle while the UDF function runs, so the synchronous exchange is safe.

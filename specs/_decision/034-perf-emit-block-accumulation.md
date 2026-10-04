@@ -8,51 +8,25 @@
 
 ### Context
 
-`EmitBuffer` buffered `Vec<Vec<Value>>` and packed the type blocks only in `take_proto`, so
-`push_batch` could not append to it. It flushed whatever the row path had buffered, encoded
-each full 4 MB `RecordBatch::slice` separately, and pivoted the trailing remainder back
-through `Vec<Value>`. A batch below 4 MB never produces a slice, so the 8192-row batches
-callers actually emit were encoded entirely by that pivot — which is why `emit_batch`
-measured slower than `ctx.emit` for string-block and wide rows.
+Buffering `Vec<Vec<Value>>` and packing the type blocks only in `take_proto` forces `push_batch` through a `Vec<Value>` pivot. Batches below 4 MB never reach the slice path, so the pivot encodes them all.
 
 ### Decision
 
-The buffer holds the type blocks themselves. `push` packs a row as it arrives, `push_batch`
-appends a downcast batch row by row into the same blocks, and `take_proto` is a `mem::take`.
-There is no tail case, no `RecordBatch::slice`, and no `Vec<Value>` on either path.
+The buffer holds the type blocks themselves. `push` packs a row as it arrives, `push_batch` appends a downcast batch row by row into the same blocks, and `take_proto` is a `mem::take`. There is no `RecordBatch::slice` and no `Vec<Value>` on either path.
 
-A batch is costed in O(columns) — fixed-width columns from their null count, variable-width
-from the offset buffer's span — and only a batch whose total could reach the 4 MB threshold
-pays for a per-row cost vector.
+A batch is costed in O(columns): fixed-width columns from their null count, variable-width columns from the offset buffer's span. Only a batch whose total could reach the 4 MB threshold pays for a per-row cost vector.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Accumulate the blocks; append batch rows into them | ✓ Chosen — removes the pivot that dominated the sub-4 MB batch, and `emit`/`emit_batch` stop displacing each other |
-| Keep the row buffer, route only the tail through the columnar encoder | ✗ Rejected — measured a third of the win and keeps two encoders that must agree byte for byte |
-| Keep `RecordBatch::slice` for the over-threshold case | ✗ Rejected — a second encoder for a case the row loop already handles at the same row granularity |
+| Accumulate the blocks, append batch rows into them | ✓ Chosen |
+| Keep the row buffer, route the tail through a columnar encoder | ✗ Keeps two encoders that must agree byte for byte |
+| Keep `RecordBatch::slice` for over-threshold batches | ✗ Second encoder for a case the row loop already handles |
 
 ### Consequences
 
-`push`/`push_costed` take the declared output columns (the bridge already holds them) and
-`take_proto` takes none. Buffered memory is the wire estimate rather than a `Vec<Value>`
-copy of it, and interleaved `emit` and `emit_batch` no longer force an undersized
-`MT_EMIT`. Encoding now happens on the `emit` call rather than at flush; the row is still
-walked once, because the bridge's validation pass supplies the byte cost.
-
-Tier 1 `quick`, against one baseline: every cell improved or held, none regressed —
-`scalar_emits_passthrough/native` -42 %, `scalar_emits_gen` native_row -33 %, native_batch
--38 %, strblock_row -17 %, varchar_row -15 %, varchar_batch -12 %, wide_row -8 %;
-`set_emits/native_batch_g1` -37 %; `scalar_returns` native -14 %, strblock -13 %. The
-`MT_EMIT` counters (messages, rows, bytes per cell, `bytes/row`) are unchanged.
-
-Tier 2 `quick`, alternating base/change over one docker-db 2026.1.1: `scalar_emits_gen`
-native_batch -25.0 %, native_row -24.5 %, varchar_batch -10.9 %, varchar_row -10.0 %,
-`scalar_emits_pt` -17.2 %, `set_gen` native_batch -25.5 %, varchar_batch -13.8 %, wide_row
--7.2 %; no UDF cell regressed. Net of its `_noemit` twin the strblock batch path is 6.5 %
-slower than the row path, down from 12.3 %: the `Vec<Value>` pivot is gone, but the string
-block still allocates per cell and prost still copies it into the frame.
+`push`/`push_costed` take the declared output columns, and `take_proto` takes none. Encoding happens on the `emit` call, and the row is walked once because the bridge's validation pass supplies the byte cost. Interleaved `emit` and `emit_batch` do not force an undersized `MT_EMIT`.
 
 ## ADR: The string block stays `repeated string`
 

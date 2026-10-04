@@ -36,23 +36,23 @@ Connect-back query and DML scenarios pass as hard assertions on all three versio
 
 ### Context
 
-An interview request asked to move `cluster_ip()` to always receive a `tcp://` ZMQ endpoint by changing the `SCRIPT_LANGUAGES` string. Investigation of `exaudflib_main.cc` showed this is not possible: `argv[1]`'s transport scheme is chosen by the database at launch, not by `SCRIPT_LANGUAGES`. On single-node `exasol/docker-db`, the database always passes `ipc://` for a locally-launched (`localzmq`) container.
+The database chooses the transport scheme of `argv[1]` (see `exaudflib_main.cc`) at launch, not `SCRIPT_LANGUAGES`. On single-node `exasol/docker-db`, the database passes `ipc://` for a locally-launched (`localzmq`) container.
 
 ### Decision
 
-Do not attempt to change the `localzmq` transport prefix in `SCRIPT_LANGUAGES`. The ZMQ endpoint transport is a database-side concern. For `cluster_ip()`, the solution (reading the network interface instead of parsing the endpoint) is captured in ADR-025. The premise correction — that the transport cannot be forced — stands independently.
+The `localzmq` transport prefix in `SCRIPT_LANGUAGES` is left unchanged. The ZMQ endpoint transport is a database-side concern.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Accept that ZMQ transport is DB-controlled; address `cluster_ip()` separately | ✓ Chosen — correct description of the constraint; avoids impossible workarounds |
-| Swap `localzmq` for a TCP transport prefix in `SCRIPT_LANGUAGES` | ✗ Rejected — `argv[1]`'s scheme is chosen by the DB at launch; `SCRIPT_LANGUAGES` has no flag to flip this |
-| Use a `tcp:` `argv[1]` to select remote-client mode | ✗ Rejected — remote-client mode is a deployment model `exasol/docker-db` single-node does not use |
+| Treat ZMQ transport as DB-controlled | ✓ Chosen |
+| Swap `localzmq` for a TCP prefix in `SCRIPT_LANGUAGES` | ✗ `SCRIPT_LANGUAGES` cannot change the scheme |
+| `tcp:` `argv[1]` to select remote-client mode | ✗ Single-node `exasol/docker-db` does not use remote-client mode |
 
 ### Consequences
 
-The ZMQ socket transport (IPC on single-node Docker, TCP on multi-node clusters) remains DB-controlled and opaque to the SLC. No code or configuration change can force a TCP ZMQ endpoint on single-node Docker. The `cluster_ip()` fix (ADR-025) does not depend on the ZMQ transport at all.
+The ZMQ transport (IPC on single-node Docker, TCP on multi-node clusters) is opaque to the SLC.
 
 ## ADR: cluster_ip() reads the node IP from the network interface instead of parsing the ZMQ endpoint
 
@@ -62,22 +62,22 @@ The ZMQ socket transport (IPC on single-node Docker, TCP on multi-node clusters)
 
 ### Context
 
-The original `cluster_ip()` parsed the node IP out of the ZMQ endpoint string (`argv[1]`). On single-node `exasol/docker-db` the database passes `ipc://` with no node IP to parse, so `cluster_ip()` returned an error there. ADR-023 establishes that the transport cannot be forced to TCP. A different implementation strategy was needed.
+On single-node `exasol/docker-db` the ZMQ endpoint is `ipc://` and contains no node IP, so parsing it fails. The transport cannot be forced to TCP.
 
 ### Decision
 
-`cluster_ip()` (in `crates/exa-udf-runtime/src/rowset.rs`) reads the local node's primary IPv4 from the network interface — the first non-loopback IPv4 of the UDF process (e.g. container `eth0`) — via `libc::getifaddrs`, instead of parsing the ZMQ endpoint string. `parse_cluster_ip()` in `crates/exa-udf-runtime/src/artifact.rs` is removed as dead code. The `connect_back_cluster_ip_emits_node_ip` scenario becomes a hard IPv4 assertion on every series.
+`cluster_ip()` (in `crates/exa-udf-runtime/src/rowset.rs`) returns the first non-loopback IPv4 of the UDF process (e.g. container `eth0`), read via `libc::getifaddrs`. `parse_cluster_ip()` in `crates/exa-udf-runtime/src/artifact.rs` is removed. The `connect_back_cluster_ip_emits_node_ip` scenario is a hard IPv4 assertion on every series.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Read primary IPv4 from network interface via `libc::getifaddrs` | ✓ Chosen — works identically on single-node Docker and multi-node TCP clusters; `libc` is already a workspace dependency; collapses to one hard assertion |
-| Parse IP from ZMQ endpoint string | ✗ Rejected — fails on single-node Docker because the DB passes `ipc://` with no IP |
-| Force TCP ZMQ transport via `SCRIPT_LANGUAGES` | ✗ Rejected — infeasible; see ADR-023 |
-| Assert two branches with runtime severity flag (`EXASOL_DB_SERIES`) | ✗ Rejected — superseded by this approach; reading the interface eliminates the topology-dependent branch |
-| Unconditionally skip `cluster_ip()` on Docker | ✗ Rejected — removes test coverage on the most common development environment |
+| Read primary IPv4 via `libc::getifaddrs` | ✓ Chosen, same on Docker and multi-node, `libc` already a dependency |
+| Parse the ZMQ endpoint string | ✗ No IP in `ipc://` |
+| Force TCP ZMQ via `SCRIPT_LANGUAGES` | ✗ Not possible |
+| Two assertion branches with an `EXASOL_DB_SERIES` severity flag | ✗ Topology-dependent branch |
+| Skip `cluster_ip()` on Docker | ✗ Loses coverage on the common development environment |
 
 ### Consequences
 
-`cluster_ip()` returns a valid IPv4 on both single-node Docker and multi-node TCP deployments. `parse_cluster_ip()` is dead code and is removed. The `connect_back_cluster_ip_emits_node_ip` integration scenario has no severity branch and no unconditional skip — it is a hard assertion on every version in the matrix. The `EXASOL_DB_SERIES` flag remains available for other future version-specific behaviour but no longer gates `cluster_ip`.
+`cluster_ip()` returns a valid IPv4 on single-node Docker and multi-node TCP. `EXASOL_DB_SERIES` no longer gates `cluster_ip`.

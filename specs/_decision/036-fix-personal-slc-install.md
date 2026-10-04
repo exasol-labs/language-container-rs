@@ -8,20 +8,20 @@
 
 ### Context
 
-`scripts/install.sh --deployment` places the SLC on a local Exasol Personal deployment through one of two mechanisms: SSH into the VM, or extraction into a host directory the deployment shares into the VM. A current local deployment publishes no SSH port and no node key, so the SSH mechanism alone no longer covers every supported deployment. The install must pick the right mechanism without depending on the `exasol` launcher or on a Personal version number.
+`scripts/install.sh --deployment` places the SLC on a local Exasol Personal deployment by SSH into the VM or by extraction into a host directory shared into the VM. Some deployments publish no SSH port and no node key. The install must choose without depending on the `exasol` launcher or a Personal version number.
 
 ### Decision
 
-`scripts/install.sh --deployment` takes the SSH mechanism when the deployment directory publishes both an SSH port and a readable node key. It takes the shared-directory mechanism when the deployment's BucketFS mapping resolves a host directory for the requested service and bucket. It fails when neither holds, and it reads no version string.
+`scripts/install.sh --deployment` uses SSH when the deployment directory publishes both an SSH port and a readable node key. It uses the shared directory when the deployment's BucketFS mapping resolves a host directory for the requested service and bucket. It fails when neither holds and reads no version string.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Read the deployment directory's own inputs for each mechanism | ✓ Chosen — each branch reads the literal input its own placement step consumes, so the choice needs no proxy |
-| Detect the launcher's custom-SLC command from its usage output | ✗ Rejected — the user asked for no dependency on `exasol slc` commands |
-| Compare Personal version numbers | ✗ Rejected by the user at the interview |
+| Read the deployment directory's own inputs per mechanism | ✓ Chosen |
+| Detect the launcher's custom-SLC command from usage output | ✗ The install must not depend on `exasol slc` commands |
+| Compare Personal version numbers | ✗ The install must not depend on a version number |
 
 ### Consequences
 
-A deployment that installs successfully today keeps its mechanism, because the SSH mechanism keeps priority wherever its inputs are present. A deployment that publishes neither mechanism's inputs fails with one error naming both mechanisms' prerequisites, instead of a mid-run failure that only reads as an SSH problem.
+SSH keeps priority wherever its inputs exist. A deployment with neither mechanism's inputs fails with one error naming both prerequisites.
