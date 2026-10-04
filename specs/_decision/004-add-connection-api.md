@@ -25,31 +25,6 @@ UDF authors need a public credential struct. `exa-zmq-protocol::ConnInfo` has th
 
 Authors can construct a `ConnectionObject` for foreign systems without `MT_IMPORT`. The feature-gate scenario forbids `tokio`/`exarrow-rs` in the SDK.
 
-## ADR: cluster_ip() returns the raw node IP with no port appended
-
-**ID:** cluster-ip-returns-raw-node-ip-no-port
-**Plan:** `add-connection-api`
-**Status:** Accepted
-
-### Context
-
-`cluster_ip()` parses the originating node IP from the ZMQ endpoint string `tcp://<node_ip>:<zmq_port>`. A decision was needed on whether to return the raw IP or to append the well-known SQL port `:8563`.
-
-### Decision
-
-`cluster_ip()` returns `<node_ip>` by stripping `tcp://` and taking the host segment before `:`. It does not append `:8563` or the ZMQ port.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Return raw `<node_ip>`, no port | ✓ Chosen — authors choose the port; raw IP composes cleanly with credentials from `connection` and any target port; the ZMQ port is not the SQL port |
-| Return `<node_ip>:8563` | ✗ Rejected — the SQL port may differ from the default; appending the wrong port would be misleading; breaks the single-responsibility of the parse |
-
-### Consequences
-
-Authors receive a bare IP string and select the port themselves. The method is a pure parse with no network round-trip. A UDF may pair `cluster_ip()` with credentials from `connection()` and supply any port when building a DSN.
-
 ## ADR: connection(name) performs an on-demand MT_IMPORT during the blocked dispatch loop
 
 **ID:** connection-name-on-demand-mt-import

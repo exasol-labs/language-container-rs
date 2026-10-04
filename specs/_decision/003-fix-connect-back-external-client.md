@@ -25,33 +25,3 @@ The runtime opens connect-back as an external-client login to the `address`/`use
 
 The `CB_SELF` named connection must be created `TO '<routable-endpoint>:8563'`, reachable from the UDF sandbox network namespace. Connect-back queries do not see the caller's uncommitted state. Operators configure the endpoint, and the UDF artifact stays generic via `%connection <NAME>`.
 
-## ADR: Docker-host-gateway address does not resolve the 2026.latest SIGABRT
-
-**ID:** docker-host-gateway-does-not-resolve-sigabrt
-**Plan:** `fix-connect-back-external-client`
-**Status:** Accepted
-
-### Context
-
-Commit `7de7357` changed the connect-back address to the Docker host gateway (instead of the container's loopback/eth0), hypothesising this would let the connect-back act as an external client and avoid the server-side SIGABRT. This plan ran a fresh integration suite on `2026-06-06` to verify the hypothesis.
-
-### Decision
-
-Record empirically that the SIGABRT persists on `exasol/docker-db:2026.latest` (image id `b81d80f63d10`, identical to `2026.1.0`) even with the Docker gateway external-client address. The crash is server-side, signal 6, and triggered by the core spawning a connect-back session for any container UDF — independent of address or transport. The SLC implementation is correct; the blocker is an upstream core defect.
-
-Evidence from the `2026-06-06` run:
-- 6 / 8 scenarios PASS (scalar, set, json, udf-error, both single-call).
-- Both connect-back scenarios FAIL with `peer closed connection without sending TLS close_notify` on the outer session.
-- Container log: `child <pid> (Part:40 Node:0 exasql) terminated with signal 6. (core dumped)` immediately after `Part:44` (connect-back session process) is spawned.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Record crash as unresolved upstream blocker; keep scenarios as known-failing gates | ✓ Chosen — honest evidence; scenarios auto-turn-green on a patched image |
-| Assume the gateway fix resolved it (prior hypothesis) | ✗ Rejected — direct re-verification contradicts the hypothesis |
-| Delete connect-back scenarios | ✗ Rejected — they form a regression net for when a patched image ships |
-
-### Consequences
-
-Connect-back integration scenarios remain known-failing on `2026.latest`. No workaround exists within the SLC. The test suite dumps SIGABRT diagnostics on failure. Once Exasol ships a patched image, the scenarios should pass without any SLC code changes.
