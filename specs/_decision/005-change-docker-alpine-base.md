@@ -1,51 +1,51 @@
 # Decisions: change-docker-alpine-base
 
-## ADR: Alpine image — build the client binary for x86_64-unknown-linux-musl
+## ADR: Alpine image: build the client binary for x86_64-unknown-linux-musl
 
 **ID:** alpine-image-musl-client-binary
 **Plan:** `change-docker-alpine-base`
-**Status:** Accepted
+**Status:** Superseded by debian-trixie-slim-staged-runtime
 
 ### Context
 
-The original Alpine image design compiled `exaudfclient` for the musl target (`x86_64-unknown-linux-musl`) using a `rust:alpine` builder, aligning with the already-musl UDF `.so` artifacts. During implementation, two blockers ruled this out: Rust 1.96+ compiled binaries crashed in the Exasol UDF sandbox due to seccomp/CPU-instruction incompatibility, and the `exaudfclient` binary is executed directly on the glibc Debian Exasol host after BucketFS extraction — a musl binary would be ABI-incompatible there. The adopted approach bundled glibc runtime libs into the Alpine image instead. The decision entry records what was resolved at plan time; the implementation pivot is documented in the plan's spike notes.
+Alpine is musl-based, and the UDF `.so` artifacts already target musl.
 
 ### Decision
 
-The Alpine builder stage compiles `exaudfclient` for `x86_64-unknown-linux-musl` on a `rust:alpine` builder, and the resulting musl binary is placed in the `alpine:3` runtime stage.
+The Alpine builder stage compiles `exaudfclient` for `x86_64-unknown-linux-musl` on a `rust:alpine` builder, and the musl binary is placed in the `alpine:3` runtime stage.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Compile for `x86_64-unknown-linux-musl` on `rust:alpine` | ✓ Chosen — aligns with already-musl UDF artifacts; Alpine is musl-based; no glibc compat shim needed |
-| Keep a glibc binary and run it on Alpine via `gcompat` | ✗ Rejected — fragile and counter to the smaller-image goal |
+| Compile for `x86_64-unknown-linux-musl` on `rust:alpine` | ✓ Chosen, no glibc shim |
+| Glibc binary on Alpine via `gcompat` | ✗ Fragile, defeats the smaller-image goal |
 
 ### Consequences
 
-The Alpine builder must install `zeromq-dev`, `protobuf-dev`, `pkgconfig`, and `musl-dev` via `apk`. The runtime binary requires no glibc loader on `alpine:3`. See plan spike notes for the implementation pivot to glibc-bundling that superseded this in practice.
+The Alpine builder installs `zeromq-dev`, `protobuf-dev`, `pkgconfig` and `musl-dev` via `apk`. The runtime binary needs no glibc loader.
 
 ## ADR: Alpine runtime uses LANG=C.UTF-8 instead of locale-gen
 
 **ID:** alpine-runtime-lang-c-utf-8
 **Plan:** `change-docker-alpine-base`
-**Status:** Accepted
+**Status:** Superseded by debian-staged-c-utf-8-locale
 
 ### Context
 
-The Debian slim image runs `locale-gen en_US.UTF-8` to configure the locale. Alpine/musl ships no `locales` package and no `locale-gen` binary. A decision was needed on how to configure UTF-8 locale in the Alpine runtime stage.
+Alpine/musl ships no `locales` package and no `locale-gen` binary, so the Debian `locale-gen en_US.UTF-8` step does not apply.
 
 ### Decision
 
-Set `ENV LANG=C.UTF-8` in the Alpine runtime stage. No locale package is installed; no `locale-gen` is run.
+The Alpine runtime stage sets `ENV LANG=C.UTF-8`. It installs no locale package and runs no `locale-gen`.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| `ENV LANG=C.UTF-8`, no locale package | ✓ Chosen — `C.UTF-8` is the musl default and sufficient for UDF text handling; keeps the image minimal; `locale-gen` does not exist on Alpine |
-| Install `musl-locales` and generate `en_US.UTF-8` | ✗ Rejected — unnecessary weight; matches the Debian convention but adds extra packages without benefit |
+| `ENV LANG=C.UTF-8` | ✓ Chosen, musl default, sufficient for UDF text |
+| Install `musl-locales`, generate `en_US.UTF-8` | ✗ Extra packages without benefit |
 
 ### Consequences
 
-The Alpine runtime carries no locale package. `C.UTF-8` provides UTF-8 string semantics adequate for UDF text handling. The absence of `locale-gen` is a non-issue on Alpine/musl. The runtime stage installs only `ca-certificates` via `apk`.
+The runtime stage installs only `ca-certificates` via `apk`.

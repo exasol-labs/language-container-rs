@@ -19,17 +19,17 @@ exhausting the UDF sandbox.
 | Persona | Goal | Key Workflow |
 |---------|------|--------------|
 | Rust data engineer | Write high-performance UDFs without leaving the Rust ecosystem | Implement the UDF fn, annotate with `#[exasol_udf]`, build a `.so`, upload to BucketFS, register in DB |
-| Exasol DBA / platform engineer | Deploy and register the Rust SLC in a production cluster | Build + upload the container, `ALTER SYSTEM SET SCRIPT_LANGUAGES`, create scripts |
+| Exasol user (DBA or data engineer), the main persona | Deploy and register the Rust SLC and UDFs in a cluster | Build + upload the container (or run `scripts/install.sh --deployment` for an Exasol Personal deployment), `ALTER SYSTEM SET SCRIPT_LANGUAGES`, create scripts |
 | Exasol SDK maintainer | Extend or debug the SLC implementation itself | Run unit tests + integration tests against a local Exasol Docker container |
 
 ## Core Capabilities
 
 1. **Full wire-protocol implementation** — handles every `localzmq+protobuf` message type (handshake, scalar, set/EMITS, single-call `SC_FN_*` incl. the virtual-schema adapter call, ping-pong, reset, error close).
-2. **Ergonomic Rust UDF SDK** — the `UdfRun` / `UdfContext` traits plus the `#[exasol_udf]` proc macro give typed column access and optional connect-back, with rows surfaced as the SDK's own `Value` type.
+2. **Ergonomic Rust UDF SDK** — the `UdfRun` / `UdfContext` traits plus the `#[exasol_udf]` proc macro give typed column access, handshake metadata (current user, scope user, schemas, memory limit), a session-end cleanup hook, single-call hooks for typed import and export specs, several named entry points per `.so`, `rows_in_group`, `test-support` doubles, and optional connect-back, with rows surfaced as the SDK's own `Value` type. An opt-in path emits a whole Arrow `RecordBatch`, which crosses the `.so` boundary as Arrow IPC bytes.
 3. **Precompiled execution model** — build a single `.so` (a glibc-dynamic cdylib) with `cargo exasol-udf build`, upload to BucketFS, load via a `%udf_object` directive in `CREATE SCRIPT`.
 4. **ABI-safe dynamic loading** — `abi_version` + `sdk_fingerprint` checks at load time turn a toolchain mismatch into a clear error instead of UB.
-5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SYSTEM SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step. The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) alongside the runtime.
-6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the `.so` (`build`), and validates the ABI of a built artifact (`validate`).
+5. **Container packaging** — a slim SLC image (no toolchain, precompiled `.so` only), packaged as a BucketFS tarball and registered with `ALTER SYSTEM SET SCRIPT_LANGUAGES`; `scripts/install.sh` builds, uploads, and registers in one step, and its `--deployment <name>` mode installs into an Exasol Personal deployment (local deployments place the file through the filesystem, cloud deployments upload over BucketFS HTTP). The image ships a generated third-party license/attribution bundle (`cargo-about`-generated OS package notices, copied glibc/GCC runtime licenses, GPL-3.0 written-source offer) and a Rust dependency attribution manifest covering every shipped architecture (`THIRD-PARTY-LICENSES.md`) alongside the runtime. The image also ships the IANA zoneinfo database, `/conf` resolver symlinks for DNS, and the sandbox mount-point skeleton. A machine-checkable platform contract publishes the glibc floor and the documented library list a `.so` may link, and `build_info/language_definitions.json` is checked against the database's v2 schema.
+6. **Developer tooling** — the `cargo-exasol-udf` CLI scaffolds a UDF crate (`new`), builds the `.so` (`build`), and validates the ABI of a built artifact (`validate`). `build` also writes a schema sidecar for the UDF's typed schema annotation.
 7. **Live diagnostics** — a `%udf_debug_level` script directive tunes runtime tracing verbosity, exposes an SDK `log` surface for UDF-authored lines, and reports memory/emit-buffer telemetry at debug level, all carried over Exasol's `SET SESSION SCRIPT OUTPUT ADDRESS` stderr redirect.
 
 > Detailed behavior lives in the spec library (`specs/sdk`, `specs/protocol`,
@@ -47,8 +47,8 @@ exhausting the UDF sandbox.
 | Option A | Precompiled-`.so` execution path — author ships a binary, SLC just loads it (the supported path) |
 | Option C | JIT execution path — script source compiled in-container on first call. Not supported (the runtime returns a clear error) |
 | ABI fingerprint | `"SDK_VERSION:RUSTC_HASH\0"` string baked into every compiled vtable; guards against toolchain-mismatch UB at load time |
-| `ExaConnection` | SDK trait (defined in `exasol-udf-sdk`) exposing `query`, `query_for_each`, `execute`, and transaction control. Host implements it via `exarrow-rs`; UDF code never links `exarrow-rs` directly and receives SDK `Value` rows (not Arrow). |
-| glibc cdylib | The deployable UDF artifact: a dynamically-linked `cdylib` `.so` built for the host glibc target (`x86_64-unknown-linux-gnu`), with all Rust dependencies statically linked in. The slim container bundles the matching glibc runtime so the `.so` resolves at `dlopen`. `cargo exasol-udf build` produces it by default (`--target <triple>` overrides). |
+| `ExaConnection` | SDK trait (defined in `exasol-udf-sdk`) exposing `query`, `query_for_each`, `execute`, `execute_batch`, and transaction control. Host implements it via `exarrow-rs`; UDF code never links `exarrow-rs` directly and receives SDK `Value` rows (not Arrow). |
+| glibc cdylib | The deployable UDF artifact: a dynamically-linked `cdylib` `.so` built for the host glibc target (the SLC ships for x86_64 and aarch64), with all Rust dependencies statically linked in. The slim container bundles the matching glibc runtime so the `.so` resolves at `dlopen`. `cargo exasol-udf build` produces it by default (`--target <triple>` overrides). |
 | exarrow-rs | crates.io crate providing Arrow-based ADBC connectivity back to Exasol — used by the host runtime only; UDFs access it through the `ExaConnection` trait. |
 | `exaudfclient` | The binary the DB invokes per UDF call: `exaudfclient <ipc_socket_path> lang=rust` |
 | MT_* | `message_type` enum values in the protobuf protocol (e.g., `MT_RUN`, `MT_NEXT`, `MT_EMIT`) |
@@ -105,6 +105,6 @@ exapump bfs upload \
 
 ## References
 
-- Architecture, project structure, and the Exasol data-type mapping: [`architecture.md`](architecture.md).
+- Architecture, components, and the Exasol data-type mapping: [`architecture.md`](architecture.md).
 - User-facing documentation: [`docs/`](../docs/index.md) — installation, writing a UDF, the wire protocol, the cargo ecosystem.
 - Architectural decisions: [`_decision/`](_decision/).

@@ -8,20 +8,20 @@
 
 ### Context
 
-The UDF client transport (`ZmqTransport`) was opening a `DEALER` socket and manually inserting an empty delimiter frame on `send` and discarding one on `recv` to imitate the `DEALER`/`ROUTER` multi-frame envelope. The Exasol architect confirmed the database actually binds a `REP` socket — not `ROUTER` — and this was validated against the Python3 SLC reference implementation (`exasol/script-languages-release`). A `REP` peer enforces strict request/reply alternation and delivers/expects exactly one payload frame; it does not carry routing identities or speak the `DEALER`/`ROUTER` multi-frame envelope. The `DEALER` client was using the wrong wire shape and relied on asynchronous send/recv semantics the DB does not support.
+The database binds a `REP` socket, as the Python3 SLC reference (`exasol/script-languages-release`) confirms. A `REP` peer enforces strict request/reply alternation with exactly one payload frame and does not speak the `DEALER`/`ROUTER` multi-frame envelope.
 
 ### Decision
 
-Use `zmq::REQ` in `ZmqTransport::connect`. Let the `REQ` socket manage the request/reply delimiter automatically: `send` writes a single payload frame, `recv` reads a single payload frame. The DB's `REP` socket mirrors this exactly.
+`ZmqTransport::connect` uses `zmq::REQ`. The `REQ` socket manages the request/reply delimiter: `send` writes one payload frame and `recv` reads one payload frame.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Use `zmq::REQ` (canonical `REP` counterpart) | ✓ Chosen — `REP` peers reject the `DEALER` envelope shape; `REQ` is the canonical, lock-step counterpart and removes manual framing bugs. Confirmed against the Python3 SLC reference. |
-| Keep `DEALER` with manual empty-delimiter framing | ✗ Rejected — `REP` does not speak the `DEALER`/`ROUTER` multi-frame envelope; the manual delimiter insertion was the root cause of the post-`MT_CLIENT` hang |
-| Use `DEALER` with an explicit delimiter sent to a `REP` peer | ✗ Rejected — fragile and non-idiomatic; `REQ` is the canonical counterpart and removes all hand-rolled framing |
+| `zmq::REQ` | ✓ Chosen, canonical `REP` counterpart |
+| `DEALER` with manual empty-delimiter framing | ✗ `REP` does not accept the `DEALER` envelope |
+| `DEALER` with explicit delimiter sent to `REP` | ✗ Fragile, non-idiomatic |
 
 ### Consequences
 
-The `send` implementation no longer prepends an empty delimiter frame; the `recv` implementation no longer discards one. The `REQ` socket enforces lock-step alternation that the protocol state machine already assumes. The transport integration tests now mock the DB with a `zmq::REP` peer, matching the real wire shape. The end-to-end `db_roundtrip` integration test (gated on Docker) exercises the full `REQ`/`REP` exchange against the live DB.
+`send` and `recv` handle no delimiter frame. Transport integration tests mock the DB with a `zmq::REP` peer. The Docker-gated `db_roundtrip` test exercises the full `REQ`/`REP` exchange.

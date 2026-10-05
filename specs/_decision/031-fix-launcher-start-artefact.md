@@ -8,23 +8,21 @@
 
 ### Context
 
-Every VM start wrote its argument list to `/tmp/exaudf_started.txt`, a fixed path inside the sandbox that concurrent VMs on a node share and overwrite. The file was a bring-up aid: it proved the binary had been executed when the handshake never happened. Nothing asserts on it — the integration harness only lists it, alongside other names, in the log dump it prints after a failed scenario.
-
-The launcher also resolved a script-options parser version from `EXAUDF_PARSER_VERSION` or a `parser_version=N` argument and only logged the result. The reference C++ launcher uses that version to pick between two script-option dialects; this runtime has one, reading `%udf_object` and `%udf_debug_level` line by line.
+A fixed-path start file in the sandbox is shared and overwritten by concurrent VMs, and nothing asserts on it. A parser version selects between two script-option dialects, and this runtime has one.
 
 ### Decision
 
-The launcher creates no files. The invocation arguments go to stderr at debug level, on the channel `%udf_debug_level` and the script-output redirect already carry. The parser-version argument stays in the invocation contract, accepted and ignored, so the DB may pass it.
+The launcher creates no files. It writes the invocation arguments to stderr at debug level, the channel `%udf_debug_level` and the script-output redirect already use. The parser-version argument stays in the invocation contract, accepted and ignored.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Drop the write; log the arguments at debug level | ✓ Chosen — no syscall on the default path, one diagnostics channel |
-| Gate the write behind an environment variable | ✗ Rejected — the DB execs the binary directly in a container with no shell, so nothing could set it |
-| Gate the write behind the resolved debug level | ✗ Rejected — the level arrives with the handshake, after the moment the file existed to prove |
-| Select a script-option dialect by parser version | ✗ Rejected — there is one dialect; a second exists only in the reference launcher |
+| Log the arguments at debug level, write no file | ✓ Chosen |
+| Gate the write behind an environment variable | ✗ The DB execs the binary in a container with no shell, so nothing sets it |
+| Gate the write behind the debug level | ✗ The level arrives with the handshake, after the moment the file would prove |
+| Select a dialect by parser version | ✗ This runtime has one dialect |
 
 ### Consequences
 
-A UDF that never reaches the handshake leaves no trace in the sandbox; the DB's own `VM crashed` report and stderr remain the evidence. `EXAUDF_PARSER_VERSION` and `parser_version=N` no longer have any effect, neither having had one beyond a log line.
+A UDF that never reaches the handshake leaves no trace in the sandbox, and the DB's `VM crashed` report and stderr remain the evidence. `scriptOptionsParserVersion=N` has no effect.
