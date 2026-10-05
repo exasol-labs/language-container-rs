@@ -4,7 +4,7 @@
 
 **ID:** alpine-image-musl-client-binary
 **Plan:** `change-docker-alpine-base`
-**Status:** Accepted
+**Status:** Superseded by debian-trixie-slim-staged-runtime
 
 ### Context
 
@@ -29,7 +29,7 @@ The Alpine builder installs `zeromq-dev`, `protobuf-dev`, `pkgconfig` and `musl-
 
 **ID:** alpine-runtime-lang-c-utf-8
 **Plan:** `change-docker-alpine-base`
-**Status:** Accepted
+**Status:** Superseded by debian-staged-c-utf-8-locale
 
 ### Context
 

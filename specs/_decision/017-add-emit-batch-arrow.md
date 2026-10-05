@@ -25,7 +25,7 @@ One Arrow `DataType` maps to several Exasol types. `Utf8` covers VARCHAR, CHAR, 
 
 `push_batch` takes the `&[ColumnInfo]` slice. `HostContextBridge` holds `output_meta`.
 
-## ADR: Standalone emit-arrow feature; connect-back implies it
+## ADR: Standalone emit-arrow feature gates only the arrow dependency
 
 **ID:** standalone-emit-arrow-feature
 **Plan:** `add-emit-batch-arrow`
@@ -33,18 +33,18 @@ One Arrow `DataType` maps to several Exasol types. `Utf8` covers VARCHAR, CHAR, 
 
 ### Context
 
-Arrow batch emit needs the `arrow` crate. Pure-compute UDFs must not pull in tokio, exarrow-rs and rustls to use it.
+Arrow batch emit needs the `arrow` crate. UDFs that do not emit Arrow batches must not pull it in.
 
 ### Decision
 
-`exasol-udf-sdk` has the feature `emit-arrow = ["dep:arrow"]`, and `connect-back` implies it. A build with neither feature compiles no `arrow` dependency.
+`exasol-udf-sdk` has the feature `emit-arrow = ["dep:arrow"]`. It gates only the `arrow` dependency and the `RecordBatch` emit extension trait. The connect-back API is not feature-gated. A build without `emit-arrow` compiles no `arrow` dependency.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
-| Standalone `emit-arrow` feature that `connect-back` implies | ✓ Chosen: smallest dependency set for pure-compute UDFs |
-| Gate `emit_batch` under `connect-back` | ✗ Rejected: forces tokio, exarrow-rs and rustls on pure-compute UDFs |
+| Standalone `emit-arrow` feature | ✓ Chosen: smallest dependency set for UDFs without Arrow |
+| Gate `emit_batch` under a connect-back feature | ✗ Rejected: couples two unrelated capabilities |
 
 ### Consequences
 

@@ -8,22 +8,22 @@
 
 ### Context
 
-Exposing the exarrow-rs concrete type from `ctx.connect_back()` would force every connect-back UDF to statically link exarrow-rs into its musl `.so`.
+Exposing the exarrow-rs concrete type from `ctx.connect_back()` would force every connect-back UDF to link exarrow-rs into its `.so`.
 
 ### Decision
 
-`exasol-udf-sdk` defines the `ExaConnection` trait behind the `connect-back` feature. `exa-udf-runtime` provides the only implementation, backed by exarrow-rs. UDFs depend only on `exasol-udf-sdk` and `arrow`.
+`exasol-udf-sdk` defines the arrow-free `ExaConnection` trait and compiles it unconditionally. `exa-udf-runtime` provides the only implementation, backed by exarrow-rs. UDFs depend only on `exasol-udf-sdk`.
 
 ### Options Considered
 
 | Option | Verdict |
 |--------|---------|
 | Trait in SDK, implementation in runtime | ✓ Chosen, the host already owns the connection infrastructure |
-| Return `exarrow_rs::adbc::Connection` directly | ✗ Statically links exarrow-rs into every connect-back `.so` |
+| Return `exarrow_rs::adbc::Connection` directly | ✗ Links exarrow-rs into every connect-back `.so` |
 
 ### Consequences
 
-Without the `connect-back` feature, UDFs have no dependency on exarrow-rs or tokio. New connect-back methods need changes in both the SDK trait and the runtime.
+UDFs have no dependency on exarrow-rs or tokio, and no cargo feature gates the trait. New connect-back methods need changes in both the SDK trait and the runtime.
 
 ## ADR: Dedicated OnceLock current_thread runtime for connect-back
 
@@ -55,7 +55,7 @@ Connect-back queries cannot overlap, which the sequential dispatch loop allows.
 
 **ID:** cargo-exaudf-hides-musl-target-triple
 **Plan:** `add-v2-rust-udf-complete`
-**Status:** Accepted
+**Status:** Superseded by glibc-dynamic-cdylib-single-artifact-model
 
 ### Context
 

@@ -54,7 +54,7 @@ Downstream code uses `exasol_udf_sdk::value::ExaType`. `exa-zmq-protocol` has a 
 
 **ID:** extended-exasol-types-string-backed-value
 **Plan:** `change-sdk-type-system`
-**Status:** Accepted
+**Status:** Superseded by prune-unreachable-exatype-variants
 
 ### Context
 
