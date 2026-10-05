@@ -12,7 +12,7 @@
 
 ### Decision
 
-`generate_sql_for_import_spec` and `generate_sql_for_export_spec` take `(ctx: *mut c_void, json_spec: *const c_char, result: *mut *mut c_char)`, the shape `virtual_schema_adapter_call` uses. The dispatcher threads one `SingleCallContext` down that path. Every hook that can need host state uses this shape.
+`generate_sql_for_import_spec` and `generate_sql_for_export_spec` take `(ctx: *mut c_void, json_spec: *const c_char, result: *mut *mut c_char)`, the shape `virtual_schema_adapter_call` uses. The dispatcher threads one `SingleCallContext` down that path. Every single-call hook that can need host state uses this shape.
 
 ### Options Considered
 
@@ -23,4 +23,4 @@
 
 ### Consequences
 
-`invoke_vs_adapter_call` serves all three hooks. The vtable change bumps `EXA_UDF_ABI_VERSION`.
+One dispatcher path serves all three hooks. The vtable change bumps `EXA_UDF_ABI_VERSION`.

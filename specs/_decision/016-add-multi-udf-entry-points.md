@@ -37,7 +37,7 @@ A bare `__exa_udf_entry` fallback is ambiguous once a `.so` carries multiple UDF
 
 ### Decision
 
-The macro does not emit `__exa_udf_entry`, and the loader never falls back to it. A `.so` without the named symbol fails at load with `no entry point found for script '<NAME>'; hint: rebuild with sdk >= 0.14.0`.
+The macro does not emit `__exa_udf_entry`, and the loader never falls back to it. A `.so` without the named symbol fails at load with an error that names the script and the missing symbol and tells the author to rebuild with a current SDK.
 
 ### Options Considered
 

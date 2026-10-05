@@ -34,11 +34,11 @@ cargo-about evaluates the `targets` array in `about.toml` as a union when genera
 
 ### Context
 
-A local Exasol Personal deployment (Apple Silicon VM) exposes no BucketFS HTTP endpoint. It needs SSH transport, filesystem-level BucketFS reconciliation and `ALTER SYSTEM` registration that preserves existing `SCRIPT_LANGUAGES` entries. A cloud backend (`aws`/`azure`/`exoscale`/`stackit`) exposes the ordinary BucketFS HTTP endpoint. The Personal launcher already discriminates these cases with `IsLocalBackend()` on the descriptor's `.backend` field.
+A local Exasol Personal deployment (Apple Silicon VM) exposes no BucketFS HTTP endpoint. It needs the SLC placed through the filesystem, over SSH or a shared directory, for BucketFS reconciliation. A cloud backend (`aws`/`azure`/`exoscale`/`stackit`) exposes the ordinary BucketFS HTTP endpoint. The Personal launcher already discriminates these cases with `IsLocalBackend()` on the descriptor's `.backend` field.
 
 ### Decision
 
-`scripts/install.sh --deployment <name>` reads `deployment.json` `.backend`. `local` selects the SSH/filesystem path. Any other value selects the standard BucketFS HTTP path, with host/port/user from `deployment.json` `.connection.*` and the DB password from `secrets.json` `.dbPassword`; CLI flags override. A missing or empty `.backend` fails with a clear error. Personal provisions no BucketFS password, so the operator supplies `--bfs-password`. The `container/personal-install` feature spec describes both paths.
+`scripts/install.sh --deployment <name>` reads `deployment.json` `.backend`. `local` selects the filesystem path and needs no BucketFS password. Any other value selects the standard BucketFS HTTP path, with host/port/user from `deployment.json` `.connection.*` and the DB password from `secrets.json` `.dbPassword`; CLI flags override. A missing or empty `.backend` fails with a clear error. Personal provisions no BucketFS password, so the operator supplies `--bfs-password` for a cloud deployment. The `container/personal-install-local` and `container/personal-install-cloud` feature specs describe the two paths.
 
 ### Options Considered
 

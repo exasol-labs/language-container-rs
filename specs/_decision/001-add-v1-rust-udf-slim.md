@@ -12,7 +12,7 @@ JIT compilation (Option C) needs a ~1.4 GB image with a vendored Cargo registry 
 
 ### Decision
 
-The runtime executes only precompiled `.so` artifacts (Option A). The compiler entry point returns an unsupported-feature error for the JIT path (Option C).
+The runtime executes only precompiled `.so` artifacts (Option A). A script without a `%udf_object` directive, which would need the JIT path (Option C), fails with an unsupported-feature error.
 
 ### Options Considered
 
@@ -23,7 +23,7 @@ The runtime executes only precompiled `.so` artifacts (Option A). The compiler e
 
 ### Consequences
 
-The slim image supports only `.so` artifacts uploaded to BucketFS. `compiler.rs` returns an explicit unsupported error.
+The slim image supports only `.so` artifacts uploaded to BucketFS.
 
 ## ADR: Pure I/O-free protocol state machine separated from ZMQ transport
 
@@ -37,7 +37,7 @@ The protocol state machine handles more than a dozen message types and phase tra
 
 ### Decision
 
-`exa-zmq-protocol::Protocol` consumes decoded `ExascriptResponse` values and produces `ExascriptRequest`/`HostEvent` values with no socket I/O. The DEALER socket lives only in `ZmqTransport`.
+`exa-zmq-protocol::Protocol` consumes decoded `ExascriptResponse` values and produces `ExascriptRequest`/`HostEvent` values with no socket I/O. The REQ socket lives only in `ZmqTransport`.
 
 ### Options Considered
 
@@ -62,7 +62,7 @@ Rust has no stable ABI, so rich trait objects across a `dlopen` boundary risk un
 
 ### Decision
 
-The only FFI boundary is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable`. The loader checks `abi_version == 1` and the `sdk_fingerprint` before calling `create`. The `#[exasol_udf]` macro embeds a `build.rs`-baked fingerprint and wraps `run` in `catch_unwind`.
+Each UDF crosses the FFI boundary through one `extern "C"` entry point per script name that returns a `#[repr(C)]` vtable. The loader checks the vtable's ABI version and SDK fingerprint before it calls any slot. The `#[exasol_udf]` macro embeds the build-time fingerprint and catches panics in every slot it generates.
 
 ### Options Considered
 
@@ -74,4 +74,4 @@ The only FFI boundary is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable
 
 ### Consequences
 
-A `.so` built with a mismatched toolchain or SDK is rejected at load time. A panic in UDF code becomes an error code instead of unwinding across FFI. Any vtable layout change bumps `EXA_UDF_ABI_VERSION`, so the loader rejects `.so` files built against an older layout and they must be recompiled.
+A `.so` built with a mismatched toolchain or SDK is rejected at load time. A panic in UDF code becomes an error code instead of unwinding across FFI. Any change to the vtable layout, or to the signature of a method reached through it, bumps `EXA_UDF_ABI_VERSION`, so the loader rejects `.so` files built against an older layout and they must be recompiled.

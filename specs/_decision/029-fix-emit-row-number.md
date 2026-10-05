@@ -12,7 +12,7 @@ The engine uses the `row_number` an emitted row carries (`ExascriptTableData.row
 
 ### Decision
 
-`InputRowSet` keeps the batch's `row_number` list beside its rows and exposes the current row's number. `EmitBuffer::push` takes that number and `to_proto` emits one entry per row. The Arrow path takes the number once per `push_batch`. An input batch without the list falls back to batch-local indices. The per-row byte estimate includes 10 bytes for the widest packed uint64 varint, so it stays an upper bound on the frame and the 4,000,000-byte flush threshold keeps its meaning.
+`InputRowSet` keeps the batch's `row_number` list beside its rows and exposes the current row's number. `EmitBuffer::push` takes that number, and the encoded frame carries one entry per row. The Arrow path takes the number once per `push_batch`. An input batch without the list falls back to batch-local indices. The per-row byte estimate includes 10 bytes for the widest packed uint64 varint, so it stays an upper bound on the frame and the 4,000,000-byte flush threshold keeps its meaning.
 
 ### Options Considered
 

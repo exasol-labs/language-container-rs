@@ -8,11 +8,11 @@
 
 ### Context
 
-`Value::Numeric` must carry Exasol `DECIMAL(p,s)` values of up to 36 significant digits losslessly. `rust_decimal` has a 96-bit mantissa, which holds only ~28-29 digits. The musl static link favors minimal dependencies.
+`Value::Numeric` must carry Exasol `DECIMAL(p,s)` values of up to 36 significant digits losslessly. `rust_decimal` has a 96-bit mantissa, which holds only ~28-29 digits. The SDK keeps its dependencies minimal.
 
 ### Decision
 
-`exasol-udf-sdk::value` defines a zero-dependency `Decimal { unscaled: i128, scale: u8 }` newtype with `TryFrom<&str>`, `TryFrom<f64>` and a lossless `Display`. `Value::Numeric` carries this `Decimal`.
+`exasol-udf-sdk::value` defines a zero-dependency `Decimal { unscaled: i128, scale: u8 }` newtype with `TryFrom<&str>` and a lossless `Display`. `Value::Numeric` carries this `Decimal`.
 
 ### Options Considered
 

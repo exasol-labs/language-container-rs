@@ -1,10 +1,10 @@
 # Feature: connect-back-query
 
-Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` parses the originating node IP from the ZMQ endpoint without a network call; `connection` retrieves named-connection credentials via an on-demand `MT_IMPORT` exchange; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` streams the result set one Arrow batch at a time so peak memory is bounded by one batch; `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
+Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` returns the node's first non-loopback IPv4 address without a network call; `connection` retrieves named-connection credentials via an on-demand `MT_IMPORT` exchange; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` streams the result set one Arrow batch at a time so peak memory is bounded by one batch; `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
 
 ## Background
 
-Connect-back opens a connection from inside the UDF sandbox back to Exasol (or any other target) as an ordinary external client. The connect-back surface is three composable `UdfContext` methods: `cluster_ip()` parses the originating node IP from the ZMQ endpoint with no network call; `connection(name)` retrieves the raw credentials of a named database `CONNECTION` object via an on-demand `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) exchange and returns a `ConnectionObject`; `connect_back(&ConnectionObject)` opens a live `exarrow-rs` session to the target as an ordinary external client over the native binary protocol with server-certificate validation disabled. The MT_IMPORT exchange is safe during the run phase because the outer dispatch loop is blocked awaiting the UDF function return, so the ZMQ socket is idle.
+Connect-back opens a connection from inside the UDF sandbox back to Exasol (or any other target) as an ordinary external client. The connect-back surface is three composable `UdfContext` methods: `cluster_ip()` returns the node's first non-loopback IPv4 address with no network call; `connection(name)` retrieves the raw credentials of a named database `CONNECTION` object via an on-demand `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) exchange and returns a `ConnectionObject`; `connect_back(&ConnectionObject)` opens a live `exarrow-rs` session to the target as an ordinary external client over the native binary protocol with server-certificate validation disabled. The MT_IMPORT exchange is safe during the run phase because the outer dispatch loop is blocked awaiting the UDF function return, so the ZMQ socket is idle.
 
 ## Scenarios
 
@@ -43,14 +43,14 @@ Connect-back opens a connection from inside the UDF sandbox back to Exasol (or a
 * *THEN* the host MUST build the connect-back DSN solely from the `address`, `user`, and `password` of that `ConnectionObject`
 * *AND* the host MUST NOT embed or assume any cluster-specific address of its own, so the same UDF artifact remains portable across clusters that differ only in the `CREATE CONNECTION` definition
 
-### Scenario: cluster_ip is parsed from the ZMQ endpoint without a network call
+### Scenario: cluster_ip returns the node's first non-loopback IPv4 address without a network call
 
-* *GIVEN* a runtime built with the `connect-back` feature started with the ZMQ endpoint `tcp://<node_ip>:<zmq_port>` (the `args[1]` the database passes to the container)
+* *GIVEN* a runtime built with the `connect-back` feature, started with either an `ipc://` (single-node) or a `tcp://` (multi-node) ZMQ endpoint
 * *WHEN* a UDF calls `ctx.cluster_ip()`
-* *THEN* the `HostContextBridge` MUST return `<node_ip>` parsed from the endpoint by stripping the `tcp://` scheme prefix and taking the host segment before the `:`
+* *THEN* the `HostContextBridge` MUST return the first non-loopback IPv4 address among the node's network interfaces
 * *AND* it MUST NOT append the `:8563` SQL port or any port to the returned value, leaving port selection to the UDF author
-* *AND* it MUST NOT perform any network round-trip to obtain the IP, because the endpoint string already names the originating node
-* *AND* an endpoint that does not parse into a host segment MUST return `UdfError::ConnectBack` rather than panicking
+* *AND* it MUST NOT perform any network round-trip to obtain the IP, only a local interface enumeration
+* *AND* a node with no non-loopback IPv4 interface MUST return `UdfError::ConnectBack` rather than panicking
 
 ### Scenario: connection fetches named-connection credentials via on-demand MT_IMPORT
 

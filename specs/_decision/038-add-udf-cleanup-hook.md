@@ -66,7 +66,7 @@ After `MT_CLEANUP` the engine accepts only `MT_FINISHED` or `MT_CLOSE`, so an `M
 
 ### Decision
 
-The hook receives `CleanupContext`, a `UdfContext` implementation beside `SingleCallContext` in `crates/exa-udf-runtime/src/rowset.rs`. It carries the `MT_META` handshake metadata and the iteration axes, and holds no credential requester. `ctx.connection(name)` returns `UdfError::ConnectBack` immediately and sends no `MT_IMPORT`. The error text states that CONNECTION lookups are unavailable during cleanup and tells the author to resolve the `ConnectionObject` during `run()` and keep it, for example in a `static`. The handshake accessors, `ctx.cluster_ip()` and `ctx.connect_back(&conn)` behave as in `SingleCallContext`. `next`, `get` and `emit` return errors.
+The hook receives `CleanupContext`, a `UdfContext` implementation beside `SingleCallContext` in `crates/exa-udf-runtime/src/rowset.rs`. It carries the `MT_META` handshake metadata and the iteration axes, and holds no credential requester. `ctx.connection(name)` returns `UdfError::ConnectBack` immediately and sends no `MT_IMPORT`. The error text states that CONNECTION lookups are unavailable during cleanup and tells the author to resolve the `ConnectionObject` during `run()` and keep it. The handshake accessors, `ctx.cluster_ip()` and `ctx.connect_back(&conn)` behave as in `SingleCallContext`. `next`, `get` and `emit` return errors.
 
 ### Options Considered
 
@@ -80,4 +80,4 @@ The hook receives `CleanupContext`, a `UdfContext` implementation beside `Single
 
 ### Consequences
 
-`CleanupContext` reuses `delegate_handshake_meta!()`. `delegate_connect_back_hooks!` splits into a `connection` part and a `cluster_ip` plus `connect_back` part. `HostContextBridge` and `SingleCallContext` invoke both parts, and `CleanupContext` invokes only the second. The refusal is a method body without a `connect-back` feature gate. A call site with its own protocol-phase legality gets its own `UdfContext` implementation. The design assumes the engine accepts a connect-back login while it waits for the final cleanup message. The live scenario `cleanup_connects_back_with_a_resolved_connection_object` verifies this.
+`HostContextBridge` and `SingleCallContext` share the handshake, CONNECTION-lookup and connect-back-session delegations. `CleanupContext` shares the handshake and connect-back-session delegations, and refuses the CONNECTION lookup. The refusal is a method body without a `connect-back` feature gate. A call site with its own protocol-phase legality gets its own `UdfContext` implementation. The design assumes the engine accepts a connect-back login while it waits for the final cleanup message. The live scenario `cleanup_connects_back_with_a_resolved_connection_object` verifies this.

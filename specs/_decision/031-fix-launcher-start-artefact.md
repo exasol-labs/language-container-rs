@@ -25,4 +25,4 @@ The launcher creates no files. It writes the invocation arguments to stderr at d
 
 ### Consequences
 
-A UDF that never reaches the handshake leaves no trace in the sandbox, and the DB's `VM crashed` report and stderr remain the evidence. `EXAUDF_PARSER_VERSION` and `parser_version=N` have no effect.
+A UDF that never reaches the handshake leaves no trace in the sandbox, and the DB's `VM crashed` report and stderr remain the evidence. `scriptOptionsParserVersion=N` has no effect.

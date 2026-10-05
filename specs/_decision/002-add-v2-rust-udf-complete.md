@@ -85,7 +85,7 @@ Authors use only `cargo exaudf new/build/validate`. The author's host needs `rus
 
 ### Context
 
-The reference SLC (`exasol/script-languages`) treats a named connection as a routable endpoint plus password, not as an internal proxy token. Pointing it at the container's loopback/eth0 `:8563` causes a SIGABRT on `2026.1.0`.
+The reference SLC (`exasol/script-languages`) treats a named connection as a routable endpoint plus password, not as an internal proxy token.
 
 ### Decision
 
@@ -96,7 +96,7 @@ The runtime opens the connect-back connection to the `address`/`user`/`password`
 | Option | Verdict |
 |--------|---------|
 | Connect to `connection_information_rep.address` as an external client | ✓ Chosen, matches the reference SLC |
-| Internal proxy at loopback/eth0 `:8563` | ✗ Causes the `2026.1.0` SIGABRT |
+| A dedicated internal connect-back proxy endpoint | ✗ The reference SLC has none, so UDFs would diverge from it |
 
 ### Consequences
 
@@ -110,7 +110,7 @@ The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'`, r
 
 ### Context
 
-exarrow-rs supports the `native` binary protocol (default) and `websocket` transports. The native protocol is faster and matches the main-session transport.
+exarrow-rs supports the `native` binary protocol (default) and `websocket` transports. Over `websocket`, exarrow-rs returns duplicated and missing rows for results with wide rows.
 
 ### Decision
 
@@ -120,10 +120,9 @@ The connect-back connection MUST use the exarrow-rs native binary protocol. The 
 
 | Option | Verdict |
 |--------|---------|
-| Native protocol, no `transport=` override | ✓ Chosen, faster, simpler DSN |
-| `transport=websocket` | ✗ Pin was never a transport requirement |
-| Benchmark native vs WebSocket | ✗ Decision already made |
+| Native protocol, no `transport=` override | ✓ Chosen, returns every row exactly once |
+| `transport=websocket` | ✗ Duplicated and missing rows for wide results |
 
 ### Consequences
 
-The WebSocket connect-back path is untested and unsupported. A future DB version that breaks the native connect-back handshake requires re-evaluation.
+The WebSocket connect-back path is unsupported. A future DB version that breaks the native connect-back handshake requires re-evaluation.

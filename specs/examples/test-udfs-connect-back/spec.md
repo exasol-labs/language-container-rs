@@ -11,14 +11,14 @@ Each example is a standalone cdylib crate depending only on `exasol-udf-sdk` and
 ### Scenario: connect-back-query emits a value fetched over connect-back
 
 * *GIVEN* an example UDF crate built against `exasol-udf-sdk`
-* *WHEN* its `run` calls `ctx.exa()?.query_arrow("SELECT 42")` and emits the first cell
+* *WHEN* its `run` calls `ctx.connection("CB_SELF")`, then `ctx.connect_back(&conn)`, then `conn.query("SELECT CAST(42 AS BIGINT)")`, and emits the first cell
 * *THEN* the example MUST compile as a cdylib
 * *AND* it MUST emit the integer fetched from the query
 
-### Scenario: connect-back-insert creates a table and writes rows during run
+### Scenario: connect-back-insert writes rows into a pre-created table during run
 
 * *GIVEN* an example UDF crate built against `exasol-udf-sdk`
-* *WHEN* its `run` calls `ctx.exa()?.execute("CREATE TABLE IF NOT EXISTS cb_result (val BIGINT)")`, then for each input row calls `ctx.exa()?.execute(&format!("INSERT INTO cb_result VALUES ({})", value))`, and emits the row count
+* *WHEN* its `run` reads every input integer, opens a connect-back session from `ctx.connection("CB_SELF")`, issues one `conn.execute("INSERT INTO cb_sink.cb_result VALUES ...")` with all values and no DDL, and emits one row per input row
 * *THEN* the example MUST compile as a cdylib
 * *AND* it MUST export the named entry point derived from the crate function name
 

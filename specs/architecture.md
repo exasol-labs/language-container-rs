@@ -83,7 +83,7 @@ user UDF crate (cdylib)
 - UDF `emit_batch(RecordBatch)` -> Arrow IPC bytes -> EmitBuffer: the opt-in `emit-arrow` path crosses the `.so` boundary as Arrow IPC stream bytes and lands in the same emit buffer.
 - DB `MT_RUN` -> single_call -> UDF hook -> `MT_RETURN`: in single-call mode each `MT_CALL` invokes one `SC_FN_*` hook (default output columns, virtual-schema adapter, import or export SQL generation) and returns JSON, or `MT_UNDEFINED_CALL` when the hook is absent.
 - UDF `ctx.connection(name)` -> `MT_IMPORT` -> DB: CONNECTION-object credentials come back on demand as `ConnInfo` over the control channel.
-- UDF `ctx.connect_back(&conn)` -> connect_back -> exarrow-rs -> Exasol SQL: the host opens a separate native-protocol session at the CONNECTION address; `query_for_each` converts one Arrow batch at a time to `Vec<Value>` rows and drops it before fetching the next.
+- UDF `ctx.connect_back(&conn)` -> connect_back -> exarrow-rs -> Exasol SQL: the host opens a separate native-protocol session at the CONNECTION address; `query_for_each` fetches every Arrow batch, then converts one batch at a time to `Vec<Value>` rows and drops it before converting the next.
 - dispatch end -> cleanup hook -> `MT_FINISHED` -> exit(0): the optional `cleanup` hook runs once after dispatch; any dispatch or hook failure sends one error `MT_CLOSE` and the process exits non-zero.
 
 ## Interfaces
@@ -91,12 +91,12 @@ user UDF crate (cdylib)
 - Process invocation: `exaudfclient <endpoint> lang=rust [scriptOptionsParserVersion=N]`; fewer than 2 arguments exits 1 with `F-UDF-CL-RUST-0003`, a language other than `lang=rust` exits 2 with `F-UDF-CL-RUST-0002`, a runtime failure exits 1 with `F-UDF-CL-RUST-0001`.
 - Container path: the binary lives at `/exaudf/exaudfclient` inside the SLC tree.
 - Wire protocol: `localzmq+protobuf` per `crates/exa-proto/proto/zmqcontainer.proto` (vendored, provenance in `PROTO_SOURCES.md`); client REQ socket to DB REP socket, one prost-encoded payload frame per message, strict request/reply lockstep, pings answered inside the exchange.
-- Protocol error close codes: `MT_CLOSE` with code 9001 for UDF and runtime errors and 1001 for an annotated-schema mismatch.
+- Protocol error close: `MT_CLOSE` carries an `exception_message` prefixed `F-UDF-CL-RUST-9001` for UDF and runtime errors and `F-UDF-CL-RUST-1001` for an annotated-schema mismatch.
 - Script directives: `%udf_object <path>` selects the `.so`; `%udf_debug_level <level>` sets the tracing level (default INFO).
 - UDF ABI: one exported `extern "C" __exa_udf_entry_<NAME>() -> *const ExaUdfVTable`; the vtable carries `abi_version` (currently 11), a NUL-terminated `"SDK_VERSION:RUSTC_HASH"` fingerprint, `run`, optional `cleanup`, four optional single-call hooks, annotated schema JSON, and the output shape.
 - UDF ABI calls: `run` and `cleanup` return 0 for ok, 1 for a user error with a `malloc`-allocated message in `error_out`, 2 for a panic; strings crossing the boundary are freed with `libc::free`.
 - SDK API (crates.io `exasol-udf-sdk`): `UdfRun`, `UdfContext` (typed getters, `emit`, `next`, handshake metadata, `cluster_ip`, `connection`, `connect_back`), `ExaConnection` (`query`, `query_for_each`, `execute`, `execute_batch`, `begin`, `commit`, `rollback`), `Value`, `ExaType`, `ColumnInfo`; features `emit-arrow`, `import`, `export`, `test-support`.
-- Proc macro (crates.io `exasol-udf-macros`): `#[exasol_udf]` with optional `input(...)` and `emits(...)` schema annotations.
+- Proc macro (crates.io `exasol-udf-macros`): `#[exasol_udf]` with optional `input(...)` and `emits(...)` schema annotations, `name = "..."` for the entry-point name, and `vs_adapter`, `import_spec`, `export_spec` and `cleanup` to wire the single-call and cleanup hooks.
 - Spec-generation hook payload: `import_specification_rep` and `export_specification_rep` are passed to the hook as JSON that mirrors the proto field names, with every key always present.
 - CLI (crates.io `cargo-exasol-udf`): `cargo exasol-udf new <path>`, `build [<path>] [--target <triple>]`, `validate <path> [--deny-unknown-deps]`.
 - Install script: `scripts/install.sh` with `--host`, `--password`, `--bfs-password` for the BucketFS HTTP transport, or `--deployment <name>` for Exasol Personal; registers via `ALTER SYSTEM SET SCRIPT_LANGUAGES`, merging with existing entries.
@@ -109,7 +109,7 @@ user UDF crate (cdylib)
 - The build is pure Cargo with no Bazel; `exa-proto` generates bindings at build time with a vendored `protoc`, so no system `protoc` is needed.
 - `arrow` stays pinned to the version `exarrow-rs` uses (currently 58) so the host and the `.so` share one Arrow version.
 - `main()` of `exaudfclient` ends with `std::process::exit`, because a normal return joins the connect-back Tokio threads, delays exit by about 10 seconds, and the DB watchdog then sends SIGABRT.
-- The `.so` boundary carries only `repr(C)` types, C strings, SDK `Value` rows, and Arrow IPC bytes; protobuf and Arrow types never cross it.
+- The `.so` boundary carries the `repr(C)` vtable, C strings, SDK types (`Value` rows, `ColumnInfo`, `ConnectionObject`, `UdfError`), Rust trait objects (`&mut dyn UdfContext`, `Box<dyn ExaConnection>`), and Arrow IPC bytes. Protobuf and Arrow types never cross it. Because Rust types cross, the SDK fingerprint pins the rustc version.
 - An `abi_version` or fingerprint mismatch at load produces an error instead of undefined behavior; `catch_unwind` in the generated shims turns a UDF panic into return code 2.
 - `EMIT_BUFFER_LIMIT_BYTES` is 4,000,000 bytes, a flush target that matches the reference C++ SLC; a single row larger than the target is still sent as one `MT_EMIT`.
 - Every emitted row carries the row number of its input row.

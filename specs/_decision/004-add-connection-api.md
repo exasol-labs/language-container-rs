@@ -43,7 +43,7 @@ Authors can construct a `ConnectionObject` for foreign systems without `MT_IMPOR
 
 | Option | Verdict |
 |--------|---------|
-| On-demand `MT_IMPORT` during `run_batch` | ✓ Chosen, name need not be known at registration |
+| On-demand `MT_IMPORT` during `run` | ✓ Chosen, name need not be known at registration |
 | Fetch all connections at handshake (MT_META) | ✗ Requires all names in the `%connection` header |
 
 ### Consequences

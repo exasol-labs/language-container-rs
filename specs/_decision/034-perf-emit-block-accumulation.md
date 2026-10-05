@@ -8,11 +8,11 @@
 
 ### Context
 
-Buffering `Vec<Vec<Value>>` and packing the type blocks only in `take_proto` forces `push_batch` through a `Vec<Value>` pivot. Batches below 4 MB never reach the slice path, so the pivot encodes them all.
+Buffering `Vec<Vec<Value>>` and packing the type blocks only at flush forces `push_batch` through a `Vec<Value>` pivot. Batches below 4 MB never reach the slice path, so the pivot encodes them all.
 
 ### Decision
 
-The buffer holds the type blocks themselves. `push` packs a row as it arrives, `push_batch` appends a downcast batch row by row into the same blocks, and `take_proto` is a `mem::take`. There is no `RecordBatch::slice` and no `Vec<Value>` on either path.
+The buffer holds the type blocks themselves. `push` packs a row as it arrives, `push_batch` appends a downcast batch row by row into the same blocks, and a flush hands the blocks to the frame encoder, then clears them and keeps their allocations. There is no `RecordBatch::slice` and no `Vec<Value>` on either path.
 
 A batch is costed in O(columns): fixed-width columns from their null count, variable-width columns from the offset buffer's span. Only a batch whose total could reach the 4 MB threshold pays for a per-row cost vector.
 
@@ -26,5 +26,5 @@ A batch is costed in O(columns): fixed-width columns from their null count, vari
 
 ### Consequences
 
-`push`/`push_costed` take the declared output columns, and `take_proto` takes none. Encoding happens on the `emit` call, and the row is walked once because the bridge's validation pass supplies the byte cost. Interleaved `emit` and `emit_batch` do not force an undersized `MT_EMIT`.
+`push`/`push_costed` take the declared output columns, and a flush takes none. Encoding happens on the `emit` call, and the row is walked once because the bridge's validation pass supplies the byte cost. Interleaved `emit` and `emit_batch` do not force an undersized `MT_EMIT`.
 

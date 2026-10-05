@@ -8,7 +8,7 @@
 
 ### Context
 
-`EmitBuffer::take_proto` packs rows by the declared output columns, so a short row gains NULLs, a long row loses cells, and cells are coerced by column type. The DB acknowledges `MT_EMIT` before reading rows, and `schema_check` runs once at handshake, so every mismatch becomes a wrong query result.
+The emit buffer packs rows by the declared output columns, so a short row gains NULLs, a long row loses cells, and cells are coerced by column type. The DB acknowledges `MT_EMIT` before reading rows, and `schema_check` runs once at handshake, so every mismatch becomes a wrong query result.
 
 ### Decision
 
@@ -21,7 +21,7 @@ Acceptance is by declared column, not by strict variant equality. `Int32`/`Int64
 | Option | Verdict |
 |--------|---------|
 | Check in the bridge, before `push` | ✓ Chosen |
-| Check in `take_proto` | ✗ One flush batches rows from many calls, so the error names no call site |
+| Check at flush | ✗ One flush batches rows from many calls, so the error names no call site |
 | Make the `value_to_*` coercions lossless | ✗ A lossless coercion of a `String` into an integer column is still a wrong result |
 | Leave it to the database | ✗ No per-row error comes back |
 
@@ -37,7 +37,7 @@ A UDF that relied on a coercion fails the query. Validation shares the byte-cost
 
 ### Context
 
-A UDF cannot see its own schema beyond the input column count, because the bridge's `ColumnMeta` lives in the protocol crate and the SDK cannot name it. A UDF whose output shape comes from the call-site `EMITS` list otherwise needs a redundant column plan.
+A UDF needs its own schema beyond the input column count, and the SDK cannot name a type that lives in the protocol crate. A UDF whose output shape comes from the call-site `EMITS` list otherwise needs a redundant column plan.
 
 ### Decision
 
@@ -48,7 +48,7 @@ A UDF cannot see its own schema beyond the input column count, because the bridg
 | Option | Verdict |
 |--------|---------|
 | Owned type in the SDK, return `&ColumnInfo` | ✓ Chosen |
-| Borrowed `ColumnInfo<'a>` view beside `ColumnMeta` | ✗ Two types with duplicated fields, and the test double still needs owned storage |
+| Borrowed `ColumnInfo<'a>` view beside a protocol-crate type | ✗ Two types with duplicated fields, and the test double still needs owned storage |
 | Return owned `String` fields per call | ✗ Allocates on every access to describe a fixed schema |
 
 ### Consequences

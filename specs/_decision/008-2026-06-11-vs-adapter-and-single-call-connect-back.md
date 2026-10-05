@@ -12,7 +12,7 @@ The Exasol wire format is row-major with no NULL slots. A placeholder entry for 
 
 ### Decision
 
-`EmitBuffer::to_proto` and `InputRowSet::from_proto` order each type block row-major (row, then column). A NULL cell sets only the null-bitmap and adds no slot to the type block. Per-type cursors advance only on non-null cells. Output values are packed by declared column `ExaType`, not by runtime `Value` variant (a `Value::Int64` in a `Numeric` column is stringified into the string block).
+The emit encoder and the input decoder order each type block row-major (row, then column). A NULL cell sets only the null-bitmap and adds no slot to the type block. Per-type cursors advance only on non-null cells. Output values are packed by declared column `ExaType`, not by runtime `Value` variant (a `Value::Int64` in a `Numeric` column is stringified into the string block).
 
 ### Options Considered
 

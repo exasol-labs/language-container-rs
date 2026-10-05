@@ -1,6 +1,6 @@
 # Decisions: add-emit-batch-arrow
 
-## ADR: Declared EMITS ColumnMeta is authoritative for the target proto block
+## ADR: Declared EMITS column metadata is authoritative for the target proto block
 
 **ID:** declared-emits-columnmeta-authoritative
 **Plan:** `add-emit-batch-arrow`
@@ -18,7 +18,7 @@ One Arrow `DataType` maps to several Exasol types. `Utf8` covers VARCHAR, CHAR, 
 
 | Option | Verdict |
 |--------|---------|
-| Declared `ColumnMeta` selects the proto block | ✓ Chosen: unambiguous, and byte-identical to the row path |
+| Declared column metadata selects the proto block | ✓ Chosen: unambiguous, and byte-identical to the row path |
 | Derive the block from the Arrow `DataType` | ✗ Rejected: ambiguous for types that share one Arrow type |
 
 ### Consequences

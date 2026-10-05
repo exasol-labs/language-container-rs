@@ -12,7 +12,7 @@ Per-cell string-block formatting dominates emit cost. On the `emit-bench` `wide`
 
 ### Decision
 
-The hand-rolled fast formatter is the unconditional default for the Date/Timestamp/Decimal branches of `value_to_block_string`, with pre-sized `Vec::with_capacity` in `to_proto`/`encode_slice`. The `spike-string-fast` feature gate does not exist. Spikes B and C, their Cargo features, tests and `UdfContext` additions are absent.
+The hand-rolled fast formatter is the unconditional default for Date, Timestamp and Decimal cells in the emit string block. The `spike-string-fast` feature gate does not exist. Spikes B and C, their Cargo features, tests and `UdfContext` additions are absent.
 
 ### Options Considered
 

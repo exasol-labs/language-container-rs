@@ -12,7 +12,7 @@
 
 ### Decision
 
-`ZmqTransport` wraps `send` and `recv` in `retry_transient`. It re-issues the call on `EAGAIN` until a non-`EAGAIN` result arrives or `MAX_TOTAL_WAIT` (120 s) of continuous `EAGAIN` has elapsed. Every other ZMQ error is a fatal `ProtocolError`. The `is_transient` predicate holds the retry classification.
+`ZmqTransport` wraps `send` and `recv` in `retry_transient`. It re-issues the call on `EAGAIN` until a non-`EAGAIN` result arrives or `MAX_TOTAL_WAIT` (120 s) of continuous `EAGAIN` has elapsed. Every other ZMQ error is a fatal `ProtocolError`. One predicate holds the retry classification.
 
 ### Options Considered
 
