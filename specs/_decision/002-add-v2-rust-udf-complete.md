@@ -100,7 +100,7 @@ The runtime opens the connect-back connection to the `address`/`user`/`password`
 
 ### Consequences
 
-The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'`, reachable from the UDF sandbox network namespace. `exa.get_connection(name)` passes the metadata to UDF code, which connects as an ordinary external client.
+The `CB_SELF` test connection must be created `TO '<routable-endpoint>:8563'`, reachable from the UDF sandbox network namespace. `exa.get_connection(name)` passes the metadata to UDF code, which connects as an ordinary external client. Connect-back always opens a new external-client session and a new transaction, so it does not see the caller's uncommitted state.
 
 ## ADR: Native binary protocol is the mandatory connect-back transport
 

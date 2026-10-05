@@ -12,7 +12,7 @@ The UDF sandbox bind-mounts the database resolver config at `/conf/`, so the SLC
 
 ### Decision
 
-The Docker build creates `/etc/hosts → /conf/hosts` and `/etc/resolv.conf → /conf/resolv.conf` in a `packager` stage. The stage copies the runtime root into a staging directory, runs `ln -sf` there, and archives it with Alpine's pinned `tar`, which records symlinks as-is. An `artifact` stage (`FROM scratch`) exposes `lc-rs.tar.gz` for `docker build --output`. No host-side tool touches the tarball.
+The Docker build creates `/etc/hosts → /conf/hosts` and `/etc/resolv.conf → /conf/resolv.conf` in the `staging` stage. The stage copies the runtime root into a staging directory, runs `ln -sf` there, and archives it with that stage's `tar`, which records symlinks as-is. An `artifact` stage (`FROM scratch`) exposes `lc-rs.tar.gz` for `docker build --output`. No host-side tool touches the tarball.
 
 ### Options Considered
 

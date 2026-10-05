@@ -1,31 +1,5 @@
 # Decisions: 2026-06-11-vs-adapter-and-single-call-connect-back
 
-## ADR: ABI version bump 2→3 for virtual_schema_adapter_call signature change
-
-**ID:** abi-version-bump-2-3-vs-adapter-call
-**Plan:** `2026-06-11-vs-adapter-and-single-call-connect-back`
-**Status:** Accepted
-
-### Context
-
-The `virtual_schema_adapter_call` vtable slot takes `(ctx, json_arg, result)` so VS adapters can call `ctx.connection(...)` and `ctx.connect_back(...)` during a single call. A `.so` built against the 2-argument slot would be called with an extra argument, which is undefined behavior.
-
-### Decision
-
-`EXA_UDF_ABI_VERSION` is 3. The loader rejects any `.so` whose `abi_version` is not 3 with a version-mismatch error.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Increment the ABI version | ✓ Chosen, rejects old `.so` files with a clear error |
-| Keep the version, add a parallel slot | ✗ Bloats the vtable, does not remove the incompatibility |
-| Struct-based calling convention | ✗ Extra complexity, the `run` shim's double indirection suffices |
-
-### Consequences
-
-User `.so` artifacts built against an older ABI must be recompiled.
-
 ## ADR: Row-major type-block packing with NULL cells skipping the type block
 
 **ID:** row-major-type-block-packing-null-cells

@@ -50,7 +50,7 @@ Project specifics:
 - Every emitted row carries the `row_number` of its input row. Without it the database reads out of range and closes the session.
 - Connect-back works for `SCALAR` and `SET` scripts and for both transports. The address is `<container-eth0-ip>:8563` from `ctx.cluster_ip()`. Never use `127.0.0.1` or the Docker host gateway, both end in `SIGABRT`.
 - Connect-back logs in with CONNECTION-object credentials in its own transaction. Reads are always safe. A write-back must not conflict with the invoking query, or it blocks on WAIT FOR COMMIT and aborts with `SIGABRT` after about 11 seconds.
-- `ExaConnection::query` collects the whole result in memory, so use it only for small results. For table-scale reads, stream: fetch one Arrow batch, convert it to a `Vec<Value>` chunk, hand it to the caller, and drop the batch before fetching the next. Use `conn.query_for_each(sql, |row| ctx.emit(row))`.
+- `ExaConnection::query` collects the whole result in memory, so use it only for small results. For table-scale reads, stream: convert one fetched Arrow batch at a time to a `Vec<Value>` chunk, hand it to the caller, and drop the batch before converting the next. Use `conn.query_for_each(sql, |row| ctx.emit(row))`.
 - The `ExaConnection` trait stays Arrow-free. Only `Vec<Value>` chunks cross the `.so` boundary, because Arrow `TypeId` is not stable across it.
 - Keep three concepts apart: the Exasol CONNECTION object (credential store), the exarrow-rs session (the connect-back), and the cluster node IP (`ctx.cluster_ip()`).
 - The ZMQ control channel is chosen by the database (`ipc://` single node, `tcp://` multi node), cannot be set via `SCRIPT_LANGUAGES`, and does not affect connect-back.

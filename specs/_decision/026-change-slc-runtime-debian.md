@@ -13,7 +13,7 @@ The `exaudfclient` is a glibc binary, so an Alpine base adds a musl userland the
 
 ### Decision
 
-The SLC is built from a single root `Dockerfile` in three stages: a `rust:1.94-trixie` builder, a `debian:trixie-slim` donor/packager that stages a curated `/slc` tree, and a `FROM scratch` artifact stage. The staged tree contains only the glibc runtime, the documented UDF library surface, the client, `build_info/` and the notice bundles. It has no shell, package manager, coreutils, Rust toolchain or vendored registry.
+The SLC is built from a single root `Dockerfile` in three stages: a Rust `trixie` builder, a `debian:trixie-slim` donor/packager that stages a curated `/slc` tree, and a `FROM scratch` artifact stage. The staged tree contains only the glibc runtime, the documented UDF library surface, the client, `build_info/` and the notice bundles. It has no shell, package manager, coreutils, Rust toolchain or vendored registry.
 
 ### Options Considered
 
@@ -52,32 +52,6 @@ The staging stage sets `ENV LANG=C.UTF-8` and stages `/usr/lib/locale/C.utf8` in
 ### Consequences
 
 The staged tree carries its locale data without a `locales` package.
-
-## ADR: Derive every architecture-dependent path from the donor; hand the derived values across stages in files
-
-**ID:** derive-architecture-paths-from-donor
-**Plan:** change-slc-runtime-debian
-**Status:** Accepted
-
-### Context
-
-One Dockerfile must produce a correct tree on x86_64 and aarch64 runners without cross-compilation. `debian:trixie-slim` has neither `binutils` nor `dpkg-architecture`, and x86_64 needs `/lib64` while aarch64 has none.
-
-### Decision
-
-The builder derives the multiarch triplet and the client's `PT_INTERP` loader path and writes them to `/slc-meta/` for the staging stage. The staging stage reads which of `/lib`, `/lib64`, `/bin`, `/sbin` are symlinks in the donor and reproduces them with the donor's targets. Symlink creation precedes file staging so all real files land under `/slc/usr`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| Derive in builder, hand off via files, reproduce donor symlinks | ✓ Chosen |
-| Re-derive both values in the donor | ✗ Donor lacks `binutils` and `dpkg-architecture` |
-| Hardcode the per-architecture symlink set | ✗ Wrong on one architecture |
-
-### Consequences
-
-`/usr/lib64/ld-linux-x86-64.so.2` is a symlink into `/usr/lib/<triplet>/`, so `cp -L` of the `PT_INTERP` path resolves only after `/slc/lib64 -> usr/lib64` exists over a real `/slc/usr/lib64` directory.
 
 ## ADR: Ship the "variant E" library surface and make vendoring the contract for everything else
 

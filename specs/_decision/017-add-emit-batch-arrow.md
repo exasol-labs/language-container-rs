@@ -23,7 +23,7 @@ One Arrow `DataType` maps to several Exasol types. `Utf8` covers VARCHAR, CHAR, 
 
 ### Consequences
 
-`push_batch` takes the `&[ColumnMeta]` slice. `HostContextBridge` holds `output_meta`.
+`push_batch` takes the `&[ColumnInfo]` slice. `HostContextBridge` holds `output_meta`.
 
 ## ADR: Standalone emit-arrow feature; connect-back implies it
 

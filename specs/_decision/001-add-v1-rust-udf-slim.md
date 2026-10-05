@@ -25,57 +25,6 @@ The runtime executes only precompiled `.so` artifacts (Option A). The compiler e
 
 The slim image supports only `.so` artifacts uploaded to BucketFS. `compiler.rs` returns an explicit unsupported error.
 
-## ADR: Integration tests use testcontainers-rs with a pinned DB image in privileged mode
-
-**ID:** testcontainers-privileged-db-image
-**Plan:** `add-v1-rust-udf-slim`
-**Status:** Accepted
-
-### Context
-
-The integration tests must prove the BucketFS upload, `ALTER SESSION`, `CREATE SCRIPT` and `SELECT` path against a real Exasol database.
-
-### Decision
-
-Integration tests use `testcontainers-rs` to start `exasol/docker-db:2026.1.0` with `with_privileged(true)`, exposing DB port `8563` and BucketFS port `2580`. Tests are gated behind an `integration` Cargo feature.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| testcontainers-rs, pinned image, privileged | ✓ Chosen, self-contained with RAII teardown |
-| Manual docker-compose harness | ✗ Brittle lifecycle, harder to gate in CI |
-| Script-languages emulator | ✗ Cannot exercise BucketFS upload, `ALTER SESSION`, `CREATE SCRIPT` or `SELECT` |
-
-### Consequences
-
-Running the integration tests requires Docker with privileged-container support. The `integration` feature keeps default `cargo test` Docker-free.
-
-## ADR: BucketFS upload via HTTP PUT and SQL via exarrow-rs directly
-
-**ID:** bucketfs-upload-http-put-sql-exarrow-rs
-**Plan:** `add-v1-rust-udf-slim`
-**Status:** Accepted
-
-### Context
-
-The integration harness must upload `.so` artifacts to BucketFS and run SQL assertions.
-
-### Decision
-
-The harness uploads BucketFS artifacts with `reqwest` HTTP PUT to `http://w:<write-password>@<host>:<bucketfs-port>/<bucket>/<path>` and runs all SQL through `exarrow-rs` with `validate_server_certificate(false)`.
-
-### Options Considered
-
-| Option | Verdict |
-|--------|---------|
-| HTTP PUT (reqwest) + exarrow-rs | ✓ Chosen, callable from the test crate |
-| Shell out to exapump | ✗ CLI, not a library; adds a process dependency and output parsing |
-
-### Consequences
-
-The `it` crate takes `reqwest` and `exarrow-rs` as dev-dependencies. Certificate validation is disabled per project rules (`validateservercertificate=0`).
-
 ## ADR: Pure I/O-free protocol state machine separated from ZMQ transport
 
 **ID:** pure-io-free-protocol-state-machine
@@ -125,4 +74,4 @@ The only FFI boundary is `extern "C" fn __exa_udf_entry() -> *const ExaUdfVTable
 
 ### Consequences
 
-A `.so` built with a mismatched toolchain or SDK is rejected at load time. A panic in UDF code becomes an error code instead of unwinding across FFI.
+A `.so` built with a mismatched toolchain or SDK is rejected at load time. A panic in UDF code becomes an error code instead of unwinding across FFI. Any vtable layout change bumps `EXA_UDF_ABI_VERSION`, so the loader rejects `.so` files built against an older layout and they must be recompiled.

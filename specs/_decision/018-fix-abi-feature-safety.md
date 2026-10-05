@@ -39,7 +39,7 @@ The `&mut dyn UdfContext` vtable is ordered by method declaration. Feature-gated
 
 ### Decision
 
-`UdfContext` declares `cluster_ip`, `connection`, `connect_back` and `emit_record_batch_ipc` unconditionally, with `Unimplemented` defaults. No `UdfContext` method carries a `#[cfg(feature = ...)]`. The `emit-arrow` feature gates only `dep:arrow` and the `EmitBatch` extension trait. `EXA_UDF_ABI_VERSION` is 5, so a `.so` with the old layout fails with `AbiMismatch`.
+`UdfContext` declares `cluster_ip`, `connection`, `connect_back` and `emit_record_batch_ipc` unconditionally, with `Unimplemented` defaults. No `UdfContext` method carries a `#[cfg(feature = ...)]`. The `emit-arrow` feature gates only `dep:arrow` and the `EmitBatch` extension trait. The change bumps `EXA_UDF_ABI_VERSION`, so a `.so` with the old layout fails with `AbiMismatch`.
 
 ### Options Considered
 
