@@ -12,7 +12,6 @@ Project specifics:
 
 - Use `exapump` for all Exasol interaction.
 - Integration tests run with `cargo test -p it --features integration`. CI runs the version matrix `8.29.x / 2025.1.x / 2026.1.x`.
-- `exasol/docker-db` ignores `EXA_DB_MEM_SIZE` on every CI matrix version, so the DB always runs with the 2 GiB `MemSize` from the image's default EXAConf. Do not pass the variable; a custom EXAConf `MemSize` is the only known way to change DB RAM, and it is untested.
 - A new `test-udfs/*` fixture needs a workspace `members` entry, and its crate name must equal its directory name. `scripts/build-test-udfs.sh` builds each `test-udfs/*/` as `-p <dirname>` for CI, so a mismatch fails only in CI with `reading UDF artifact .../lib<name>.so: No such file or directory`. A fixture that `exa-udf-runtime`'s own tests `dlopen` also needs an entry in that crate's `[dev-dependencies]`.
 - `tests/emit_arrow_dlopen.rs` runs only under `--features emit-arrow-test` or `--all-features`. With any other flag set it compiles out silently.
 
