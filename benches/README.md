@@ -48,11 +48,11 @@ cargo run --release -p udf-bench -- compare --base a.json b.json --change c.json
 cargo run --release -p udf-bench -- show bench-results/<commit>-<timestamp>.json
 ```
 
-Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`, `EXA_DB_MEM_SIZE`, default 4 GiB); external mode uses
+Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`; the DB runs with the image's fixed 2 GiB RAM); external mode uses
 `EXASOL_HOST`, `EXASOL_PORT`, `BUCKETFS_PORT`, `BUCKETFS_PASSWORD`. Results land in the gitignored `bench-results/`.
 `--udf-debug host:port` sets `%udf_debug_level debug` and redirects the runtime log to a TCP listener on the host.
 
-| `--profile` | rows (strblock and wide tables / wide generators) | warm-up | reps | docker-db 2026.1.1, 4 GiB, incl. Docker start | band |
+| `--profile` | rows (strblock and wide tables / wide generators) | warm-up | reps | docker-db 2026.1.1, 2 GiB, incl. Docker start | band |
 |---|---|---|---|---|---|
 | `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s (44 cells) | ±15 % |
 | `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 255 s (47 cells) | ±8 % |
