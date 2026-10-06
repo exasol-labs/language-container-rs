@@ -353,9 +353,9 @@ jobs:
   # ── viability gate: integration matrix over Exasol DB versions ───────────
   integration:
     name: IT (${{ matrix.exasol_version }})
-    # Standard ubuntu-latest (2 vCPU / 7 GB) — enough since this job only boots
-    # the DB + runs pre-built binaries, and the DB is pinned to 4 GiB (see
-    # EXA_DB_MEM_SIZE below). The previous "VM crashed" failures were NOT about
+    # Standard ubuntu-latest (4 vCPU / 16 GB for a public repo) — enough since this job only boots
+    # the DB + runs pre-built binaries, and docker-db runs the DB with its fixed
+    # 2 GiB RAM. The previous "VM crashed" failures were NOT about
     # runner size or kernel: they were Ubuntu 24.04's AppArmor restriction on
     # unprivileged user namespaces, which the "Allow unprivileged user
     # namespaces" step below disables. See that step for the full explanation.
@@ -468,16 +468,13 @@ jobs:
 
       - name: Start Exasol ${{ matrix.exasol_version }}
         run: |
-          # EXA_DB_MEM_SIZE: pin Exasol's DB RAM to 4 GiB so it fits comfortably
-          # on the standard 7 GB runner (more than enough for these tests). No
-          # --memory cgroup cap — exarrow-rs runs the DB uncapped on this same
-          # runner class; pinning DB RAM is what bounds the footprint.
+          # No --memory cgroup cap, like exarrow-rs on this runner class;
+          # docker-db's fixed 2 GiB DB RAM fits the 16 GB runner.
           # --shm-size: the UDF script VM needs far more than Docker's 64 MB
           # default; 2g (exarrow-rs uses 1g but never spawns the UDF sandbox).
           # COSLWD_ENABLED mirrors exarrow-rs.
           docker run -d --name exasol-db --privileged \
             --shm-size=2g \
-            -e EXA_DB_MEM_SIZE='4 GiB' \
             -e COSLWD_ENABLED=1 \
             -p 8563:8563 -p 2581:2581 \
             exasol/docker-db:${{ matrix.exasol_version }}

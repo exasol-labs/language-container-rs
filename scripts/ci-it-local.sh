@@ -8,11 +8,11 @@
 # the sandbox-starvation bug reproduces even on a big dev box.
 #
 # Usage:
-#   # reproduce the bug (broken CI config: 6g cap, DB RAM auto-sized):
+#   # reproduce the bug (broken CI config: 6g cap):
 #   scripts/ci-it-local.sh
 #
-#   # validate the fix (pin DB RAM, generous ceiling):
-#   DB_MEM='4 GiB' MEM=12g SHM=2g scripts/ci-it-local.sh
+#   # validate the fix (generous ceiling):
+#   MEM=12g SHM=2g scripts/ci-it-local.sh
 #
 # Env knobs (defaults reproduce the *broken* pre-fix config):
 #   MEM             docker --memory          (default: 6g)
@@ -20,7 +20,6 @@
 #                                              to mimic a swap-starved CI runner;
 #                                              set MEMSWAP=-1 for unlimited swap)
 #   SHM             docker --shm-size         (default: 2g)
-#   DB_MEM          EXA_DB_MEM_SIZE           (default: unset → docker-db auto-sizes)
 #   EXASOL_VERSION  docker-db image tag       (default: 2026.1.1)
 #   SKIP_SLC_BUILD  reuse existing SLC tarball (requires SLC_TARBALL)
 #   DB_PORT         host port -> DB 8563      (default: 8563)
@@ -38,7 +37,6 @@ cd "$REPO_ROOT"
 MEM="${MEM:-6g}"
 MEMSWAP="${MEMSWAP:-$MEM}"
 SHM="${SHM:-2g}"
-DB_MEM="${DB_MEM:-}"
 EXASOL_VERSION="${EXASOL_VERSION:-2026.1.1}"
 CONTAINER="exasol-db"
 IMAGE="exasol/docker-db:${EXASOL_VERSION}"
@@ -53,7 +51,7 @@ cleanup() { docker stop "$CONTAINER" >/dev/null 2>&1 || true; docker rm "$CONTAI
 on_exit() { cleanup; rm -rf "${SLC_DIR:-}" 2>/dev/null || true; }
 trap on_exit EXIT
 
-log "Config: MEM=$MEM MEMSWAP=$MEMSWAP SHM=$SHM DB_MEM='${DB_MEM:-<auto>}' IMAGE=$IMAGE"
+log "Config: MEM=$MEM MEMSWAP=$MEMSWAP SHM=$SHM IMAGE=$IMAGE"
 
 # 1. Build the SLC tarball via the artifact stage ----------------------------
 SLC_DIR="${SLC_DIR:-/tmp/lc-rs-$$}"
@@ -92,13 +90,10 @@ chmod +x it-runner
 log "Start Exasol ($IMAGE)"
 cleanup
 docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
-DB_MEM_ARG=()
-[ -n "$DB_MEM" ] && DB_MEM_ARG=(-e "EXA_DB_MEM_SIZE=$DB_MEM")
 docker run -d --name "$CONTAINER" --privileged \
   --shm-size="$SHM" \
   --memory="$MEM" \
   --memory-swap="$MEMSWAP" \
-  "${DB_MEM_ARG[@]}" \
   -e COSLWD_ENABLED=1 \
   -p "$DB_PORT:8563" -p "$BFS_PORT:2581" \
   "$IMAGE"
