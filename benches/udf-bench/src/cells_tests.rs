@@ -7,11 +7,11 @@ fn by<'a>(c: &'a [CellSpec], name: &str) -> &'a CellSpec {
 }
 
 #[test]
-fn matrix_is_47_unique_cells_with_resolving_controls_and_passthrough_last() {
+fn matrix_is_48_unique_cells_with_resolving_controls_and_passthrough_last() {
     let c = cells(250_000);
-    assert_eq!(c.len(), 47);
+    assert_eq!(c.len(), 48);
     let names: HashSet<&str> = c.iter().map(|x| x.name.as_str()).collect();
-    assert_eq!(names.len(), 47);
+    assert_eq!(names.len(), 48);
     assert_eq!(c.iter().filter(|x| x.shape == "control").count(), 4);
     for x in c.iter().filter(|x| x.control.is_some()) {
         assert!(names.contains(x.control.as_deref().unwrap()), "{}", x.name);
@@ -142,12 +142,12 @@ fn generator_cells_noemit_twins_and_wide_batch_rows() {
     assert_eq!(yes.wire_bytes_per_row, Some(13.9));
 
     let wide: Vec<&CellSpec> = c.iter().filter(|x| x.class == Some("wide")).collect();
-    assert_eq!(wide.len(), 10);
+    assert_eq!(wide.len(), 11);
     let generated: Vec<&&CellSpec> = wide
         .iter()
         .filter(|x| x.shape == "scalar_emits_gen" || x.shape == "set_gen")
         .collect();
-    assert_eq!(generated.len(), 7);
+    assert_eq!(generated.len(), 8);
     assert!(
         generated
             .iter()
@@ -169,8 +169,9 @@ fn generator_cells_noemit_twins_and_wide_batch_rows() {
             .contains("bench.gen_wide_batch(62500, 0, 8192)")
     );
     assert!(
-        c.iter()
-            .all(|x| x.name != "scalar_emits_gen_wide_batch64k_noemit")
+        by(&c, "scalar_emits_gen_wide_batch64k_noemit")
+            .sql
+            .contains("bench.gen_wide_batch(62500, 0, 65536)")
     );
     assert!(
         by(&c, "set_gen_wide_row")

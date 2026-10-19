@@ -54,8 +54,8 @@ Docker mode boots `exasol/docker-db` (`EXASOL_VERSION`; the DB runs with the ima
 
 | `--profile` | rows (strblock and wide tables / wide generators) | warm-up | reps | docker-db 2026.1.1, 2 GiB, incl. Docker start | band |
 |---|---|---|---|---|---|
-| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s (44 cells) | ±15 % |
-| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 255 s (47 cells) | ±8 % |
+| `quick` (default) | 250,000 (2,500 / 62,500) | 1 | 3 | 86 s (48 cells) | ±15 % |
+| `full` | 1,000,000 (10,000 / 250,000) | 1 | 5 | 255 s (48 cells) | ±8 % |
 
 Cells: `control_<class>`, `scalar_returns_<class>`, `scalar_emits_gen_<class>_<mode>[_noemit]`, `scalar_emits_pt`,
 `set_returns_<class>_g<G>`, `set_emits_<class>_<mode>_g<G>`, `set_gen_<class>_<mode>`. Every query returns one row and

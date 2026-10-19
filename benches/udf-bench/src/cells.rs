@@ -309,13 +309,7 @@ pub fn cells(n: u64) -> Vec<CellSpec> {
     for class in Class::GEN {
         let (c, rows) = (class.name(), class.gen_rows(n));
         for (mode, batch_rows) in class.gen_modes() {
-            // The large wide batch builds the same rows as the small one: no generation-only twin.
-            let twins: &[(&str, u64, u64)] = if mode == "batch64k" {
-                &[("", 1, rows)]
-            } else {
-                &[("", 1, rows), ("_noemit", 0, 1)]
-            };
-            for &(suffix, do_emit, expect) in twins {
+            for (suffix, do_emit, expect) in [("", 1, rows), ("_noemit", 0, 1)] {
                 let call = gen_call("gen", class, mode, rows, do_emit, batch_rows);
                 v.push(
                     CellSpec::new(
