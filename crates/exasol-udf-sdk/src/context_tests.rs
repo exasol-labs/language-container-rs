@@ -130,12 +130,71 @@ fn default_emit_batch_unimplemented() {
     let array = Arc::new(Int64Array::from(vec![1i64]));
     let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
 
-    // `emit_batch` (the EmitBatch ext-trait) serialises to IPC then calls
-    // the default `emit_record_batch_ipc`, which is unimplemented on a
-    // context that does not override it.
     let mut ctx = DefaultsCtx;
     assert!(matches!(
         ctx.emit_batch(&batch),
         Err(UdfError::Unimplemented(_))
     ));
+}
+
+#[cfg(feature = "emit-arrow")]
+#[test]
+fn emit_batch_exports_the_batch_through_the_c_data_interface() {
+    use super::EmitBatch;
+    use arrow::array::{Int64Array, StringArray, StructArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    struct Importer {
+        decoded: Vec<RecordBatch>,
+    }
+    impl UdfContext for Importer {
+        fn input_column_count(&self) -> usize {
+            0
+        }
+        fn get(&self, col: usize) -> Result<&Value, UdfError> {
+            Err(UdfError::Type(format!("get({col}): no input columns")))
+        }
+        fn emit(&mut self, _values: Vec<Value>) -> Result<(), UdfError> {
+            Ok(())
+        }
+        fn next(&mut self) -> Result<bool, UdfError> {
+            Ok(false)
+        }
+        fn emit_record_batch_ffi(
+            &mut self,
+            array: *mut core::ffi::c_void,
+            schema: *mut core::ffi::c_void,
+        ) -> Result<(), UdfError> {
+            let array = unsafe {
+                std::ptr::replace(array.cast::<FFI_ArrowArray>(), FFI_ArrowArray::empty())
+            };
+            let schema = unsafe { &*schema.cast::<FFI_ArrowSchema>() };
+            let data = unsafe { arrow::ffi::from_ffi(array, schema) }.unwrap();
+            self.decoded
+                .push(RecordBatch::from(StructArray::from(data)));
+            Ok(())
+        }
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Int64, false),
+        Field::new("s", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1i64, 2])),
+            Arc::new(StringArray::from(vec![Some("a"), None])),
+        ],
+    )
+    .unwrap();
+    let mut ctx = Importer {
+        decoded: Vec::new(),
+    };
+    ctx.emit_batch(&batch).unwrap();
+    ctx.emit_batch(&batch).unwrap();
+    assert_eq!(ctx.decoded, vec![batch.clone(), batch]);
 }

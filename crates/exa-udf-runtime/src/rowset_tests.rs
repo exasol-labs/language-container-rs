@@ -2346,9 +2346,6 @@ mod fast_string_block_ingest_tests {
 #[cfg(feature = "emit-arrow")]
 mod arrow_tests {
     use super::*;
-    // `emit_batch` on the bridge resolves to the EmitBatch ext-trait, which
-    // serialises to IPC bytes then calls `emit_record_batch_ipc`. The whole
-    // round-trip runs in-process with one arrow copy, so it works in tests.
     use arrow::array::{BooleanArray, Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -3680,7 +3677,7 @@ mod arrow_tests {
         );
     }
 
-    /// `emit_record_batch_ipc` bans `emit_batch` in a RETURNS output context,
+    /// `emit_record_batch_ffi` bans `emit_batch` in a RETURNS output context,
     /// mirroring `emit`'s ban (`returns_output_bans_emit`) — no existing
     /// arrow test configures the bridge with `IterType::ExactlyOnce` output
     /// before calling `emit_batch`.

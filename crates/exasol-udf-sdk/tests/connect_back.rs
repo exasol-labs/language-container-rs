@@ -163,9 +163,6 @@ fn udfcontext_connect_back_methods_always_declared() {
     ));
 }
 
-// `emit_record_batch_ipc_present_without_emit_arrow` lives in tests/feature_gate.rs
-// (the canonical location named in the plan's verification table).
-
 #[test]
 fn connect_back_accepts_caller_built_object() {
     let obj = ConnectionObject {

@@ -3,12 +3,7 @@
 exclude = ["it", "udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
 
 [advisories]
-ignore = [
-    # paste is unmaintained but not vulnerable. It's a transitive dependency from
-    # parquet (Apache Arrow) - we can't control it. Track: https://github.com/apache/arrow-rs/issues
-    { id = "RUSTSEC-2024-0436", reason = "Transitive dep from parquet, unmaintained but not vulnerable" },
-
-]
+ignore = []
 
 [licenses]
 allow = [

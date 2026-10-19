@@ -33,10 +33,22 @@ pub struct EmitTable {
 }
 
 impl EmitTable {
+    /// The key of every string-block cell: field 2, length-delimited.
+    const STRING_KEY: u8 = (2 << 3) | WireType::LengthDelimited as u8;
+
     pub fn push_string(&mut self, s: &[u8]) {
-        encode_key(2, WireType::LengthDelimited, &mut self.strings);
-        encode_varint(s.len() as u64, &mut self.strings);
+        if s.len() < 0x80 {
+            self.strings
+                .extend_from_slice(&[Self::STRING_KEY, s.len() as u8]);
+        } else {
+            encode_key(2, WireType::LengthDelimited, &mut self.strings);
+            encode_varint(s.len() as u64, &mut self.strings);
+        }
         self.strings.extend_from_slice(s);
+    }
+
+    pub fn reserve_strings(&mut self, additional: usize) {
+        self.strings.reserve(additional);
     }
 
     /// Append the cell `write` produces. Its length prefix is reserved as one
