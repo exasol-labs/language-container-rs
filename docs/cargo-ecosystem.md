@@ -46,7 +46,7 @@ Feature flags:
 | Feature | What it adds |
 |---------|-------------|
 | _(none)_ | Core trait + types; no async, no arrow |
-| `connect-back` | `cluster_ip`, `connection`, `connect_back` on `UdfContext`; pulls in `arrow 58`, `exarrow-rs`, `tokio` |
+| `emit-arrow` | `EmitBatch::emit_batch` for every `UdfContext`; pulls in `arrow 59` |
 
 ## exa-udf-runtime — internal runtime
 

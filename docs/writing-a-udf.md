@@ -80,8 +80,8 @@ Or create the crate manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.22" }
-exasol-udf-macros = { version = "0.22" }
+exasol-udf-sdk    = { version = "0.32" }
+exasol-udf-macros = { version = "0.32" }
 ```
 
 ## 2. The `#[exasol_udf]` macro
@@ -557,8 +557,8 @@ SELECT my_schema.set_filter(x) FROM nums;  -- one row per positive input value
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.22", features = ["emit-arrow"] }
-arrow = "58"
+exasol-udf-sdk = { version = "0.32", features = ["emit-arrow"] }
+arrow = "59"
 ```
 
 The `connect-back` feature implies `emit-arrow`, so you do not need to list it separately if you already enable `connect-back`.
@@ -615,7 +615,7 @@ Connect-back lets a UDF open a regular Exasol connection from inside `run()` and
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.22", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.32", features = ["connect-back"] }
 ```
 
 ### Create a CONNECTION object

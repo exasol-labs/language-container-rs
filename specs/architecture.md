@@ -107,7 +107,7 @@ user UDF crate (cdylib)
 
 - The Rust toolchain is pinned to 1.98.1 in `rust-toolchain.toml` and must equal the `rust:1.98.1-trixie` builder image in the `Dockerfile`, because the SDK fingerprint embeds the rustc version.
 - The build is pure Cargo with no Bazel; `exa-proto` generates bindings at build time with a vendored `protoc`, so no system `protoc` is needed.
-- `arrow` stays pinned to the version `exarrow-rs` uses (currently 58) so the host and the `.so` share one Arrow version.
+- `arrow` stays pinned to the version `exarrow-rs` uses (currently 59) so the host and the `.so` share one Arrow version.
 - `main()` of `exaudfclient` ends with `std::process::exit`, because a normal return joins the connect-back Tokio threads, delays exit by about 10 seconds, and the DB watchdog then sends SIGABRT.
 - The `.so` boundary carries the `repr(C)` vtable, C strings, SDK types (`Value` rows, `ColumnInfo`, `ConnectionObject`, `UdfError`), Rust trait objects (`&mut dyn UdfContext`, `Box<dyn ExaConnection>`), and Arrow IPC bytes. Protobuf and Arrow types never cross it. Because Rust types cross, the SDK fingerprint pins the rustc version.
 - An `abi_version` or fingerprint mismatch at load produces an error instead of undefined behavior; `catch_unwind` in the generated shims turns a UDF panic into return code 2.
