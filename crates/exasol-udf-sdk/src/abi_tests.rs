@@ -39,8 +39,8 @@ fn fingerprint_baked_nonempty() {
 }
 
 #[test]
-fn spec_slots_take_context_and_abi_version_is_eleven() {
-    assert_eq!(EXA_UDF_ABI_VERSION, 11);
+fn spec_slots_take_context_and_abi_version_is_twelve() {
+    assert_eq!(EXA_UDF_ABI_VERSION, 12);
     let word = std::mem::size_of::<usize>();
     assert_eq!(
         std::mem::offset_of!(ExaUdfVTable, cleanup),

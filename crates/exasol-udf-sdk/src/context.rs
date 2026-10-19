@@ -295,47 +295,42 @@ pub trait UdfContext {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
-    /// Emit a RecordBatch already serialised to Arrow IPC bytes. The host
-    /// deserialises and encodes it. Bytes — not Arrow types — cross the .so
-    /// boundary (Arrow is not ABI-stable across the cdylib boundary; see B-002).
+    /// Emit a RecordBatch exported through the Arrow C Data Interface; `array`
+    /// and `schema` point at an `FFI_ArrowArray` and an `FFI_ArrowSchema`.
+    /// The host takes ownership of the array and only reads the schema.
     /// Authors call `emit_batch` (the `EmitBatch` ext-trait), not this directly.
-    fn emit_record_batch_ipc(&mut self, _ipc: &[u8]) -> Result<(), UdfError> {
-        Err(UdfError::Unimplemented("emit_record_batch_ipc".into()))
+    fn emit_record_batch_ffi(
+        &mut self,
+        _array: *mut core::ffi::c_void,
+        _schema: *mut core::ffi::c_void,
+    ) -> Result<(), UdfError> {
+        Err(UdfError::Unimplemented("emit_record_batch_ffi".into()))
     }
 }
 
 /// Ergonomic batch-emit extension for any [`UdfContext`].
 ///
-/// The serialisation is monomorphised in the caller (UDF) crate, so the Arrow
-/// `RecordBatch` never crosses the `.so` boundary — only the IPC bytes do.
+/// Monomorphised in the caller (UDF) crate: only the two C Data Interface
+/// structs cross the `.so` boundary, never an Arrow type.
 #[cfg(feature = "emit-arrow")]
 pub trait EmitBatch {
-    /// Emit a whole Arrow `RecordBatch`. Serialised to Arrow IPC bytes in the
-    /// caller crate; only the bytes cross the `.so` boundary.
+    /// Emit a whole Arrow `RecordBatch`.
     fn emit_batch(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<(), UdfError>;
 }
 
 #[cfg(feature = "emit-arrow")]
 impl<C: UdfContext + ?Sized> EmitBatch for C {
     fn emit_batch(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<(), UdfError> {
-        let ipc = record_batch_to_ipc(batch)?;
-        self.emit_record_batch_ipc(&ipc)
+        use arrow::array::Array;
+        use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+        let data = arrow::array::StructArray::from(batch.clone()).into_data();
+        let (mut array, mut schema) = arrow::ffi::to_ffi(&data)
+            .map_err(|e| UdfError::Type(format!("emit_batch: FFI export: {e}")))?;
+        self.emit_record_batch_ffi(
+            (&mut array as *mut FFI_ArrowArray).cast(),
+            (&mut schema as *mut FFI_ArrowSchema).cast(),
+        )
     }
-}
-
-/// Serialise a single `RecordBatch` to an Arrow IPC stream (schema + one batch).
-#[cfg(feature = "emit-arrow")]
-fn record_batch_to_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8>, UdfError> {
-    let mut buf = Vec::new();
-    {
-        let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())
-            .map_err(|e| UdfError::Type(format!("emit_batch: IPC writer init: {e}")))?;
-        w.write(batch)
-            .map_err(|e| UdfError::Type(format!("emit_batch: IPC write: {e}")))?;
-        w.finish()
-            .map_err(|e| UdfError::Type(format!("emit_batch: IPC finish: {e}")))?;
-    }
-    Ok(buf)
 }
 
 /// The per-call lifecycle surface the `#[exasol_udf]` macro wires into the

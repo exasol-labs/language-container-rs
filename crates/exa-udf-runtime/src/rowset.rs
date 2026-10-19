@@ -218,15 +218,15 @@ const BYTES_BOOL: usize = 1;
 const BYTES_INT32: usize = 4;
 const BYTES_INT64: usize = 8;
 const BYTES_DOUBLE: usize = 8;
-const BYTES_DATE: usize = 10;
-const BYTES_TIMESTAMP: usize = 29;
+pub(crate) const BYTES_DATE: usize = 10;
+pub(crate) const BYTES_TIMESTAMP: usize = 29;
 /// Per-row cost of the `row_number` entry every emitted row carries (a packed
 /// uint64 varint, at most 10 bytes).
 const BYTES_ROW_NUMBER: usize = 10;
 /// Fixed portion of a NUMERIC cell's cost; callers add `scale` digits on top.
 /// O(1) upper bound, no alloc: i128 renders in ≤39 digits + sign, which also
 /// dominates the scale-padded form. Over-counts → flushes early.
-const NUMERIC_COST_BASE: usize = 40;
+pub(crate) const NUMERIC_COST_BASE: usize = 40;
 
 /// Conservative O(1) byte cost for one cell, approximating the width its
 /// non-null value occupies in its wire type block. NULL cells cost 0
@@ -450,11 +450,8 @@ impl EmitBuffer {
     /// Append an Arrow `RecordBatch` to the emit stream, flushing whenever the
     /// buffer reaches `EMIT_BUFFER_LIMIT_BYTES` at a row boundary.
     ///
-    /// Each column array is downcast and its null buffer read once, then the
-    /// rows are packed into the same blocks the row path fills — no `Value` row
-    /// is materialised, and rows a preceding `emit` left buffered are not
-    /// displaced. A batch that cannot reach the threshold skips the per-row cost
-    /// vector for the O(columns) estimate.
+    /// Rows a preceding `emit` left buffered are not displaced. Per-row costs are
+    /// computed only when the O(columns) estimate can reach the threshold.
     ///
     /// Every row of the batch belongs to the input row being processed, so all
     /// of them carry `row_number`.
@@ -472,75 +469,28 @@ impl EmitBuffer {
         }
 
         // Fail before any row of this batch lands in the blocks.
-        let accessors = build_accessors(batch, meta)?;
-        let nulls: Vec<_> = (0..meta.len())
-            .map(|c| batch.column(c).nulls().cloned())
-            .collect();
+        let packer = crate::emit_pack::BatchPacker::new(batch, meta)?;
 
-        let batch_cost = batch_byte_cost(batch, meta) + n_rows * BYTES_ROW_NUMBER;
+        let batch_cost = packer.byte_cost() + n_rows * BYTES_ROW_NUMBER;
         if self.byte_estimate + batch_cost < EMIT_BUFFER_LIMIT_BYTES {
             self.account(n_rows as u64, batch_cost);
-            for r in 0..n_rows {
-                self.push_arrow_row(&accessors, &nulls, r, row_number);
-            }
+            packer.pack(0..n_rows, row_number, &mut self.table);
             return Ok(());
         }
 
-        let row_costs = compute_row_costs(batch, meta);
+        let row_costs = packer.row_costs();
+        let mut start = 0;
         for (r, &row_cost) in row_costs.iter().enumerate() {
             self.account(1, row_cost + BYTES_ROW_NUMBER);
-            self.push_arrow_row(&accessors, &nulls, r, row_number);
             if self.should_flush() {
+                packer.pack(start..r + 1, row_number, &mut self.table);
+                start = r + 1;
                 self.record_flush_telemetry();
                 self.flush(&mut *flusher)?;
             }
         }
+        packer.pack(start..n_rows, row_number, &mut self.table);
         Ok(())
-    }
-
-    /// Pack row `r` of a downcast batch into the blocks, mirroring
-    /// `push_costed`'s per-cell layout. The accessor variants are listed
-    /// exhaustively so a new `ColAccessor` must choose its block here instead of
-    /// silently landing in the string block.
-    #[cfg(feature = "emit-arrow")]
-    fn push_arrow_row(
-        &mut self,
-        accessors: &[ColAccessor<'_>],
-        nulls: &[Option<arrow::buffer::NullBuffer>],
-        r: usize,
-        row_number: u64,
-    ) {
-        let t = &mut self.table;
-        for (c, acc) in accessors.iter().enumerate() {
-            if nulls[c].as_ref().is_some_and(|nb| nb.is_null(r)) {
-                t.nulls.push(true);
-                continue;
-            }
-            t.nulls.push(false);
-            match acc {
-                ColAccessor::Int32(arr) => t.int32.push(arr.value(r)),
-                ColAccessor::Int64(arr) => t.int64.push(arr.value(r)),
-                ColAccessor::Float64(arr) => t.doubles.push(arr.value(r)),
-                ColAccessor::Boolean(arr) => t.bools.push(arr.value(r)),
-                ColAccessor::Utf8(arr) => t.push_string(arr.value(r).as_bytes()),
-                ColAccessor::LargeUtf8(arr) => t.push_string(arr.value(r).as_bytes()),
-                ColAccessor::Date32(_)
-                | ColAccessor::TsSecond(_)
-                | ColAccessor::TsMillisecond(_)
-                | ColAccessor::TsMicrosecond(_)
-                | ColAccessor::TsNanosecond(_)
-                | ColAccessor::Decimal128(_, _)
-                | ColAccessor::NumericFromInt32(_)
-                | ColAccessor::NumericFromInt64(_)
-                | ColAccessor::NumericFromFloat64(_) => {
-                    let v = accessor_value(acc, r);
-                    t.push_string_with(|out| write_block_value(out, &v));
-                }
-                ColAccessor::Unsupported => {}
-            }
-        }
-        t.row_numbers.push(row_number);
-        t.rows += 1;
     }
 }
 
@@ -556,7 +506,7 @@ impl EmitBuffer {
 /// The `ExaType` authority is the declared `ColumnInfo`; the Arrow type is
 /// used only for extraction.
 #[cfg(feature = "emit-arrow")]
-enum ColAccessor<'a> {
+pub(crate) enum ColAccessor<'a> {
     Int32(&'a arrow::array::Int32Array),
     Int64(&'a arrow::array::Int64Array),
     Float64(&'a arrow::array::Float64Array),
@@ -570,8 +520,8 @@ enum ColAccessor<'a> {
     TsNanosecond(&'a arrow::array::TimestampNanosecondArray),
     Decimal128(&'a arrow::array::Decimal128Array, i8),
     /// Int32/Int64/Float64 Arrow column declared as `ExaType::Numeric` (BIGINT
-    /// widening): extract value as the natural type; `push_arrow_row`
-    /// stringifies it into the string block via `write_block_value`.
+    /// widening): extract value as the natural type; the packer stringifies
+    /// it into the string block via `write_block_value`.
     NumericFromInt32(&'a arrow::array::Int32Array),
     NumericFromInt64(&'a arrow::array::Int64Array),
     NumericFromFloat64(&'a arrow::array::Float64Array),
@@ -585,7 +535,7 @@ enum ColAccessor<'a> {
 /// Validation and downcast are merged into one pass so the row-level encoding
 /// loop has no validation branches and no `unreachable!` arms.
 #[cfg(feature = "emit-arrow")]
-fn build_accessors<'a>(
+pub(crate) fn build_accessors<'a>(
     batch: &'a arrow::record_batch::RecordBatch,
     meta: &[ColumnInfo],
 ) -> Result<Vec<ColAccessor<'a>>, UdfError> {
@@ -695,22 +645,18 @@ fn is_string_family_exatype(typ: &ExaType) -> bool {
 /// 1970-01-01 as a CE day number: an Arrow `Date32` becomes a `NaiveDate` by
 /// adding it.
 #[cfg(feature = "emit-arrow")]
-const ARROW_EPOCH_CE_DAY: i32 = 719163;
+pub(crate) const ARROW_EPOCH_CE_DAY: i32 = 719163;
 
 /// Convert one non-NULL Arrow cell to the SDK `Value` the row path would have
 /// carried for it.
 ///
-/// The single owner of the Arrow decoding decisions — the `Date32` CE-day
-/// offset, each `Timestamp` unit's divisor (euclidean, so a pre-epoch negative
-/// count still yields the non-negative sub-second remainder `chrono` requires),
-/// and the `Decimal128` unscaled/scale pair. `push_arrow_row` is its only
-/// consumer and may not re-derive any of it, or the batch and row paths can
-/// disagree and break byte-identity.
+/// The reference decoding of an Arrow cell. The packer's DATE and TIMESTAMP
+/// writers fall back to it outside years `0..=9999`, so the two must agree.
 ///
 /// `row` must index a non-NULL cell — callers read nullness in bulk per column.
 /// `ColAccessor::Unsupported` yields `Value::Null`.
 #[cfg(feature = "emit-arrow")]
-fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
+pub(crate) fn accessor_value(acc: &ColAccessor<'_>, row: usize) -> Value {
     match acc {
         ColAccessor::Int32(arr) => Value::Int32(arr.value(row)),
         ColAccessor::Int64(arr) => Value::Int64(arr.value(row)),
@@ -796,7 +742,10 @@ fn accumulate_costs(
 /// their null count, variable-width columns from the offset buffer's span.
 /// An upper bound on the per-row sum, so it can only flush early.
 #[cfg(feature = "emit-arrow")]
-fn batch_byte_cost(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnInfo]) -> usize {
+pub(crate) fn batch_byte_cost(
+    batch: &arrow::record_batch::RecordBatch,
+    meta: &[ColumnInfo],
+) -> usize {
     use arrow::array::{Array, LargeStringArray, StringArray};
     use arrow::datatypes::DataType;
 
@@ -838,7 +787,10 @@ fn offsets_span<O: arrow::array::OffsetSizeTrait>(
 /// layout for efficiency (no per-cell work for fixed-width types; offset-buffer
 /// deltas for variable-width; same fixed estimates as `value_byte_cost`).
 #[cfg(feature = "emit-arrow")]
-fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnInfo]) -> Vec<usize> {
+pub(crate) fn compute_row_costs(
+    batch: &arrow::record_batch::RecordBatch,
+    meta: &[ColumnInfo],
+) -> Vec<usize> {
     use arrow::array::{Array, LargeStringArray, StringArray};
     use arrow::datatypes::DataType;
 
@@ -878,7 +830,7 @@ fn compute_row_costs(batch: &arrow::record_batch::RecordBatch, meta: &[ColumnInf
 
 /// Wire formats for the string-block temporal types. The DB serialises DATE as
 /// `YYYY-MM-DD` and TIMESTAMP as `YYYY-MM-DD HH:MM:SS.ffffff` (space separator).
-const DATE_FORMAT: &str = "%Y-%m-%d";
+pub(crate) const DATE_FORMAT: &str = "%Y-%m-%d";
 /// Parse format: `%.f` is optional fractional digits, tolerates both `HH:MM:SS` and `HH:MM:SS.ffffff`.
 const TIMESTAMP_PARSE: &str = "%Y-%m-%d %H:%M:%S%.f";
 /// Emit format: `%.9f` always emits exactly 9 fractional (nanosecond) digits.
@@ -892,7 +844,7 @@ const TIMESTAMP_PARSE: &str = "%Y-%m-%d %H:%M:%S%.f";
 /// every UDF at microsecond precision (`SWIGTableData::getTimestamp` formats
 /// `...FF6`), so an input→output round-trip is capped at microseconds regardless
 /// of this emit format.
-const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.9f";
+pub(crate) const TIMESTAMP_EMIT: &str = "%Y-%m-%d %H:%M:%S%.9f";
 /// ISO-8601 `T`-separated fallback some sources emit for timestamps.
 const TIMESTAMP_FORMAT_ISO: &str = "%Y-%m-%dT%H:%M:%S%.f";
 
@@ -1032,14 +984,24 @@ fn decode_string_block(typ: &ExaType, s: &str) -> Value {
 /// digit run into a stack buffer; the decimal point is then spliced in directly.
 /// Mirrors `Decimal::fmt` exactly (see `value.rs`), verified byte-identical by
 /// `fast_string_block_tests::fast_decimal_matches_display_for_all_cases`.
-fn write_decimal(out: &mut Vec<u8>, d: &Decimal) {
+pub(crate) fn write_decimal(out: &mut Vec<u8>, d: &Decimal) {
     let mut buf = itoa::Buffer::new();
     if d.scale == 0 {
-        out.extend_from_slice(buf.format(d.unscaled).as_bytes());
+        // The digits are the same either way; the i64 formatter is cheaper.
+        let s = match i64::try_from(d.unscaled) {
+            Ok(v) => buf.format(v),
+            Err(_) => buf.format(d.unscaled),
+        };
+        out.extend_from_slice(s.as_bytes());
         return;
     }
 
-    let digits = buf.format(d.unscaled.unsigned_abs()).as_bytes();
+    let magnitude = d.unscaled.unsigned_abs();
+    let digits = match u64::try_from(magnitude) {
+        Ok(v) => buf.format(v),
+        Err(_) => buf.format(magnitude),
+    }
+    .as_bytes();
     let scale = d.scale as usize;
     if d.unscaled < 0 {
         out.push(b'-');
@@ -1056,24 +1018,40 @@ fn write_decimal(out: &mut Vec<u8>, d: &Decimal) {
     }
 }
 
+/// One lookup per zero-padded digit pair instead of two divisions.
+const DIGIT_PAIRS: [u8; 200] = {
+    let mut table = [0u8; 200];
+    let mut i = 0;
+    while i < 100 {
+        table[2 * i] = b'0' + (i / 10) as u8;
+        table[2 * i + 1] = b'0' + (i % 10) as u8;
+        i += 1;
+    }
+    table
+};
+
 /// Write a zero-padded 2-digit decimal number (0..=99) directly as ASCII
 /// bytes, avoiding `core::fmt`'s width/padding machinery.
 fn push_2digit(out: &mut Vec<u8>, v: u32) {
-    out.push(b'0' + (v / 10) as u8);
-    out.push(b'0' + (v % 10) as u8);
+    let pair = v as usize * 2;
+    out.extend_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
 }
 
-/// Write a zero-padded `width`-digit decimal number as ASCII bytes via plain
-/// division/modulo — a fixed-width zero-padded digit writer with no runtime
-/// format-string interpretation.
-fn push_ndigit(out: &mut Vec<u8>, v: u32, width: u32) {
-    let mut divisor = 10u32.pow(width - 1);
-    let mut remaining = v;
-    for _ in 0..width {
-        out.push(b'0' + (remaining / divisor) as u8);
-        remaining %= divisor;
-        divisor /= 10;
+/// Divides only by the constant 100, which compiles to a multiply; a
+/// loop-carried divisor costs a real division per digit.
+fn push_ndigit<const W: usize>(out: &mut Vec<u8>, mut v: u32) {
+    let mut buf = [b'0'; W];
+    let mut i = W;
+    while i >= 2 {
+        i -= 2;
+        let pair = (v % 100) as usize * 2;
+        buf[i..i + 2].copy_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
+        v /= 100;
     }
+    if i == 1 {
+        buf[0] = b'0' + (v % 10) as u8;
+    }
+    out.extend_from_slice(&buf);
 }
 
 /// Fast `YYYY-MM-DD` writer for `NaiveDate`, replacing chrono's generic
@@ -1098,12 +1076,27 @@ fn write_fast_date(out: &mut Vec<u8>, d: &NaiveDate) -> bool {
         return false;
     }
 
-    push_ndigit(out, year as u32, 4);
-    out.push(b'-');
-    push_2digit(out, d.month());
-    out.push(b'-');
-    push_2digit(out, d.day());
+    write_ymd(out, year as u32, d.month(), d.day());
     true
+}
+
+/// Shared with the packer, which must stay byte-identical to the row path.
+pub(crate) fn write_ymd(out: &mut Vec<u8>, year: u32, month: u32, day: u32) {
+    push_ndigit::<4>(out, year);
+    out.push(b'-');
+    push_2digit(out, month);
+    out.push(b'-');
+    push_2digit(out, day);
+}
+
+pub(crate) fn write_hms_nanos(out: &mut Vec<u8>, hour: u32, minute: u32, second: u32, nanos: u32) {
+    push_2digit(out, hour);
+    out.push(b':');
+    push_2digit(out, minute);
+    out.push(b':');
+    push_2digit(out, second);
+    out.push(b'.');
+    push_ndigit::<9>(out, nanos);
 }
 
 /// Fast `YYYY-MM-DD HH:MM:SS.fffffffff` writer for `NaiveDateTime`, replacing
@@ -1127,13 +1120,7 @@ fn write_fast_timestamp(out: &mut Vec<u8>, ts: &NaiveDateTime) -> bool {
     }
 
     out.push(b' ');
-    push_2digit(out, ts.hour());
-    out.push(b':');
-    push_2digit(out, ts.minute());
-    out.push(b':');
-    push_2digit(out, ts.second());
-    out.push(b'.');
-    push_ndigit(out, nanos, 9);
+    write_hms_nanos(out, ts.hour(), ts.minute(), ts.second(), nanos);
     true
 }
 
@@ -1146,7 +1133,7 @@ fn write_fast_timestamp(out: &mut Vec<u8>, ts: &NaiveDateTime) -> bool {
 /// to the `chrono` path for the (rare, out-of-Exasol-range) cases they defer
 /// on. The `fast_string_block_tests` regression suite proves this is
 /// byte-identical to the `chrono`/`Display` path for every representable value.
-fn write_block_value(out: &mut Vec<u8>, v: &Value) {
+pub(crate) fn write_block_value(out: &mut Vec<u8>, v: &Value) {
     use std::io::Write;
 
     match v {
@@ -1796,27 +1783,33 @@ impl UdfContext for HostContextBridge<'_> {
     }
 
     #[cfg(feature = "emit-arrow")]
-    fn emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError> {
+    fn emit_record_batch_ffi(
+        &mut self,
+        array: *mut std::ffi::c_void,
+        schema: *mut std::ffi::c_void,
+    ) -> Result<(), UdfError> {
+        use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
         if self.output_iter == IterType::ExactlyOnce {
             return Err(UdfError::User(
                 "emit() is not allowed in RETURNS output context; return the value instead".into(),
             ));
         }
-        // Resolve the disjoint borrow: take references to fields we need
-        // separately so the borrow checker sees them as independent borrows.
-        let row_number = self.input.current_row_number();
-        let emit_buf = &mut *self.emit_buf;
-        let flusher = &mut self.flusher;
-        let meta = self.output_meta;
-        // Deserialise into a host-owned RecordBatch (single arrow copy on this
-        // side of the .so boundary), then replay the existing push_batch path.
-        let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None)
-            .map_err(|e| UdfError::Type(format!("emit_batch: IPC reader init: {e}")))?;
-        for batch in reader {
-            let batch = batch.map_err(|e| UdfError::Type(format!("emit_batch: IPC read: {e}")))?;
-            emit_buf.push_batch(&batch, meta, row_number, flusher)?;
+        if array.is_null() || schema.is_null() {
+            return Err(UdfError::Type(
+                "emit_batch: null C Data Interface pointer".into(),
+            ));
         }
-        Ok(())
+        // SAFETY: the SDK keeps both structs alive for this call; taking the array
+        // leaves an empty struct behind, so its release runs once, on our drop.
+        let array =
+            unsafe { std::ptr::replace(array.cast::<FFI_ArrowArray>(), FFI_ArrowArray::empty()) };
+        let schema = unsafe { &*schema.cast::<FFI_ArrowSchema>() };
+        let data = unsafe { arrow::ffi::from_ffi(array, schema) }
+            .map_err(|e| UdfError::Type(format!("emit_batch: FFI import: {e}")))?;
+        let batch = arrow::record_batch::RecordBatch::from(arrow::array::StructArray::from(data));
+        let row_number = self.input.current_row_number();
+        self.emit_buf
+            .push_batch(&batch, self.output_meta, row_number, &mut self.flusher)
     }
 
     fn next(&mut self) -> Result<bool, UdfError> {

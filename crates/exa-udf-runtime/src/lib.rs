@@ -3,6 +3,8 @@ mod cleanup;
 #[cfg(feature = "connect-back")]
 mod connect_back;
 mod dispatch;
+#[cfg(feature = "emit-arrow")]
+mod emit_pack;
 mod error;
 mod loader;
 mod rowset;

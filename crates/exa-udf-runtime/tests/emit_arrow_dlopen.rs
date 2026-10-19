@@ -1,8 +1,6 @@
 //! Boundary-safety gate (no DB): dlopen the host-built `libemit_arrow_batch.so`
-//! and drive its `run`, which calls `ctx.emit_batch(&batch)` — now serialising
-//! to Arrow IPC bytes UDF-side and crossing the boundary only as `&[u8]`. The
-//! pre-IPC design SIGSEGV'd here; with IPC the `.so`-built batch must round-trip
-//! cleanly into the host's emit buffer.
+//! and drive its `run`, which calls `ctx.emit_batch(&batch)` across the boundary
+//! through the Arrow C Data Interface into the host's emit buffer.
 // `emit-arrow-test`, not `emit-arrow`: the fixture cdylib is an optional
 // dependency behind that feature. See `Cargo.toml`.
 #![cfg(feature = "emit-arrow-test")]
@@ -27,7 +25,7 @@ fn col(name: &str, typ: ExaType) -> ColumnInfo {
 }
 
 #[test]
-fn emit_arrow_batch_so_round_trips_via_ipc() {
+fn emit_arrow_batch_so_round_trips_via_c_data_interface() {
     let p = fixture_cdylib_path("emit_arrow_batch");
     let udf = LoadedUdf::open(&p, "EMIT_ARROW_BATCH").expect("load .so");
 

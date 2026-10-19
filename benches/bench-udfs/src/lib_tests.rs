@@ -2,7 +2,7 @@ use super::*;
 use arrow::array::{Array, Date32Array, Decimal128Array, Int64Array, StringArray};
 use exasol_udf_sdk::test_support::{EmitPolicy, TestContext};
 
-/// `TestContext` lacks `emit_record_batch_ipc`; this double captures batches.
+/// `TestContext` lacks `emit_record_batch_ffi`; this double captures batches.
 #[derive(Default)]
 struct BatchCapture {
     rows: Vec<Vec<Value>>,
@@ -54,13 +54,19 @@ impl UdfContext for BatchCapture {
         self.cursor = (next < self.rows.len()).then_some(next);
         Ok(self.cursor.is_some())
     }
-    fn emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError> {
-        let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(ipc), None)
+    fn emit_record_batch_ffi(
+        &mut self,
+        array: *mut std::ffi::c_void,
+        schema: *mut std::ffi::c_void,
+    ) -> Result<(), UdfError> {
+        use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+        let array =
+            unsafe { std::ptr::replace(array.cast::<FFI_ArrowArray>(), FFI_ArrowArray::empty()) };
+        let schema = unsafe { &*schema.cast::<FFI_ArrowSchema>() };
+        let data = unsafe { arrow::ffi::from_ffi(array, schema) }
             .map_err(|e| UdfError::Type(e.to_string()))?;
-        for b in reader {
-            self.batches
-                .push(b.map_err(|e| UdfError::Type(e.to_string()))?);
-        }
+        self.batches
+            .push(RecordBatch::from(arrow::array::StructArray::from(data)));
         Ok(())
     }
 }

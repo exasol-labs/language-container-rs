@@ -26,15 +26,15 @@ impl UdfContext for Ctx {
     }
 }
 
-/// `emit_record_batch_ipc` is always declared on `UdfContext` regardless of
+/// `emit_record_batch_ffi` is always declared on `UdfContext` regardless of
 /// the `emit-arrow` feature. Its default returns `Unimplemented`. This test
 /// compiles and passes under default features (no `emit-arrow`), proving the
 /// vtable slot is stable across all feature combinations.
 #[test]
-fn emit_record_batch_ipc_present_without_emit_arrow() {
+fn emit_record_batch_ffi_present_without_emit_arrow() {
     let mut ctx = Ctx;
     assert!(matches!(
-        ctx.emit_record_batch_ipc(&[]),
+        ctx.emit_record_batch_ffi(std::ptr::null_mut(), std::ptr::null_mut()),
         Err(UdfError::Unimplemented(_))
     ));
 }
