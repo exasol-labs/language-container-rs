@@ -31,7 +31,7 @@
 ┌──────────────────────────────────────────────┐
 │ user libudf.so (glibc cdylib)                │
 │ #[exasol_udf] -> UdfRun / UdfContext         │
-│ data crosses as Value rows or Arrow IPC      │
+│ data crosses as Value rows or Arrow C Data   │
 └──────────────────────────────────────────────┘
 
 Connect-back (optional): a separate SQL session the host
@@ -80,7 +80,7 @@ user UDF crate (cdylib)
 - UdfMeta -> loader/schema_check: the runtime checks the compiled output shape (EMITS or RETURNS) against `output_iter_type` and any annotated `input(...)`/`emits(...)` schema against the DB columns before any rows move.
 - DB `MT_NEXT` -> rowset -> UDF `run`: each input batch becomes an input row set of SDK `Value` cells per group; the UDF reads it through `UdfContext`.
 - UDF `ctx.emit` -> EmitBuffer -> `MT_EMIT` -> DB: emitted rows are checked against the output columns and written into the wire type blocks with the input row number; a flush sends one `MT_EMIT` when the byte estimate reaches 4,000,000 bytes, and a tail flush runs at the end of each group.
-- UDF `emit_batch(RecordBatch)` -> Arrow IPC bytes -> EmitBuffer: the opt-in `emit-arrow` path crosses the `.so` boundary as Arrow IPC stream bytes and lands in the same emit buffer.
+- UDF `emit_batch(RecordBatch)` -> Arrow C Data Interface -> EmitBuffer: the opt-in `emit-arrow` path crosses the `.so` boundary as an exported Arrow array without copying its buffers and lands in the same emit buffer.
 - DB `MT_RUN` -> single_call -> UDF hook -> `MT_RETURN`: in single-call mode each `MT_CALL` invokes one `SC_FN_*` hook (default output columns, virtual-schema adapter, import or export SQL generation) and returns JSON, or `MT_UNDEFINED_CALL` when the hook is absent.
 - UDF `ctx.connection(name)` -> `MT_IMPORT` -> DB: CONNECTION-object credentials come back on demand as `ConnInfo` over the control channel.
 - UDF `ctx.connect_back(&conn)` -> connect_back -> exarrow-rs -> Exasol SQL: the host opens a separate native-protocol session at the CONNECTION address; `query_for_each` fetches every Arrow batch, then converts one batch at a time to `Vec<Value>` rows and drops it before converting the next.
@@ -109,7 +109,7 @@ user UDF crate (cdylib)
 - The build is pure Cargo with no Bazel; `exa-proto` generates bindings at build time with a vendored `protoc`, so no system `protoc` is needed.
 - `arrow` stays pinned to the version `exarrow-rs` uses (currently 59) so the host and the `.so` share one Arrow version.
 - `main()` of `exaudfclient` ends with `std::process::exit`, because a normal return joins the connect-back Tokio threads, delays exit by about 10 seconds, and the DB watchdog then sends SIGABRT.
-- The `.so` boundary carries the `repr(C)` vtable, C strings, SDK types (`Value` rows, `ColumnInfo`, `ConnectionObject`, `UdfError`), Rust trait objects (`&mut dyn UdfContext`, `Box<dyn ExaConnection>`), and Arrow IPC bytes. Protobuf and Arrow types never cross it. Because Rust types cross, the SDK fingerprint pins the rustc version.
+- The `.so` boundary carries the `repr(C)` vtable, C strings, SDK types (`Value` rows, `ColumnInfo`, `ConnectionObject`, `UdfError`), Rust trait objects (`&mut dyn UdfContext`, `Box<dyn ExaConnection>`), and Arrow C Data Interface structs. Protobuf and Rust Arrow types never cross it. Because Rust types cross, the SDK fingerprint pins the rustc version.
 - An `abi_version` or fingerprint mismatch at load produces an error instead of undefined behavior; `catch_unwind` in the generated shims turns a UDF panic into return code 2.
 - `EMIT_BUFFER_LIMIT_BYTES` is 4,000,000 bytes, a flush target that matches the reference C++ SLC; a single row larger than the target is still sent as one `MT_EMIT`.
 - Every emitted row carries the row number of its input row.

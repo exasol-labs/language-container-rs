@@ -4,7 +4,7 @@ Encodes an Arrow `RecordBatch` directly into the wire's row-major proto type blo
 
 ## Background
 
-Because an Arrow `RecordBatch` cannot cross the `.so` boundary (two independently linked static `arrow` copies disagree on `Arc<dyn Array>` vtables / `TypeId`, a hard memory fault), the UDF serialises the batch to Arrow IPC bytes and the host's `HostContextBridge::emit_record_batch_ipc(&[u8])` deserialises them into a host-owned `RecordBatch` before encoding — only `&[u8]` crosses the boundary. `EmitBuffer` gains `push_batch(&RecordBatch, &[ColumnInfo], row_number)`, which downcasts each Arrow column array once and reads its null buffer once in bulk — never per cell — and appends the batch's rows into the same proto type blocks the row path fills, choosing each block by the declared output `ExaType`, with no intermediate `Vec<Value>`. Because the `MT_EMIT` wire limit `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`) is a hard cap and a batch's serialised size is unknown at compile time (a batch may exceed it), the encoder flushes at row boundaries as the running estimate crosses the threshold — it cannot flush strictly at batch boundaries. Anything still buffered stays for a later `emit`/`push_batch` or the single end-of-`run` tail flush. The row-based `emit` path and all flush semantics are specified in `runtime/rowset-codec`; this feature shares them rather than duplicating them.
+Because a Rust `RecordBatch` cannot cross the `.so` boundary (two independently linked static `arrow` copies disagree on `Arc<dyn Array>` vtables / `TypeId`, a hard memory fault), the UDF exports the batch through the Arrow C Data Interface and the host's `HostContextBridge::emit_record_batch_ffi` imports it without copying its buffers. `EmitBuffer` gains `push_batch(&RecordBatch, &[ColumnInfo], row_number)`, which downcasts each Arrow column array once and reads its null buffer once in bulk — never per cell — and appends the batch's rows into the same proto type blocks the row path fills, choosing each block by the declared output `ExaType`, with no intermediate `Vec<Value>`. Because the `MT_EMIT` wire limit `EMIT_BUFFER_LIMIT_BYTES` (`4_000_000`) is a hard cap and a batch's serialised size is unknown at compile time (a batch may exceed it), the encoder flushes at row boundaries as the running estimate crosses the threshold — it cannot flush strictly at batch boundaries. Anything still buffered stays for a later `emit`/`push_batch` or the single end-of-`run` tail flush. The row-based `emit` path and all flush semantics are specified in `runtime/rowset-codec`; this feature shares them rather than duplicating them.
 
 ## Scenarios
 
@@ -33,13 +33,6 @@ Because an Arrow `RecordBatch` cannot cross the `.so` boundary (two independentl
 * *THEN* the two `ExascriptTableData` results MUST be byte-identical, proving the columnar and row paths converge on the same wire encoding
 * *AND* decoding the `push_batch` result via `InputRowSet::from_proto` with the same `meta` MUST reproduce the batch's values
 
-### Scenario: Bridge deserialises emit_batch IPC bytes, carries the output metadata, and flushes on the same threshold
-
-* *GIVEN* a `HostContextBridge` (built with `emit-arrow` enabled) that holds the EMITS output `ColumnInfo` slice — threaded into its constructor by dispatch (the same `meta.output_columns` the flusher serialises with) because the bridge previously held only its input columns — whose `flusher` serialises and clears the `EmitBuffer`
-* *WHEN* a UDF calls `ctx.emit_batch(&batch)` during `run` (which serialises to Arrow IPC bytes UDF-side and invokes the bridge's `emit_record_batch_ipc(&[u8])` ABI override)
-* *THEN* the bridge's `emit_record_batch_ipc` override MUST deserialise the IPC bytes into a host-owned `RecordBatch` and call `self.emit_buf.push_batch(batch, output_meta)` against that output column metadata, which invokes the `flusher` whenever the byte estimate reaches `EMIT_BUFFER_LIMIT_BYTES` — the identical buffer-then-flush contract as the row-based `emit`
-* *AND* the bridge MUST surface a deserialise error or a `push_batch` error as the method's `Err`, so a malformed batch fails the UDF run rather than being silently dropped
-
 ### Scenario: emit and emit_batch share one buffer and one tail flush
 
 * *GIVEN* a `HostContextBridge` (built with `emit-arrow` enabled) and a UDF that interleaves `ctx.emit(vec![Value])` and `ctx.emit_batch(&batch)` calls within one `run`
@@ -47,3 +40,11 @@ Because an Arrow `RecordBatch` cannot cross the `.so` boundary (two independentl
 * *THEN* rows from both emit styles MUST accumulate into the same `EmitBuffer` in call order, so the two styles are interchangeable and produce one coherent output stream
 * *AND* neither style may flush what the other has buffered while the byte estimate is below the threshold
 * *AND* the dispatch loop's existing tail flush MUST send any rows still buffered from either style, so no emitted row is lost even when the threshold was never reached
+
+### Scenario: Bridge imports the emit_batch array, carries the output metadata, and flushes on the same threshold
+
+* *GIVEN* a `HostContextBridge` (built with `emit-arrow` enabled) that holds the EMITS output `ColumnInfo` slice and whose `flusher` serialises and clears the `EmitBuffer`
+* *WHEN* a UDF calls `ctx.emit_batch(&batch)` during `run`
+* *THEN* the bridge's `emit_record_batch_ffi` MUST import the array without copying its buffers and call `push_batch` against the output column metadata, which invokes the `flusher` whenever the byte estimate reaches `EMIT_BUFFER_LIMIT_BYTES`, the same contract as the row-based `emit`
+* *AND* the bridge MUST surface a null pointer, an import error, or a `push_batch` error as the method's `Err`, so a malformed batch fails the UDF run rather than being silently dropped
+* *AND* in a RETURNS output context the bridge MUST reject the call, as it rejects `emit`

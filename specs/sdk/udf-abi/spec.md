@@ -53,29 +53,18 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 
 * *GIVEN* the `exasol-udf-sdk` crate built with any combination of cargo features
 * *WHEN* the `UdfContext` trait is compiled
-* *THEN* every method — including `cluster_ip`, `connection`, `connect_back`, and `emit_record_batch_ipc` — MUST be declared **unconditionally** (no `#[cfg(feature = ...)]` on any trait method), each with a default implementation returning `UdfError::Unimplemented`, so the method set and declaration order (hence the `dyn UdfContext` vtable layout) are identical in every build configuration
+* *THEN* every method — including `cluster_ip`, `connection`, `connect_back`, and `emit_record_batch_ffi` — MUST be declared **unconditionally** (no `#[cfg(feature = ...)]` on any trait method), each with a default implementation returning `UdfError::Unimplemented`, so the method set and declaration order (hence the `dyn UdfContext` vtable layout) are identical in every build configuration
 * *AND* `connection` and `connect_back` MUST reference `ConnectionObject` / `ExaConnection` from the now-unconditionally-compiled `connect_back` module (see `sdk/connect-back`), so their signatures compile without any feature gate
-* *AND* `emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError>` MUST take only `&[u8]` (no `arrow` type), so it can be declared unconditionally even when the `arrow` dependency is absent
-* *AND* a UDF `.so` and the host built with different feature sets MUST resolve every `UdfContext` method to the same vtable slot, so `ctx.emit_batch()` from an `emit-arrow`-only UDF dispatches to the host's `emit_record_batch_ipc` (not `cluster_ip`) and emits all rows (issue #31)
+* *AND* `emit_record_batch_ffi(&mut self, array: *mut c_void, schema: *mut c_void) -> Result<(), UdfError>` MUST name no `arrow` type, so it can be declared unconditionally even when the `arrow` dependency is absent
+* *AND* a UDF `.so` and the host built with different feature sets MUST resolve every `UdfContext` method to the same vtable slot, so `ctx.emit_batch()` from an `emit-arrow`-only UDF dispatches to the host's `emit_record_batch_ffi` (not `cluster_ip`) and emits all rows (issue #31)
 
 ### Scenario: emit-arrow gates only the arrow dependency and the RecordBatch ext-trait
 
 * *GIVEN* the SDK compiled without the `emit-arrow` feature
 * *WHEN* the crate is built
-* *THEN* the optional `arrow` dependency MUST NOT be compiled and the `EmitBatch` extension trait (`emit_batch(&RecordBatch)`, which serialises to Arrow IPC bytes in the caller crate) MUST NOT be present, because it is the only API that names an `arrow` type
-* *AND* the `UdfContext::emit_record_batch_ipc(&[u8])` trait method MUST still be present (it names no `arrow` type), so the vtable is unchanged whether or not `emit-arrow` is enabled
-* *AND* with `emit-arrow` enabled, `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `emit_record_batch_ipc(&[u8])`; an Arrow `RecordBatch` MUST NOT cross the `.so` boundary, only `&[u8]`
+* *THEN* the optional `arrow` dependency MUST NOT be compiled and the `EmitBatch` extension trait (`emit_batch(&RecordBatch)`) MUST NOT be present, because it is the only API that names an `arrow` type
+* *AND* the `UdfContext::emit_record_batch_ffi` trait method MUST still be present, so the vtable is unchanged whether or not `emit-arrow` is enabled
 * *AND* the row-based `emit(&mut self, values: Vec<Value>)` MUST remain a required trait method, so a UDF MAY mix `emit` and `emit_batch` within one `run`
-
-### Scenario: emit_batch serialises to Arrow IPC bytes so Arrow never crosses the .so boundary
-
-* *GIVEN* the SDK compiled with the `emit-arrow` feature enabled
-* *WHEN* a UDF author calls `ctx.emit_batch(&batch)` on a `&mut dyn UdfContext`
-* *THEN* the SDK MUST expose `emit_batch(&mut self, batch: &arrow::record_batch::RecordBatch) -> Result<(), UdfError>` via a public blanket extension trait (`impl<C: UdfContext + ?Sized> EmitBatch for C`) gated `#[cfg(feature = "emit-arrow")]`, so the serialisation is monomorphised in the caller (UDF) crate and runs against the UDF's own `arrow`
-* *AND* `emit_batch` MUST serialise the `RecordBatch` to Arrow IPC bytes and forward them to `self.emit_record_batch_ipc(&[u8])` — an Arrow `RecordBatch` MUST NOT be passed across the `.so` boundary, because two independently linked static `arrow` copies disagree on `Arc<dyn Array>` vtables and `TypeId` (a hard memory fault, the same hazard documented for connect-back `query_arrow`); only `&[u8]` crosses
-* *AND* `UdfContext` MUST expose a defaulted `emit_record_batch_ipc(&mut self, ipc: &[u8]) -> Result<(), UdfError>` gated `#[cfg(feature = "emit-arrow")]` whose default returns `Err(UdfError::Unimplemented("emit_record_batch_ipc"))`, so existing `UdfContext` implementations that do not override it keep compiling unchanged
-* *AND* neither `emit_record_batch_ipc` nor `EmitBatch` MUST be present when the crate is built without the `emit-arrow` feature, and the trait MUST compile in that configuration with no reference to any `arrow` type
-* *AND* the row-based `emit(&mut self, values: Vec<Value>)` method MUST remain a required trait method, unchanged, so a UDF MAY freely mix `emit` and `emit_batch` within one `run`
 
 ### Scenario: Return channel adds set_return and an output-shape marker, bumping the ABI version
 
@@ -85,3 +74,12 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* `ExaUdfVTable` MUST carry an output-shape marker (RETURNS versus EMITS) that the loader/runtime validates against `meta.output_iter`
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `6 → 7` because both the `dyn UdfContext` layout and the `ExaUdfVTable` fields changed, so a `.so` built against ABI 6 fails the loader's version check with a clear `AbiMismatch` error instead of misdispatching
 * *AND* the `run` vtable function-pointer signature MUST remain `(ctx: *mut c_void, error_out: *mut *mut c_char)` — the returned value crosses through the existing trait-object `set_return` slot, not a new `run` parameter
+
+### Scenario: emit_batch crosses the .so boundary through the Arrow C Data Interface
+
+* *GIVEN* the SDK compiled with the `emit-arrow` feature enabled
+* *WHEN* a UDF author calls `ctx.emit_batch(&batch)` on a `&mut dyn UdfContext`
+* *THEN* the blanket `EmitBatch` extension trait MUST export the batch in the caller (UDF) crate as an `FFI_ArrowArray` and an `FFI_ArrowSchema` and pass pointers to both to `emit_record_batch_ffi`
+* *AND* no Rust `arrow` type MUST cross the `.so` boundary, because the UDF and the host link separate `arrow` copies whose `TypeId`s and trait-object vtables differ
+* *AND* the host MUST take ownership of the array, so its release callback runs exactly once
+* *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `11 → 12`, so a `.so` built against ABI 11 fails the loader's version check with `AbiMismatch`
