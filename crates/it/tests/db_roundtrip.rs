@@ -214,6 +214,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     emit_arrow_batch_roundtrips(&mut conn, &emit_arrow_path).await?;
     eprintln!("[it] scenario emit_arrow_batch ok");
 
+    emit_types_arrive_intact(&mut conn, &emit_arrow_path).await?;
+    eprintln!("[it] scenario emit_types_arrive_intact ok");
+
     numeric_date_timestamp_emit_roundtrips(&mut conn, &numeric_temporal_path).await?;
     eprintln!("[it] scenario numeric_date_timestamp_emit ok");
 
@@ -1668,6 +1671,153 @@ async fn emit_arrow_batch_roundtrips(conn: &mut Connection, lib_path: &str) -> R
     .ok_or_else(|| anyhow!("emit_arrow_batch aggregation query returned NULL"))?;
     if aggregated != "1:a,2:b,3:c" {
         bail!("emit_arrow_batch: expected '1:a,2:b,3:c', got {aggregated:?}");
+    }
+    Ok(())
+}
+
+/// Scenario: Every supported output type arrives intact through emit and emit_batch
+async fn emit_types_arrive_intact(conn: &mut Connection, lib_path: &str) -> Result<()> {
+    let ns = it::db_series() != "8-29";
+    let ts_type = if ns { "TIMESTAMP(9)" } else { "TIMESTAMP" };
+    let columns = [
+        ("k", "DECIMAL(9,0)"),
+        ("c_i32", "DECIMAL(9,0)"),
+        ("c_i32w", "DECIMAL(9,0)"),
+        ("c_i64", "DECIMAL(18,0)"),
+        ("c_i64w", "DECIMAL(18,0)"),
+        ("c_dbl", "DOUBLE"),
+        ("c_bool", "BOOLEAN"),
+        ("c_big", "BIGINT"),
+        ("c_num_i32", "DECIMAL(12,2)"),
+        ("c_num_f64", "DECIMAL(18,4)"),
+        ("c_num_str", "DECIMAL(18,4)"),
+        ("c_dec0", "DECIMAL(36,0)"),
+        ("c_dec10", "DECIMAL(36,10)"),
+        ("c_dt", "DATE"),
+        ("c_dt_str", "DATE"),
+        ("c_ts_s", ts_type),
+        ("c_ts_ms", ts_type),
+        ("c_ts_us", ts_type),
+        ("c_ts_ns", ts_type),
+        ("c_ts_str", ts_type),
+        ("c_vc", "VARCHAR(20000)"),
+        ("c_vc_large", "VARCHAR(20000)"),
+        ("c_vc_huge", "VARCHAR(2000000)"),
+        ("c_ch", "CHAR(10)"),
+    ];
+    let ddl = columns
+        .iter()
+        .map(|(name, typ)| format!("{name} {typ}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ts = |v: &str| {
+        let v = match v.split_once('.') {
+            Some((whole, frac)) if !ns => format!("{whole}.{}", &frac[..3]),
+            _ => v.to_string(),
+        };
+        format!("TIMESTAMP '{v}'")
+    };
+    let nines = "9".repeat(36);
+    let dec10 = format!("{}.{}", "9".repeat(26), "9".repeat(10));
+    let leap = "2024-02-29 12:34:56";
+    let first = "0001-01-01 00:00:00";
+    let last = "9999-12-31 23:59:59";
+    let eve = "1969-12-31 23:59:59";
+    let rows = [
+        format!(
+            "1, 42, 7, 1234567890123, 2147483647, 1.5, TRUE, 9223372036854775807, 2147483647, \
+             12345678901234.5, 123.45, 42, 3.1415926535, DATE '2024-02-29', DATE '2024-02-29', \
+             {}, {}, {}, {}, {}, 'a', 'ñ日本語🦀', NULL, 'abc'",
+            ts(leap),
+            ts(&format!("{leap}.123")),
+            ts(&format!("{leap}.123456")),
+            ts(&format!("{leap}.123456789")),
+            ts(&format!("{leap}.123456789")),
+        ),
+        format!(
+            "2, -999999999, -999999999, -999999999999999999, -2147483648, -2.25, FALSE, \
+             -9223372036854775808, -2147483648, -0.0625, -0.0001, -{nines}, -{dec10}, \
+             DATE '0001-01-01', DATE '0001-01-01', {}, {}, {}, {}, {}, \
+             RPAD('日', 42, '日') || 'x', RPAD('x', 128, 'x'), NULL, '0123456789'",
+            ts(first),
+            ts(&format!("{first}.001")),
+            ts(&format!("{first}.000001")),
+            ts("1677-09-22 00:00:00.000000001"),
+            ts(&format!("{first}.000000001")),
+        ),
+        format!(
+            "3, 999999999, 0, 999999999999999999, 0, 1E-1, TRUE, 0, 0, 0, 0, {nines}, \
+             -0.0000000001, DATE '9999-12-31', DATE '9999-12-31', {}, {}, {}, {}, {}, \
+             NULL, NULL, NULL, NULL",
+            ts(last),
+            ts(&format!("{last}.999")),
+            ts(&format!("{last}.999999")),
+            ts("2262-04-11 23:47:16.854775807"),
+            ts(&format!("{last}.999999999")),
+        ),
+        format!(
+            "4, NULL, 1, NULL, -1, NULL, FALSE, NULL, -1, NULL, -123.45, NULL, 0.5, NULL, \
+             DATE '1969-12-31', NULL, {}, NULL, {}, NULL, \
+             RPAD('x', 16383, 'x'), RPAD('é', 8192, 'é'), RPAD('é', 2000000, 'é'), NULL",
+            ts(&format!("{eve}.999")),
+            ts(&format!("{eve}.999999999")),
+        ),
+        format!("5{}", ", NULL".repeat(columns.len() - 1)),
+    ];
+    conn.execute(&format!(
+        "CREATE OR REPLACE TABLE it_rust.emit_types_expected ({ddl})"
+    ))
+    .await?;
+    conn.execute(&format!(
+        "INSERT INTO it_rust.emit_types_expected VALUES ({})",
+        rows.join("), (")
+    ))
+    .await?;
+
+    let mut failures = Vec::new();
+    for path in ["row", "batch"] {
+        conn.execute(&format!(
+            "CREATE OR REPLACE RUST SCALAR SCRIPT it_rust.emit_types_{path}(ns BOOLEAN) \
+             EMITS ({ddl}) AS\n\
+             %udf_object {lib_path};\n/"
+        ))
+        .await?;
+        let out = format!("it_rust.emit_types_{path}_out");
+        conn.execute(&format!(
+            "CREATE OR REPLACE TABLE {out} AS SELECT it_rust.emit_types_{path}({ns}) FROM DUAL"
+        ))
+        .await?;
+        let counts = query_single_string(
+            conn,
+            &format!("SELECT TO_CHAR(COUNT(*)) || '/' || TO_CHAR(COUNT(DISTINCT k)) FROM {out}"),
+        )
+        .await?;
+        if counts.as_deref() != Some("5/5") {
+            failures.push(format!(
+                "{path}: rows/distinct k = {counts:?}, expected 5/5"
+            ));
+        }
+        for (c, _) in &columns[1..] {
+            let diff = query_single_string(
+                conn,
+                &format!(
+                    "SELECT GROUP_CONCAT(TO_CHAR(COALESCE(o.k, x.k)) || ' got ' \
+                     || COALESCE(SUBSTR(CAST(o.{c} AS VARCHAR(2000000)), 1, 60), 'NULL') || ' want ' \
+                     || COALESCE(SUBSTR(CAST(x.{c} AS VARCHAR(2000000)), 1, 60), 'NULL') \
+                     ORDER BY COALESCE(o.k, x.k) SEPARATOR '; ') \
+                     FROM {out} o FULL OUTER JOIN it_rust.emit_types_expected x ON o.k = x.k \
+                     WHERE o.k IS NULL OR x.k IS NULL \
+                     OR NOT (o.{c} = x.{c} OR (o.{c} IS NULL AND x.{c} IS NULL))"
+                ),
+            )
+            .await?;
+            if let Some(diff) = diff {
+                failures.push(format!("{path}.{c}: {diff}"));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!("emit_types:\n{}", failures.join("\n"));
     }
     Ok(())
 }

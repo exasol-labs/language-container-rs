@@ -48,3 +48,9 @@ Because a Rust `RecordBatch` cannot cross the `.so` boundary (two independently 
 * *THEN* the bridge's `emit_record_batch_ffi` MUST import the array without copying its buffers and call `push_batch` against the output column metadata, which invokes the `flusher` whenever the byte estimate reaches `EMIT_BUFFER_LIMIT_BYTES`, the same contract as the row-based `emit`
 * *AND* the bridge MUST surface a null pointer, an import error, or a `push_batch` error as the method's `Err`, so a malformed batch fails the UDF run rather than being silently dropped
 * *AND* in a RETURNS output context the bridge MUST reject the call, as it rejects `emit`
+
+### Scenario: Every supported output type arrives intact through emit and emit_batch
+
+* *GIVEN* an EMITS script with a column for every supported output type, fed by every `Value` variant `emit` accepts and every Arrow type `emit_batch` accepts for it
+* *WHEN* it emits the same rows through `emit` and through `emit_batch`, including NULLs, type range limits, pre-epoch and leap-day temporals, decimals beyond `i64`, multi-byte text, and text on each side of every length-prefix width up to one row over `EMIT_BUFFER_LIMIT_BYTES`
+* *THEN* the database MUST store exactly the expected values through both paths

@@ -1178,6 +1178,7 @@ name = "emit-arrow-batch"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "chrono",
  "exasol-udf-macros",
  "exasol-udf-sdk",
 ]
