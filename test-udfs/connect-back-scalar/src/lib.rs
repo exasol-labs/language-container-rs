@@ -35,24 +35,34 @@ pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<Option<Decimal>, 
     }))
 }
 
-/// Looks up the CONNECTION named by the first argument. On a failed lookup the
-/// second argument picks the reaction: `propagate` returns the lookup error,
-/// `catch` returns its text, `unwrap` panics, anything else becomes the UDF's
-/// own error text.
+/// Looks up the comma-separated CONNECTION names of the first argument in
+/// order and returns the results joined by `|`. On a failed lookup the second
+/// argument picks the reaction: `propagate` returns the lookup error, `catch`
+/// records its text, `unwrap` panics, anything else becomes the UDF's own error
+/// text. `panic` panics before any lookup.
 #[exasol_udf]
 pub fn connection_lookup(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> {
     let mut args = (0..2).map(|i| match ctx.get(i)? {
         Value::String(s) => Ok(s.clone()),
+        Value::Null => Ok(String::new()),
         other => Err(UdfError::Type(format!("expected VARCHAR, got {other:?}"))),
     });
-    let (name, on_error) = (args.next().unwrap()?, args.next().unwrap()?);
-    if on_error == "unwrap" {
-        return Ok(Some(ctx.connection(&name).unwrap().address));
+    let (names, on_error) = (args.next().unwrap()?, args.next().unwrap()?);
+    if on_error == "panic" {
+        panic!("connection_lookup panicked without a lookup");
     }
-    match (ctx.connection(&name), on_error.as_str()) {
-        (Ok(c), _) => Ok(Some(c.address)),
-        (Err(e), "propagate") => Err(e),
-        (Err(e), "catch") => Ok(Some(e.to_string())),
-        (Err(_), own) => Err(UdfError::User(own.into())),
+    let mut results = Vec::new();
+    for name in names.split(',') {
+        let looked_up = match on_error.as_str() {
+            "unwrap" => Ok(ctx.connection(name).unwrap()),
+            _ => ctx.connection(name),
+        };
+        results.push(match (looked_up, on_error.as_str()) {
+            (Ok(c), _) => c.address,
+            (Err(e), "propagate") => return Err(e),
+            (Err(e), "catch") => e.to_string(),
+            (Err(_), own) => return Err(UdfError::User(own.into())),
+        });
     }
+    Ok(Some(results.join("|")))
 }

@@ -80,7 +80,7 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 * *GIVEN* a `run`, cleanup, or context-taking single-call hook that returns a user error (`rc = 1`) with non-empty text, for example after it handled a failed `ctx.connection(name)` and wrote its own message
 * *WHEN* the runtime closes the session with that error
 * *THEN* the close message MUST be `F-UDF-CL-RUST-9001: UDF error: <text>` with nothing appended
-* *AND* an error the context recorded from a failed context call MUST be appended as `: <recorded error>` only when the hook ended without text of its own (a panic or an empty error), so a UDF that unwraps a failed lookup still reports the database's reason
+* *AND* an error the context recorded from a failed context call during the same hook call (for a scalar `run`, the same row) MUST be appended as `: <recorded error>` only when the hook ended without text of its own (a panic or an empty error), so a UDF that unwraps a failed lookup still reports the database's reason
 
 ### Scenario: Connect-back is available identically in scalar and set dispatch
 

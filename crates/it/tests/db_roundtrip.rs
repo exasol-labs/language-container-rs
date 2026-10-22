@@ -1313,12 +1313,12 @@ async fn connection_lookup_failures_surface_the_database_reason(
     slc: &it::SlcRef,
 ) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SCALAR SCRIPT connection_lookup(name VARCHAR(100), on_error VARCHAR(100)) \
+        "CREATE OR REPLACE RUST SCALAR SCRIPT connection_lookup(conn_names VARCHAR(200), on_error VARCHAR(100)) \
          RETURNS VARCHAR(2000) AS\n%udf_object {udf_object};\n/"
     ))
     .await?;
-    let lookup = |name: &str, on_error: &str| {
-        format!("SELECT it_rust.connection_lookup('{name}', '{on_error}')")
+    let lookup = |names: &str, on_error: &str| {
+        format!("SELECT it_rust.connection_lookup('{names}', '{on_error}')")
     };
     let import = |name: &str| {
         format!(
@@ -1338,16 +1338,27 @@ async fn connection_lookup_failures_surface_the_database_reason(
     if caught.as_deref() != Some(MISSING) {
         bail!("a caught lookup error returned {caught:?}, expected {MISSING:?}");
     }
-    let both = query_single_string(
+    for (names, expected) in [
+        (
+            "IT_NO_SUCH_CONN,IT_NO_SUCH_CONN_2",
+            format!("{MISSING}|CONNECTION IT_NO_SUCH_CONN_2: refused without a reason"),
+        ),
+        ("IT_NO_SUCH_CONN,CB_SELF", format!("{MISSING}|{cb_addr}")),
+    ] {
+        let got = query_single_string(conn, &lookup(names, "catch")).await?;
+        if got.as_deref() != Some(expected.as_str()) {
+            bail!("connection_lookup({names}) returned {got:?}, expected {expected:?}");
+        }
+    }
+    let stale = expect_udf_error(
         conn,
-        "SELECT GROUP_CONCAT(r ORDER BY n SEPARATOR '|') FROM (SELECT n, \
-         it_rust.connection_lookup(n, 'catch') AS r \
-         FROM VALUES ('IT_NO_SUCH_CONN'), ('IT_NO_SUCH_CONN_2') AS t(n))",
+        "SELECT it_rust.connection_lookup(n, e) FROM VALUES \
+         ('IT_NO_SUCH_CONN', 'catch'), (NULL, 'panic') AS t(n, e)",
+        PANICKED,
     )
     .await?;
-    let expected = format!("{MISSING}|CONNECTION IT_NO_SUCH_CONN_2: refused without a reason");
-    if both.as_deref() != Some(expected.as_str()) {
-        bail!("a second refused lookup returned {both:?}, expected {expected:?}");
+    if stale.contains(MISSING) {
+        bail!("an earlier row's caught lookup error leaked into {stale:?}");
     }
     expect_udf_error(conn, &lookup("IT_NO_SUCH_CONN", "propagate"), MISSING).await?;
     expect_udf_error(
@@ -1405,7 +1416,8 @@ async fn connection_lookup_failures_surface_the_database_reason(
 
 /// The statement fails with `text` directly after the UDF error prefix, and
 /// nothing names connect-back or a hook return code `text` does not carry.
-async fn expect_udf_error(conn: &mut Connection, sql: &str, text: &str) -> Result<()> {
+/// Returns the full message.
+async fn expect_udf_error(conn: &mut Connection, sql: &str, text: &str) -> Result<String> {
     let msg = match conn.query(sql).await {
         Ok(_) => bail!("{sql} succeeded; expected {text:?}"),
         Err(e) => e.to_string(),
@@ -1417,7 +1429,7 @@ async fn expect_udf_error(conn: &mut Connection, sql: &str, text: &str) -> Resul
     {
         bail!("{sql} failed with {msg:?}, expected it to carry {expected:?}");
     }
-    Ok(())
+    Ok(msg)
 }
 
 /// Scenario: single-call `SC_FN_DEFAULT_OUTPUT_COLUMNS` — verify the fixture

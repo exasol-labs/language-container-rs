@@ -105,8 +105,7 @@ fn run_group(
             crate::wire::conn_requester(transport, cell_ref),
         );
         bridge.configure_group_input(meta.input_iter(), meta.output_iter(), fetch);
-        run_err = drive_group_rows(&mut bridge, udf, meta.input_iter())
-            .map(|e| e.with_recorded_detail(bridge.take_last_error()));
+        run_err = drive_group_rows(&mut bridge, udf, meta.input_iter());
     }
 
     if let Some(e) = run_err {
@@ -206,7 +205,7 @@ fn drive_group_rows(
 ) -> Option<RuntimeError> {
     match input_iter {
         IterType::ExactlyOnce => loop {
-            if let Err(e) = udf.run(bridge) {
+            if let Err(e) = run_once(bridge, udf) {
                 return Some(e);
             }
             match bridge.advance_row() {
@@ -215,8 +214,16 @@ fn drive_group_rows(
                 Err(e) => return Some(RuntimeError::Udf(e.to_string())),
             }
         },
-        IterType::Multiple => udf.run(bridge).err(),
+        IterType::Multiple => run_once(bridge, udf).err(),
     }
+}
+
+/// The bridge outlives a scalar row, so an error recorded on an earlier row
+/// must not explain this row's failure.
+fn run_once(bridge: &mut HostContextBridge, udf: &LoadedUdf) -> Result<(), RuntimeError> {
+    bridge.take_last_error();
+    udf.run(bridge)
+        .map_err(|e| e.with_recorded_detail(bridge.take_last_error()))
 }
 
 /// Flush the group's residual output as one `MT_EMIT` before its `MT_DONE`,

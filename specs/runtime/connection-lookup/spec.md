@@ -1,6 +1,6 @@
 # Feature: connection-lookup
 
-`ctx.connection(name)` returns the credentials of a named database `CONNECTION` object as a `ConnectionObject`. The lookup is an `MT_IMPORT` request on the UDF's own control channel, not connect-back: it opens no SQL session and works without the runtime's `connect-back` feature. `HostContextBridge` and `SingleCallContext` serve it; `CleanupContext` refuses it (see `runtime/dispatch-cleanup-hook`).
+`ctx.connection(name)` returns the credentials of a named database `CONNECTION` object as a `ConnectionObject`. The lookup is an `MT_IMPORT` request on the UDF's own control channel, not connect-back: it opens no SQL session. `HostContextBridge` and `SingleCallContext` serve it; `CleanupContext` refuses it (see `runtime/dispatch-cleanup-hook`).
 
 ## Background
 
@@ -15,8 +15,6 @@ The database answers a lookup it refuses with an `MT_IMPORT` reply whose `except
 * *THEN* the host MUST send an `MT_IMPORT` request with `kind = PB_IMPORT_CONNECTION_INFORMATION` and `script_name = "CREDS_CONN"`
 * *AND* it MUST map the returned `connection_information_rep` (`kind`, `address`, `user`, `password`) into a `ConnectionObject` and return it to the UDF
 * *AND* it MUST NOT open any `exarrow-rs` session, because the lookup is a pure credential retrieval
-* *AND* it MUST behave identically whether or not the runtime is built with the `connect-back` feature
-
 ### Scenario: A refused CONNECTION lookup surfaces the database's reason
 
 * *GIVEN* a UDF that calls `ctx.connection(name)` from `run` or from a single-call hook
