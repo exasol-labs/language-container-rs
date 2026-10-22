@@ -12,7 +12,7 @@ UDF authors need a public credential struct. `exa-zmq-protocol::ConnInfo` has th
 
 ### Decision
 
-`exasol-udf-sdk::connect_back` defines the public `ConnectionObject { kind, address, user, password }`. `ConnInfo` stays internal, and the runtime bridge maps `ConnInfo` and `ConnectionObject` at the boundary.
+`exasol-udf-sdk::connection` defines the public `ConnectionObject { kind, address, user, password }`. `ConnInfo` stays internal, and the runtime bridge maps `ConnInfo` and `ConnectionObject` at the boundary.
 
 ### Options Considered
 

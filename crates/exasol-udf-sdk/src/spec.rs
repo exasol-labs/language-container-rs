@@ -15,7 +15,7 @@
 
 use serde::Deserialize;
 
-use crate::connect_back::ConnectionObject;
+use crate::connection::ConnectionObject;
 use crate::error::UdfError;
 
 /// One entry of the statement's `WITH` clause, mirroring the proto

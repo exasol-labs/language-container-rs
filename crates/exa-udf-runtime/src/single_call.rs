@@ -203,25 +203,12 @@ where
         output_iter,
     } = session;
 
-    // `transport`/`proto` feed the on-demand MT_IMPORT closure only when
-    // connect-back is enabled; without it the context's `connection()` /
-    // `connect_back()` inherit the trait's Unimplemented defaults.
-    #[cfg(not(feature = "connect-back"))]
-    let _ = (transport, proto);
-
-    #[cfg(feature = "connect-back")]
     let proto_cell = std::cell::RefCell::new(proto);
-
-    #[cfg(feature = "connect-back")]
-    let conn_requester: crate::rowset::ConnRequester =
-        crate::wire::conn_requester(transport, &proto_cell);
-
     let mut bridge = crate::rowset::SingleCallContext::new(
         handshake,
         input_iter,
         output_iter,
-        #[cfg(feature = "connect-back")]
-        conn_requester,
+        crate::wire::conn_requester(transport, &proto_cell),
     );
     // ABI contract: pass a pointer to a `&mut dyn UdfContext` (double
     // indirection), exactly as the run loop does.

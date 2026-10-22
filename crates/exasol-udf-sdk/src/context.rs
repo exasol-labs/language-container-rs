@@ -283,14 +283,16 @@ pub trait UdfContext {
     }
 
     /// Fetch raw credentials for a named Exasol CONNECTION object.
-    fn connection(&self, _name: &str) -> Result<crate::connect_back::ConnectionObject, UdfError> {
-        Err(UdfError::Unimplemented("connect-back not available".into()))
+    fn connection(&self, _name: &str) -> Result<crate::connection::ConnectionObject, UdfError> {
+        Err(UdfError::Unimplemented(
+            "CONNECTION lookup not available".into(),
+        ))
     }
 
     /// Open a live Exasol session using credentials from a `ConnectionObject`.
     fn connect_back(
         &mut self,
-        _conn: &crate::connect_back::ConnectionObject,
+        _conn: &crate::connection::ConnectionObject,
     ) -> Result<Box<dyn crate::connect_back::ExaConnection>, UdfError> {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }

@@ -54,8 +54,7 @@ The cleanup hook that ends a single-call session is not a single-call hook; `run
 
 * *GIVEN* a loaded UDF whose single-call hook returns a non-zero error code and writes its `UdfError` message into the result out-pointer
 * *WHEN* the single-call dispatcher invokes the hook via `call_noarg_hook` or `call_ctx_arg_hook`
-* *THEN* the helper MUST read the out-pointer text before freeing it and surface that text in the returned `RuntimeError::Udf`
-* *AND* when the out-pointer text is non-empty the surfaced message MUST be that hook-supplied text rather than the generic `single-call hook <name> returned error code <rc>` string
+* *THEN* the helper MUST read the out-pointer text before freeing it and surface it in the returned error under `runtime/dispatch-run-loop` "A hook's own error text is surfaced unchanged"
 * *AND* when the out-pointer is null or empty the helper MUST fall back to the generic `single-call hook <name> returned error code <rc>` message
 * *AND* the helper MUST NOT leak the out-pointer buffer on the error path
 

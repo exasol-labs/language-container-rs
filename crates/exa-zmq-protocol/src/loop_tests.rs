@@ -355,6 +355,38 @@ fn import_connection_request_passes_script_name() {
     assert_eq!(import.script_name, "MY_SCRIPT");
 }
 
+/// Scenario: A refused CONNECTION lookup surfaces the database's reason
+#[test]
+fn import_reply_exception_message_is_a_refusal() {
+    use exa_proto::{ConnectionInformationRep, ExascriptImportRep};
+    let mut proto = Protocol::new();
+    run_handshake(&mut proto);
+    let reply = |exception_message: Option<&str>, with_credentials: bool| {
+        let mut resp = response(MessageType::MtImport);
+        resp.import = Some(ExascriptImportRep {
+            source_code: None,
+            exception_message: exception_message.map(Into::into),
+            connection_information: with_credentials.then(|| ConnectionInformationRep {
+                kind: "password".into(),
+                address: "a".into(),
+                user: "u".into(),
+                password: "p".into(),
+            }),
+        });
+        resp
+    };
+
+    for with_credentials in [false, true] {
+        let reason = "connection NOPE does not exist";
+        match proto.step(reply(Some(reason), with_credentials)).unwrap() {
+            (HostEvent::ImportRefused(msg), None) => assert_eq!(msg, reason),
+            other => panic!("expected ImportRefused, got {other:?}"),
+        }
+    }
+    let err = proto.step(reply(None, false)).unwrap_err();
+    assert!(err.to_string().contains("missing connection_information"));
+}
+
 /// Each single-call function id names its own payload field on
 /// `exascript_single_call_rep`, so the state machine must carry all three
 /// through untouched and leave an unpopulated one as `None`: the dispatcher

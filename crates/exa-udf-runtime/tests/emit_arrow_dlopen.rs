@@ -56,9 +56,8 @@ fn emit_arrow_batch_so_round_trips_via_c_data_interface() {
             &output_meta,
             Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
             HandshakeMeta::default(),
-            #[cfg(feature = "connect-back")]
             Box::new(|_name| {
-                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                Err(exasol_udf_sdk::error::UdfError::Connection(
                     "no credential fetcher in test".into(),
                 ))
             }),

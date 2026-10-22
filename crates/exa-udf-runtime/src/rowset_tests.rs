@@ -75,9 +75,8 @@ fn host_bridge_debug_level_returns_valid_level() {
         &meta,
         Box::new(|_| Ok(())),
         HandshakeMeta::default(),
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher".into(),
             ))
         }),
@@ -104,22 +103,15 @@ fn host_bridge_debug_level_returns_valid_level() {
 
 #[test]
 fn single_call_context_debug_level_returns_valid_level() {
-    #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         HandshakeMeta::default(),
         IterType::default(),
         IterType::default(),
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher".into(),
             ))
         }),
-    );
-    #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(
-        HandshakeMeta::default(),
-        IterType::default(),
-        IterType::default(),
     );
 
     let level = ctx.debug_level();
@@ -144,8 +136,6 @@ fn col(name: &str, typ: ExaType) -> ColumnInfo {
     }
 }
 
-/// Construct a bridge for the tests, supplying the connect-back arg only
-/// when the feature is enabled so the same call sites compile either way.
 fn make_bridge<'a>(
     input: &'a mut InputRowSet,
     emit: &'a mut EmitBuffer,
@@ -158,9 +148,8 @@ fn make_bridge<'a>(
         cols, // output_meta: reuse the same schema for test simplicity
         Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),
@@ -348,9 +337,8 @@ fn emitted_rows_carry_the_input_row_number() {
             &out_meta,
             Box::new(|_| Ok(())),
             HandshakeMeta::default(),
-            #[cfg(feature = "connect-back")]
             Box::new(|_name| {
-                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                Err(exasol_udf_sdk::error::UdfError::Connection(
                     "no credential fetcher".into(),
                 ))
             }),
@@ -847,9 +835,8 @@ fn bridge_exposes_input_and_output_column_metadata() {
         &output,
         Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),
@@ -895,9 +882,8 @@ fn bridge_emit_row_path_flushes_once_mid_run_and_buffers_residual() {
                 Ok(())
             }),
             HandshakeMeta::default(),
-            #[cfg(feature = "connect-back")]
             Box::new(|_name| {
-                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                Err(exasol_udf_sdk::error::UdfError::Connection(
                     "no credential fetcher in test".into(),
                 ))
             }),
@@ -1147,9 +1133,8 @@ fn bridge_returns_memory_limit() {
             memory_limit: limit_bytes,
             ..Default::default()
         },
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),
@@ -1190,9 +1175,8 @@ fn bridge_returns_handshake_metadata() {
         &meta,
         Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         handshake,
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),
@@ -1237,19 +1221,16 @@ fn single_call_context_returns_handshake_metadata() {
         scope_user: None,
     };
 
-    #[cfg(feature = "connect-back")]
     let ctx = SingleCallContext::new(
         handshake,
         IterType::default(),
         IterType::default(),
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),
     );
-    #[cfg(not(feature = "connect-back"))]
-    let ctx = SingleCallContext::new(handshake, IterType::default(), IterType::default());
 
     // Numeric accessors return the exact UdfMeta values, no rescaling.
     assert_eq!(ctx.session_id(), 4242);
@@ -1663,7 +1644,6 @@ fn single_call_context_cluster_ip_delegates_to_first_nonloopback_ipv4() {
 
 /// `connection()`'s error branch records the failure via `record_error` so it
 /// surfaces through `take_last_error`.
-#[cfg(feature = "connect-back")]
 #[test]
 fn bridge_connection_error_is_recorded_via_record_error() {
     let meta = vec![col("a", ExaType::Int64)];
@@ -1681,7 +1661,7 @@ fn bridge_connection_error_is_recorded_via_record_error() {
         Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
         Box::new(|name: &str| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
+            Err(exasol_udf_sdk::error::UdfError::Connection(format!(
                 "no such connection: {name}"
             )))
         }),
@@ -1689,8 +1669,8 @@ fn bridge_connection_error_is_recorded_via_record_error() {
 
     let result = bridge.connection("MISSING_CONN");
     assert!(
-        matches!(result, Err(UdfError::ConnectBack(_))),
-        "expected a ConnectBack error, got {result:?}"
+        matches!(result, Err(UdfError::Connection(_))),
+        "expected a Connection error, got {result:?}"
     );
 
     let recorded = bridge.take_last_error();
@@ -1702,7 +1682,6 @@ fn bridge_connection_error_is_recorded_via_record_error() {
     );
 }
 
-#[cfg(feature = "connect-back")]
 #[test]
 fn single_call_context_connection_error_is_recorded_via_record_error() {
     let mut ctx = SingleCallContext::new(
@@ -1710,7 +1689,7 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
         IterType::default(),
         IterType::default(),
         Box::new(|name: &str| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(format!(
+            Err(exasol_udf_sdk::error::UdfError::Connection(format!(
                 "no such connection: {name}"
             )))
         }),
@@ -1718,8 +1697,8 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
 
     let result = ctx.connection("MISSING_CONN");
     assert!(
-        matches!(result, Err(UdfError::ConnectBack(_))),
-        "expected a ConnectBack error, got {result:?}"
+        matches!(result, Err(UdfError::Connection(_))),
+        "expected a Connection error, got {result:?}"
     );
 
     let recorded = ctx.take_last_error();
@@ -1731,8 +1710,6 @@ fn single_call_context_connection_error_is_recorded_via_record_error() {
     );
 }
 
-/// Construct a `SingleCallContext`, supplying the connect-back arg only when
-/// the feature is enabled so call sites compile either way.
 fn single_call_ctx() -> SingleCallContext<'static> {
     single_call_ctx_with(
         HandshakeMeta::default(),
@@ -1746,23 +1723,16 @@ fn single_call_ctx_with(
     input_iter: IterType,
     output_iter: IterType,
 ) -> SingleCallContext<'static> {
-    #[cfg(feature = "connect-back")]
-    {
-        SingleCallContext::new(
-            handshake,
-            input_iter,
-            output_iter,
-            Box::new(|_name: &str| {
-                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                    "no credential fetcher in test".into(),
-                ))
-            }),
-        )
-    }
-    #[cfg(not(feature = "connect-back"))]
-    {
-        SingleCallContext::new(handshake, input_iter, output_iter)
-    }
+    SingleCallContext::new(
+        handshake,
+        input_iter,
+        output_iter,
+        Box::new(|_name: &str| {
+            Err(exasol_udf_sdk::error::UdfError::Connection(
+                "no credential fetcher in test".into(),
+            ))
+        }),
+    )
 }
 
 /// Single-call mode presents no input columns: `input_column_count` always reports
@@ -1811,13 +1781,13 @@ fn cleanup_context_refuses_connection_lookup() {
     let mut ctx = CleanupContext::new(handshake, IterType::Multiple, IterType::Multiple);
 
     let refusal = match ctx.connection("CB_SELF") {
-        Err(UdfError::ConnectBack(msg)) => msg,
-        other => panic!("expected a ConnectBack refusal, got {other:?}"),
+        Err(UdfError::Connection(msg)) => msg,
+        other => panic!("expected a Connection refusal, got {other:?}"),
     };
     assert!(refusal.contains("unavailable during cleanup") && refusal.contains("run()"));
     assert_eq!(
         ctx.take_last_error(),
-        Some(UdfError::ConnectBack(refusal).to_string())
+        Some(UdfError::Connection(refusal).to_string())
     );
     assert_eq!(ctx.script_name(), "CLEANUP_PROBE");
     assert!(ctx.next().is_err() && ctx.get(0).is_err() && ctx.emit(vec![]).is_err());
@@ -3071,9 +3041,8 @@ mod arrow_tests {
                 Ok(())
             }),
             HandshakeMeta::default(),
-            #[cfg(feature = "connect-back")]
             Box::new(|_name| {
-                Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+                Err(exasol_udf_sdk::error::UdfError::Connection(
                     "no credential fetcher in test".into(),
                 ))
             }),

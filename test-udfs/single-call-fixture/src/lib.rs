@@ -61,13 +61,20 @@ unsafe extern "C" fn virtual_schema_adapter_call(
             return 0;
         }
 
-        // ctx.connection() records its own error on the context, independent of
-        // this hook's failure below, so the runtime combines both into one
-        // close message.
-        if arg == "CONNECTION_PROBE" {
-            let _ = ctx.connection("PROBE_CONN");
-            write_result("VS_ADAPTER_ERROR", result);
-            return 1;
+        // Each probe looks up PROBE_CONN and reacts to a failed lookup differently.
+        if let Some(probe) = arg.strip_prefix("CONNECTION_") {
+            let (text, rc) = match (ctx.connection("PROBE_CONN"), probe) {
+                (Ok(c), _) => (c.address, 0),
+                (Err(_), "OWN_ERROR") => ("VS_ADAPTER_ERROR".to_string(), 1),
+                (Err(e), "ECHO") => (e.to_string(), 1),
+                (Err(_), "PANIC") => ("virtual_schema_adapter_call panicked".to_string(), 2),
+                (Err(_), _) => match ctx.connection("FALLBACK_CONN") {
+                    Ok(c) => (c.address, 0),
+                    Err(e) => (e.to_string(), 1),
+                },
+            };
+            write_result(&text, result);
+            return rc;
         }
 
         // Surface the live handshake metadata through the deliberate-error

@@ -141,8 +141,13 @@ impl Harness {
     /// SQL layer accepts logins. The boot log firing does not guarantee the SQL
     /// engine has finished recovery, so we retry for a generous window.
     pub async fn connect(&self) -> Result<Connection> {
+        self.connect_as("sys", "exasol").await
+    }
+
+    /// [`Harness::connect`] as another database user.
+    pub async fn connect_as(&self, user: &str, password: &str) -> Result<Connection> {
         let uri = format!(
-            "exasol://sys:exasol@{}:{}/?validateservercertificate=0",
+            "exasol://{user}:{password}@{}:{}/?validateservercertificate=0",
             self.host, self.db_port
         );
         let driver = Driver::new();

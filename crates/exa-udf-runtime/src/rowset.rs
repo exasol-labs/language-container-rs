@@ -1339,7 +1339,6 @@ pub type BatchFetcher<'a> =
 /// DB and returns the resulting `ConnInfo`. `Fn` (not `FnOnce`) because
 /// `connection()` borrows `&self` and may be called repeatedly for different
 /// named connections within a single UDF run.
-#[cfg(feature = "connect-back")]
 pub type ConnRequester<'a> =
     Box<dyn Fn(&str) -> Result<exa_zmq_protocol::ConnInfo, exasol_udf_sdk::error::UdfError> + 'a>;
 
@@ -1376,15 +1375,13 @@ pub struct HostContextBridge<'a> {
     /// threshold, keeping a single batch's output bounded. Invoked from `emit`
     /// and from `push_batch`, both after serialising + clearing the buffer.
     flusher: EmitFlusher<'a>,
-    /// Last error captured from a UDF context method. Surfaced through
-    /// `RuntimeError::Udf` so the full error appears in the SQL error. A `Cell`
-    /// because `connection()` records errors through a shared `&self` borrow.
+    /// Last error captured from a UDF context method. A `Cell` because
+    /// `connection()` records errors through a shared `&self` borrow.
     last_error: std::cell::Cell<Option<String>>,
     /// Handshake metadata (`exascript_info` identity/origin fields plus the
     /// memory limit) threaded in at construction so the bridge can override the
     /// SDK's defaulted `UdfContext` accessors with the live DB-supplied values.
     handshake: HandshakeMeta,
-    #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
 }
 
@@ -1445,7 +1442,7 @@ impl<'a> HostContextBridge<'a> {
         output_meta: &'a [ColumnInfo],
         flusher: EmitFlusher<'a>,
         handshake: HandshakeMeta,
-        #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
+        conn_requester: ConnRequester<'a>,
     ) -> Self {
         HostContextBridge {
             input,
@@ -1459,7 +1456,6 @@ impl<'a> HostContextBridge<'a> {
             flusher,
             last_error: std::cell::Cell::new(None),
             handshake,
-            #[cfg(feature = "connect-back")]
             conn_requester,
         }
     }
@@ -1535,50 +1531,18 @@ impl<'a> HostContextBridge<'a> {
 
     /// Record an error message captured from a UDF context method. Available on
     /// a shared borrow because `connection()` is a `&self` method.
-    #[cfg(feature = "connect-back")]
     fn record_error(&self, message: String) {
         self.last_error.set(Some(message));
-    }
-
-    /// Inject a credential fetcher so the bridge can be exercised without a live
-    /// database. The supplied closure stands in for the on-demand MT_IMPORT
-    /// exchange. Intended for tests.
-    #[cfg(feature = "connect-back")]
-    #[doc(hidden)]
-    pub fn with_connection(
-        input: &'a mut InputRowSet,
-        emit_buf: &'a mut EmitBuffer,
-        input_cols: &'a [ColumnInfo],
-        output_meta: &'a [ColumnInfo],
-        flusher: EmitFlusher<'a>,
-        handshake: HandshakeMeta,
-        conn_requester: ConnRequester<'a>,
-    ) -> Self {
-        HostContextBridge {
-            input,
-            emit_buf,
-            input_cols,
-            output_meta,
-            input_iter: IterType::Multiple,
-            output_iter: IterType::Multiple,
-            fetcher: Box::new(|| Ok(None)),
-            started: false,
-            flusher,
-            last_error: std::cell::Cell::new(None),
-            handshake,
-            conn_requester,
-        }
     }
 }
 
 /// Resolve a CONNECTION name to a [`ConnectionObject`] via the on-demand
 /// credential fetcher. Shared by both context bridges.
-#[cfg(feature = "connect-back")]
 fn request_connection(
     requester: &ConnRequester,
     name: &str,
-) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-    requester(name).map(|ci| exasol_udf_sdk::connect_back::ConnectionObject {
+) -> Result<exasol_udf_sdk::ConnectionObject, UdfError> {
+    requester(name).map(|ci| exasol_udf_sdk::ConnectionObject {
         kind: ci.kind,
         address: ci.address,
         user: ci.user,
@@ -1589,7 +1553,7 @@ fn request_connection(
 /// Open a self-connection back to the DB from a resolved [`ConnectionObject`].
 #[cfg(feature = "connect-back")]
 fn open_connect_back(
-    conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+    conn: &exasol_udf_sdk::ConnectionObject,
 ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
     let info = exa_zmq_protocol::ConnInfo {
         kind: conn.kind.clone(),
@@ -1665,11 +1629,7 @@ macro_rules! delegate_handshake_meta {
 /// CONNECTION lookup via `MT_IMPORT`; only for contexts that own the channel.
 macro_rules! delegate_connection_lookup {
     () => {
-        #[cfg(feature = "connect-back")]
-        fn connection(
-            &self,
-            name: &str,
-        ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
+        fn connection(&self, name: &str) -> Result<exasol_udf_sdk::ConnectionObject, UdfError> {
             let result = request_connection(&self.conn_requester, name);
             if let Err(ref e) = result {
                 self.record_error(e.to_string());
@@ -1694,7 +1654,7 @@ macro_rules! delegate_connect_back_session {
         #[cfg(feature = "connect-back")]
         fn connect_back(
             &mut self,
-            conn: &exasol_udf_sdk::connect_back::ConnectionObject,
+            conn: &exasol_udf_sdk::ConnectionObject,
         ) -> Result<Box<dyn exasol_udf_sdk::connect_back::ExaConnection>, UdfError> {
             let result = open_connect_back(conn);
             if let Err(ref e) = result {
@@ -1858,8 +1818,8 @@ impl UdfContext for HostContextBridge<'_> {
 /// (`connection`) and self-connections (`connect_back`) are meaningful, and
 /// those reuse the same on-demand MT_IMPORT machinery as the data-UDF bridge.
 pub struct SingleCallContext<'a> {
-    /// Last error captured from a context method, surfaced through
-    /// `RuntimeError::Udf`. A `Cell` because `connection()` borrows `&self`.
+    /// Last error captured from a context method; explains a hook failure that
+    /// carries no text of its own. A `Cell` because `connection()` borrows `&self`.
     last_error: std::cell::Cell<Option<String>>,
     /// Handshake metadata (`exascript_info` identity/origin fields plus the
     /// memory limit) threaded in at construction so the single-call context can
@@ -1871,12 +1831,7 @@ pub struct SingleCallContext<'a> {
     /// has no group/batch state to derive them from otherwise.
     input_iter: IterType,
     output_iter: IterType,
-    #[cfg(feature = "connect-back")]
     conn_requester: ConnRequester<'a>,
-    /// Anchors the `'a` lifetime when connect-back is disabled (the requester is
-    /// the only `'a` user otherwise).
-    #[cfg(not(feature = "connect-back"))]
-    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> SingleCallContext<'a> {
@@ -1884,17 +1839,14 @@ impl<'a> SingleCallContext<'a> {
         handshake: HandshakeMeta,
         input_iter: IterType,
         output_iter: IterType,
-        #[cfg(feature = "connect-back")] conn_requester: ConnRequester<'a>,
+        conn_requester: ConnRequester<'a>,
     ) -> Self {
         SingleCallContext {
             last_error: std::cell::Cell::new(None),
             handshake,
             input_iter,
             output_iter,
-            #[cfg(feature = "connect-back")]
             conn_requester,
-            #[cfg(not(feature = "connect-back"))]
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -1903,7 +1855,6 @@ impl<'a> SingleCallContext<'a> {
         self.last_error.take()
     }
 
-    #[cfg(feature = "connect-back")]
     fn record_error(&self, message: String) {
         self.last_error.set(Some(message));
     }
@@ -1974,11 +1925,8 @@ impl UdfContext for CleanupContext {
     }
     delegate_iter_types!();
 
-    fn connection(
-        &self,
-        name: &str,
-    ) -> Result<exasol_udf_sdk::connect_back::ConnectionObject, UdfError> {
-        let refusal = UdfError::ConnectBack(format!(
+    fn connection(&self, name: &str) -> Result<exasol_udf_sdk::ConnectionObject, UdfError> {
+        let refusal = UdfError::Connection(format!(
             "CONNECTION lookups are unavailable during cleanup: resolve \"{name}\" in run() \
              and keep it for cleanup"
         ));

@@ -34,3 +34,35 @@ pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<Option<Decimal>, 
         scale: 0,
     }))
 }
+
+/// Looks up the comma-separated CONNECTION names of the first argument in
+/// order and returns the results joined by `|`. On a failed lookup the second
+/// argument picks the reaction: `propagate` returns the lookup error, `catch`
+/// records its text, `unwrap` panics, anything else becomes the UDF's own error
+/// text. `panic` panics before any lookup.
+#[exasol_udf]
+pub fn connection_lookup(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> {
+    let mut args = (0..2).map(|i| match ctx.get(i)? {
+        Value::String(s) => Ok(s.clone()),
+        Value::Null => Ok(String::new()),
+        other => Err(UdfError::Type(format!("expected VARCHAR, got {other:?}"))),
+    });
+    let (names, on_error) = (args.next().unwrap()?, args.next().unwrap()?);
+    if on_error == "panic" {
+        panic!("connection_lookup panicked without a lookup");
+    }
+    let mut results = Vec::new();
+    for name in names.split(',') {
+        let looked_up = match on_error.as_str() {
+            "unwrap" => Ok(ctx.connection(name).unwrap()),
+            _ => ctx.connection(name),
+        };
+        results.push(match (looked_up, on_error.as_str()) {
+            (Ok(c), _) => c.address,
+            (Err(e), "propagate") => return Err(e),
+            (Err(e), "catch") => e.to_string(),
+            (Err(_), own) => return Err(UdfError::User(own.into())),
+        });
+    }
+    Ok(Some(results.join("|")))
+}

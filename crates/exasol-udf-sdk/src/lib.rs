@@ -1,5 +1,6 @@
 pub mod abi;
 pub mod connect_back;
+pub mod connection;
 pub mod context;
 pub mod error;
 #[cfg(any(feature = "import", feature = "export"))]
@@ -8,7 +9,8 @@ pub mod spec;
 pub mod test_support;
 pub mod value;
 
-pub use connect_back::{ConnectionObject, ExaConnection};
+pub use connect_back::ExaConnection;
+pub use connection::ConnectionObject;
 pub use context::{InputType, OutputType, UdfContext, UdfRun};
 pub use error::UdfError;
 pub use value::{ColumnInfo, ExaType, IntoValue, Value};

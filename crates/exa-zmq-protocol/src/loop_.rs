@@ -118,20 +118,24 @@ impl Protocol {
                 self.phase_name(),
             )),
 
-            // MT_IMPORT carries connection credentials.
+            // A refused lookup carries the reason in `exception_message` and no
+            // credentials; the session stays open.
             (MessageType::MtImport, _) => {
                 let import = resp.import.ok_or_else(|| {
                     ProtocolError::Protocol("MT_IMPORT missing import field".into())
                 })?;
-                let conn_pb = import.connection_information.ok_or_else(|| {
-                    ProtocolError::Protocol(
-                        "MT_IMPORT response missing connection_information".into(),
-                    )
-                })?;
-                Ok((
-                    HostEvent::ConnInfo(crate::meta::ConnInfo::from_pb(conn_pb)),
-                    None,
-                ))
+                let event = match (import.exception_message, import.connection_information) {
+                    (Some(reason), _) => HostEvent::ImportRefused(reason),
+                    (None, Some(conn_pb)) => {
+                        HostEvent::ConnInfo(crate::meta::ConnInfo::from_pb(conn_pb))
+                    }
+                    (None, None) => {
+                        return Err(ProtocolError::Protocol(
+                            "MT_IMPORT response missing connection_information".into(),
+                        ));
+                    }
+                };
+                Ok((event, None))
             }
 
             (MessageType::MtCleanup, _) => {

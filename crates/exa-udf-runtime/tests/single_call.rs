@@ -1420,10 +1420,8 @@ fn vs_adapter_hook_undefined_when_not_registered() {
     assert!(result.is_ok(), "runtime returned error: {:?}", result.err());
 }
 
-/// `wire::conn_requester`'s Close arm: when the DB answers a mid-call
-/// `MT_IMPORT` with `MT_CLOSE`, the connect-back error must carry the DB's own
-/// exception message rather than the generic "not ConnInfo" text.
-#[cfg(feature = "connect-back")]
+/// When the DB answers a mid-call `MT_IMPORT` with `MT_CLOSE`, the lookup error
+/// carries the DB's own exception message rather than the generic "not ConnInfo" text.
 #[test]
 fn adapter_connection_probe_close_preserves_db_exception_message() {
     let so = fixture_cdylib_path("single_call_fixture");
@@ -1445,7 +1443,7 @@ fn adapter_connection_probe_close_preserves_db_exception_message() {
         &call_response(
             conn_id,
             SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
-            Some("CONNECTION_PROBE"),
+            Some("CONNECTION_ECHO"),
         ),
     );
 
@@ -1464,91 +1462,128 @@ fn adapter_connection_probe_close_preserves_db_exception_message() {
         .expect("close")
         .exception_message
         .expect("exception_message");
-    assert!(
-        close_msg.contains("import denied by db"),
-        "the DB's own MT_CLOSE message must survive into the connect-back \
-         error, not be replaced by the generic not-ConnInfo text: {close_msg:?}"
+    assert_eq!(
+        close_msg,
+        "F-UDF-CL-RUST-9001: UDF error: CONNECTION PROBE_CONN: import denied by db"
     );
-
-    let result = client.join().expect("client thread panicked");
-    let err = result.expect_err("the closed connect-back must surface as Err");
-    assert!(
-        err.to_string().contains("import denied by db"),
-        "runtime error carries the DB's close message: {err}"
-    );
+    client
+        .join()
+        .expect("client thread panicked")
+        .expect_err("the closed lookup must surface as Err");
 }
 
-#[cfg(feature = "connect-back")]
+/// Scenario: A refused CONNECTION lookup surfaces the database's reason
+/// Scenario: A UDF recovers from a refused CONNECTION lookup
+/// Scenario: A hook's own error text is surfaced unchanged
 #[test]
-fn adapter_connection_probe_combines_hook_and_recorded_errors() {
-    // invoke_ctx_hook's Some(detail) sub-arm: when the hook fails *and*
-    // it called ctx.connection(...), the connect-back error recorded on the
-    // context is folded into the surfaced message alongside the hook's own.
-    let so = fixture_cdylib_path("single_call_fixture");
-    let conn_id = 113u64;
-    let source = format!("%udf_object {}", so.display());
-    let endpoint = endpoint_for("connectionprobe");
-
-    let ctx = zmq::Context::new();
-    let server = ctx.socket(zmq::REP).unwrap();
-    server.bind(&endpoint).unwrap();
-
-    let client = spawn_runtime(endpoint.clone());
-    handshake(&server, conn_id, &source);
-
-    let req = recv_req(&server);
-    assert_eq!(req.r#type, MessageType::MtRun as i32);
-    send_resp(
-        &server,
-        &call_response(
-            conn_id,
-            SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
-            Some("CONNECTION_PROBE"),
+fn adapter_connection_lookup_refusal_reaches_the_hook() {
+    const MISSING: &str = "connection PROBE_CONN does not exist";
+    let refused = |conn_id| {
+        let mut resp = response(MessageType::MtImport, conn_id);
+        resp.import = Some(exa_proto::ExascriptImportRep {
+            source_code: None,
+            exception_message: Some(MISSING.into()),
+            connection_information: None,
+        });
+        resp
+    };
+    let granted = |conn_id| {
+        let mut resp = response(MessageType::MtImport, conn_id);
+        resp.import = Some(exa_proto::ExascriptImportRep {
+            source_code: None,
+            exception_message: None,
+            connection_information: Some(exa_proto::ConnectionInformationRep {
+                kind: "password".into(),
+                address: "fallback:8563".into(),
+                user: "u".into(),
+                password: "p".into(),
+            }),
+        });
+        resp
+    };
+    let refused_silently = |conn_id| {
+        let mut resp = response(MessageType::MtImport, conn_id);
+        resp.import = Some(exa_proto::ExascriptImportRep {
+            source_code: None,
+            exception_message: None,
+            connection_information: Some(exa_proto::ConnectionInformationRep::default()),
+        });
+        resp
+    };
+    type Reply = fn(u64) -> ExascriptResponse;
+    let cases: [(&str, &[Reply], Result<&str, String>); 5] = [
+        ("CONNECTION_ECHO", &[refused], Err(MISSING.to_string())),
+        (
+            "CONNECTION_ECHO",
+            &[refused_silently],
+            Err("CONNECTION PROBE_CONN: refused without a reason".into()),
         ),
-    );
+        (
+            "CONNECTION_OWN_ERROR",
+            &[refused],
+            Err("VS_ADAPTER_ERROR".into()),
+        ),
+        (
+            "CONNECTION_PANIC",
+            &[refused],
+            Err(format!("virtual_schema_adapter_call panicked: {MISSING}")),
+        ),
+        (
+            "CONNECTION_FALLBACK",
+            &[refused, granted],
+            Ok("fallback:8563"),
+        ),
+    ];
 
-    // The hook blocks mid-call on ctx.connection("PROBE_CONN"), which sends its
-    // own MT_IMPORT. Answer with anything that isn't ConnInfo (here MT_CLEANUP)
-    // so the connect-back fails and records an error on the context.
-    let req = recv_req(&server);
-    assert_eq!(
-        req.r#type,
-        MessageType::MtImport as i32,
-        "the connection probe must issue its own MT_IMPORT mid-call"
-    );
-    send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+    for (conn_id, (arg, replies, expected)) in (115u64..).zip(cases) {
+        let so = fixture_cdylib_path("single_call_fixture");
+        let source = format!("%udf_object {}", so.display());
+        let endpoint = endpoint_for(&format!("connectionrefused{conn_id}"));
+        let ctx = zmq::Context::new();
+        let server = ctx.socket(zmq::REP).unwrap();
+        server.bind(&endpoint).unwrap();
+        let client = spawn_runtime(endpoint);
+        handshake(&server, conn_id, &source);
 
-    let req = recv_req(&server);
-    assert_eq!(
-        req.r#type,
-        MessageType::MtClose as i32,
-        "the combined hook+connect-back error must close the wire with MT_CLOSE"
-    );
-    let close_msg = req
-        .close
-        .expect("close")
-        .exception_message
-        .expect("exception_message");
-    assert!(
-        close_msg.contains("VS_ADAPTER_ERROR"),
-        "close carries the hook's own error text: {close_msg:?}"
-    );
-    assert!(
-        close_msg.contains("Connect-back error"),
-        "close carries the recorded connect-back detail: {close_msg:?}"
-    );
+        let req = recv_req(&server);
+        assert_eq!(req.r#type, MessageType::MtRun as i32);
+        send_resp(
+            &server,
+            &call_response(
+                conn_id,
+                SingleCallFunctionId::ScFnVirtualSchemaAdapterCall,
+                Some(arg),
+            ),
+        );
+        for reply in replies {
+            let req = recv_req(&server);
+            assert_eq!(req.r#type, MessageType::MtImport as i32, "{arg}");
+            send_resp(&server, &reply(conn_id));
+        }
 
-    let result = client.join().expect("client thread panicked");
-    let err = result.expect_err("the combined error must surface as Err");
-    let err_msg = err.to_string();
-    assert!(
-        err_msg.contains("VS_ADAPTER_ERROR") && err_msg.contains("Connect-back error"),
-        "runtime error combines both the hook's and the recorded connect-back error: {err_msg:?}"
-    );
-    assert!(
-        err_msg.starts_with("UDF error: VS_ADAPTER_ERROR: Connect-back error"),
-        "the recorded detail follows the hook text under a single UDF error prefix: {err_msg:?}"
-    );
+        let req = recv_req(&server);
+        match expected {
+            Ok(address) => {
+                assert_eq!(req.r#type, MessageType::MtReturn as i32, "{arg}");
+                assert_eq!(req.call_result.expect("call_result").result, address);
+                send_resp(&server, &response(MessageType::MtCleanup, conn_id));
+                let req = recv_req(&server);
+                assert_eq!(req.r#type, MessageType::MtFinished as i32, "{arg}");
+                send_resp(&server, &response(MessageType::MtFinished, conn_id));
+                client.join().unwrap().expect(arg);
+            }
+            Err(text) => {
+                assert_eq!(req.r#type, MessageType::MtClose as i32, "{arg}");
+                let close_msg = req.close.and_then(|c| c.exception_message);
+                assert_eq!(
+                    close_msg.as_deref(),
+                    Some(format!("F-UDF-CL-RUST-9001: UDF error: {text}").as_str()),
+                    "{arg}"
+                );
+                client.join().unwrap().expect_err(arg);
+            }
+        }
+    }
 }
 
 #[test]

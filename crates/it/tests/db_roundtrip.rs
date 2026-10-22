@@ -312,6 +312,20 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
     }
     eprintln!("[it] scenario connect_back_scalar ok");
 
+    if let Err(e) = connection_lookup_failures_surface_the_database_reason(
+        &mut conn,
+        &cb_scalar_path,
+        &harness,
+        &slc,
+    )
+    .await
+    {
+        let logs = harness.dump_udf_logs().await;
+        eprintln!("[it] UDF logs after connection_lookup failure:\n{logs}");
+        return Err(e);
+    }
+    eprintln!("[it] scenario connection_lookup_failures_surface_the_database_reason ok");
+
     if let Err(e) = connect_back_writeback_same_schema(&mut conn, &cb_crunch_path, &harness).await {
         let logs = harness.dump_udf_logs().await;
         eprintln!("[it] UDF logs after connect_back_writeback failure:\n{logs}");
@@ -1283,6 +1297,139 @@ async fn connect_back_scalar_queries_and_returns(
         bail!("connect_back_scalar returned {got:?}, expected 42");
     }
     Ok(())
+}
+
+/// Scenario: A refused CONNECTION lookup surfaces the database's reason
+/// Scenario: A UDF recovers from a refused CONNECTION lookup
+/// Scenario: A hook's own error text is surfaced unchanged
+///
+/// Runs on the run path (`connection_lookup`) and the single-call path
+/// (`import_spec_gen` with a `LOOKUP` parameter). The missing-grant cases run as a
+/// user holding no `ACCESS` on `CB_SELF`, because the database checks the invoker.
+async fn connection_lookup_failures_surface_the_database_reason(
+    conn: &mut Connection,
+    udf_object: &str,
+    harness: &Harness,
+    slc: &it::SlcRef,
+) -> Result<()> {
+    conn.execute(&format!(
+        "CREATE OR REPLACE RUST SCALAR SCRIPT connection_lookup(conn_names VARCHAR(200), on_error VARCHAR(100)) \
+         RETURNS VARCHAR(2000) AS\n%udf_object {udf_object};\n/"
+    ))
+    .await?;
+    let lookup = |names: &str, on_error: &str| {
+        format!("SELECT it_rust.connection_lookup('{names}', '{on_error}')")
+    };
+    let import = |name: &str| {
+        format!(
+            "SELECT * FROM (IMPORT INTO (spec VARCHAR(2000), schema_info VARCHAR(2000)) \
+             FROM SCRIPT it_rust.import_spec_gen WITH LOOKUP='{name}')"
+        )
+    };
+    const MISSING: &str = "connection IT_NO_SUCH_CONN does not exist";
+    const PANICKED: &str = "UDF run returned error code 2";
+
+    let cb_addr = harness.connect_back_sql_address().await?;
+    let found = query_single_string(conn, &lookup("CB_SELF", "propagate")).await?;
+    if found.as_deref() != Some(cb_addr.as_str()) {
+        bail!("connection_lookup(CB_SELF) returned {found:?}, expected {cb_addr:?}");
+    }
+    let caught = query_single_string(conn, &lookup("IT_NO_SUCH_CONN", "catch")).await?;
+    if caught.as_deref() != Some(MISSING) {
+        bail!("a caught lookup error returned {caught:?}, expected {MISSING:?}");
+    }
+    for (names, expected) in [
+        (
+            "IT_NO_SUCH_CONN,IT_NO_SUCH_CONN_2",
+            format!("{MISSING}|CONNECTION IT_NO_SUCH_CONN_2: refused without a reason"),
+        ),
+        ("IT_NO_SUCH_CONN,CB_SELF", format!("{MISSING}|{cb_addr}")),
+    ] {
+        let got = query_single_string(conn, &lookup(names, "catch")).await?;
+        if got.as_deref() != Some(expected.as_str()) {
+            bail!("connection_lookup({names}) returned {got:?}, expected {expected:?}");
+        }
+    }
+    let stale = expect_udf_error(
+        conn,
+        "SELECT it_rust.connection_lookup(n, e) FROM VALUES \
+         ('IT_NO_SUCH_CONN', 'catch'), (NULL, 'panic') AS t(n, e)",
+        PANICKED,
+    )
+    .await?;
+    if stale.contains(MISSING) {
+        bail!("an earlier row's caught lookup error leaked into {stale:?}");
+    }
+    expect_udf_error(conn, &lookup("IT_NO_SUCH_CONN", "propagate"), MISSING).await?;
+    expect_udf_error(
+        conn,
+        &lookup("IT_NO_SUCH_CONN", "unwrap"),
+        &format!("{PANICKED}: {MISSING}"),
+    )
+    .await?;
+    expect_udf_error(conn, &import("IT_NO_SUCH_CONN"), MISSING).await?;
+    expect_udf_error(
+        conn,
+        &lookup("IT_NO_SUCH_CONN", "lookup gave up"),
+        "lookup gave up",
+    )
+    .await?;
+
+    conn.execute("DROP USER IF EXISTS IT_NO_ACCESS CASCADE")
+        .await?;
+    conn.execute(&format!(
+        "CREATE USER IT_NO_ACCESS IDENTIFIED BY \"{IT_USER_PASSWORD}\""
+    ))
+    .await?;
+    for grant in [
+        "GRANT CREATE SESSION, IMPORT TO IT_NO_ACCESS",
+        "GRANT EXECUTE ON SCRIPT it_rust.connection_lookup TO IT_NO_ACCESS",
+        "GRANT EXECUTE ON SCRIPT it_rust.import_spec_gen TO IT_NO_ACCESS",
+    ] {
+        conn.execute(grant).await?;
+    }
+    let mut no_access = harness.connect_as("IT_NO_ACCESS", IT_USER_PASSWORD).await?;
+    register_slc(&mut no_access, slc).await?;
+    let denied = "insufficient privileges for using connection CB_SELF in script";
+    expect_udf_error(
+        &mut no_access,
+        &lookup("CB_SELF", "propagate"),
+        &format!("{denied} CONNECTION_LOOKUP"),
+    )
+    .await?;
+    expect_udf_error(
+        &mut no_access,
+        &lookup("CB_SELF", "unwrap"),
+        &format!("{PANICKED}: {denied} CONNECTION_LOOKUP"),
+    )
+    .await?;
+    expect_udf_error(
+        &mut no_access,
+        &import("CB_SELF"),
+        &format!("{denied} IMPORT_SPEC_GEN"),
+    )
+    .await?;
+    drop(no_access);
+    conn.execute("DROP USER IT_NO_ACCESS CASCADE").await?;
+    Ok(())
+}
+
+/// The statement fails with `text` directly after the UDF error prefix, and
+/// nothing names connect-back or a hook return code `text` does not carry.
+/// Returns the full message.
+async fn expect_udf_error(conn: &mut Connection, sql: &str, text: &str) -> Result<String> {
+    let msg = match conn.query(sql).await {
+        Ok(_) => bail!("{sql} succeeded; expected {text:?}"),
+        Err(e) => e.to_string(),
+    };
+    let expected = format!("F-UDF-CL-RUST-9001: UDF error: {text}");
+    if !msg.contains(&expected)
+        || msg.contains("Connect-back")
+        || msg.matches("error code").count() != text.matches("error code").count()
+    {
+        bail!("{sql} failed with {msg:?}, expected it to carry {expected:?}");
+    }
+    Ok(msg)
 }
 
 /// Scenario: single-call `SC_FN_DEFAULT_OUTPUT_COLUMNS` — verify the fixture

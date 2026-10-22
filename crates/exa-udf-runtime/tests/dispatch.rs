@@ -650,9 +650,7 @@ fn annotated_schema_mismatch_closes_session() {
 
 #[test]
 fn run_error_out_pointer_text_reaches_close() {
-    // invoke_run's rc!=0 WITH out-pointer text: scalar_next_illegal calls
-    // ctx.next(), banned in scalar context. Pins the exact "error code {rc}:
-    // {text}" formatting reaching MT_CLOSE.
+    // scalar_next_illegal calls ctx.next(), banned in scalar context.
     let outcome = drive_session(
         "SCALAR_NEXT_ILLEGAL",
         &fixture_cdylib_path("scalar_next_illegal"),
@@ -664,14 +662,9 @@ fn run_error_out_pointer_text_reaches_close() {
         outcome.errored,
         "next() in scalar context must fail the session"
     );
-    let msg = outcome.close.expect("a run error must close the session");
-    assert!(
-        msg.starts_with("F-UDF-CL-RUST-9001"),
-        "close carries the UDF error close code, got: {msg}"
-    );
-    assert!(
-        msg.contains("UDF run returned error code 1: next() is not allowed in scalar context"),
-        "close carries invoke_run's exact 'code N: text' formatting sourced from the out-pointer, got: {msg}"
+    assert_eq!(
+        outcome.close.as_deref(),
+        Some("F-UDF-CL-RUST-9001: UDF error: next() is not allowed in scalar context")
     );
 }
 

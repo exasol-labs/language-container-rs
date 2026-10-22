@@ -52,6 +52,9 @@ pub fn export_worker(ctx: &mut dyn UdfContext) -> Result<Option<i64>, UdfError> 
 
 fn import_sql(ctx: &mut dyn UdfContext, json_spec: &str) -> Result<String, UdfError> {
     let spec = ImportSpec::from_json(json_spec)?;
+    if let Some(lookup) = spec.parameters.iter().find(|p| p.key == "LOOKUP") {
+        ctx.connection(&lookup.value)?;
+    }
     let columns: Vec<&str> = spec
         .subselect_column_specification
         .iter()
