@@ -376,6 +376,7 @@ pub enum UdfError {
     Type(String),          // wrong Value variant for a getter
     Unimplemented(String), // SDK feature not available in this context
     ConnectBack(String),   // connect-back failure
+    Connection(String),    // CONNECTION lookup refused, with the database's reason
 }
 ```
 

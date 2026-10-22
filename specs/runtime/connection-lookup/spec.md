@@ -4,7 +4,7 @@
 
 ## Background
 
-The database answers a lookup it refuses with an `MT_IMPORT` reply whose `exception_message` carries the reason and whose `connection_information` is absent. The session stays open. The reason tells a missing object (`connection <NAME> does not exist`) from a missing `ACCESS` grant (`insufficient privileges for using connection <NAME> in script <SCRIPT>`). The database checks the grant of the invoking user.
+The database answers a lookup it refuses with an `MT_IMPORT` reply whose `exception_message` carries the reason and whose `connection_information` is absent. The session stays open. The reason tells a missing object (`connection <NAME> does not exist`) from a missing `ACCESS` grant (`insufficient privileges for using connection <NAME> in script <SCRIPT>`). The database checks the grant of the invoking user. After one refusal, the database answers every later refused lookup in the same UDF instance with empty `connection_information` and no `exception_message`. A real `CONNECTION` always has a non-empty `kind`.
 
 ## Scenarios
 
@@ -23,6 +23,7 @@ The database answers a lookup it refuses with an `MT_IMPORT` reply whose `except
 * *WHEN* the database refuses the lookup, because the `CONNECTION` does not exist or the invoking user lacks `ACCESS` on it
 * *THEN* `connection` MUST return `UdfError::Connection` whose text is the reply's `exception_message` verbatim
 * *AND* `exception_message` MUST take precedence over any `connection_information` in the same reply
+* *AND* a reply whose `connection_information` has an empty `kind` MUST return `UdfError::Connection` with text `CONNECTION <name>: refused without a reason`, never empty credentials
 * *AND* a failure without a database reason (a transport error, an `MT_CLOSE`, an unexpected reply) MUST return `UdfError::Connection` with text `CONNECTION <name>: <reason>`, carrying an `MT_CLOSE` exception message when present
 * *AND* no lookup error text MUST mention connect-back or repeat a `Protocol error:` prefix
 

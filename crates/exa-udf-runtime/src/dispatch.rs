@@ -105,7 +105,8 @@ fn run_group(
             crate::wire::conn_requester(transport, cell_ref),
         );
         bridge.configure_group_input(meta.input_iter(), meta.output_iter(), fetch);
-        run_err = drive_group_rows(&mut bridge, udf, meta.input_iter());
+        run_err = drive_group_rows(&mut bridge, udf, meta.input_iter())
+            .map(|e| e.with_recorded_detail(bridge.take_last_error()));
     }
 
     if let Some(e) = run_err {

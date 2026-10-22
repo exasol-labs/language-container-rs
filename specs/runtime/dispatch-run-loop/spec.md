@@ -85,7 +85,6 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 ### Scenario: Connect-back is available identically in scalar and set dispatch
 
 * *GIVEN* a runtime driving either a scalar UDF (`iter_type = ExactlyOnce`) or a set UDF (`iter_type = Multiple`) with the connect-back feature enabled
-* *WHEN* the UDF calls `ctx.connection()` or `ctx.connect_back()` during its `run` method
-* *THEN* the runtime MUST handle the connect-back MT_IMPORT exchange and session open identically for both `iter_type` values — there MUST be no scalar-specific restriction, guard, or branch that prevents connect-back in the scalar path
-* *AND* the ZMQ socket MUST be idle during `run` in both cases (blocked awaiting UDF function return), making the MT_IMPORT exchange safe in both scalar and set dispatch
+* *WHEN* the UDF calls `ctx.connect_back()` during its `run` method
+* *THEN* the runtime MUST open the session identically for both `iter_type` values — there MUST be no scalar-specific restriction, guard, or branch that prevents connect-back in the scalar path
 * *AND* `std::process::exit(0)` in `main()` MUST flush the connect-back Tokio runtime in both scalar and set execution paths, preventing the 10 s join delay and the resulting Part:40 SIGABRT

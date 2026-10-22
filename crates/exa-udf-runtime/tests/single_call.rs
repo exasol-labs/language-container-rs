@@ -1501,9 +1501,23 @@ fn adapter_connection_lookup_refusal_reaches_the_hook() {
         });
         resp
     };
+    let refused_silently = |conn_id| {
+        let mut resp = response(MessageType::MtImport, conn_id);
+        resp.import = Some(exa_proto::ExascriptImportRep {
+            source_code: None,
+            exception_message: None,
+            connection_information: Some(exa_proto::ConnectionInformationRep::default()),
+        });
+        resp
+    };
     type Reply = fn(u64) -> ExascriptResponse;
-    let cases: [(&str, &[Reply], Result<&str, String>); 4] = [
+    let cases: [(&str, &[Reply], Result<&str, String>); 5] = [
         ("CONNECTION_ECHO", &[refused], Err(MISSING.to_string())),
+        (
+            "CONNECTION_ECHO",
+            &[refused_silently],
+            Err("CONNECTION PROBE_CONN: refused without a reason".into()),
+        ),
         (
             "CONNECTION_OWN_ERROR",
             &[refused],

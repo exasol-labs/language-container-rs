@@ -1327,6 +1327,7 @@ async fn connection_lookup_failures_surface_the_database_reason(
         )
     };
     const MISSING: &str = "connection IT_NO_SUCH_CONN does not exist";
+    const PANICKED: &str = "UDF run returned error code 2";
 
     let cb_addr = harness.connect_back_sql_address().await?;
     let found = query_single_string(conn, &lookup("CB_SELF", "propagate")).await?;
@@ -1337,7 +1338,24 @@ async fn connection_lookup_failures_surface_the_database_reason(
     if caught.as_deref() != Some(MISSING) {
         bail!("a caught lookup error returned {caught:?}, expected {MISSING:?}");
     }
+    let both = query_single_string(
+        conn,
+        "SELECT GROUP_CONCAT(r ORDER BY n SEPARATOR '|') FROM (SELECT n, \
+         it_rust.connection_lookup(n, 'catch') AS r \
+         FROM VALUES ('IT_NO_SUCH_CONN'), ('IT_NO_SUCH_CONN_2') AS t(n))",
+    )
+    .await?;
+    let expected = format!("{MISSING}|CONNECTION IT_NO_SUCH_CONN_2: refused without a reason");
+    if both.as_deref() != Some(expected.as_str()) {
+        bail!("a second refused lookup returned {both:?}, expected {expected:?}");
+    }
     expect_udf_error(conn, &lookup("IT_NO_SUCH_CONN", "propagate"), MISSING).await?;
+    expect_udf_error(
+        conn,
+        &lookup("IT_NO_SUCH_CONN", "unwrap"),
+        &format!("{PANICKED}: {MISSING}"),
+    )
+    .await?;
     expect_udf_error(conn, &import("IT_NO_SUCH_CONN"), MISSING).await?;
     expect_udf_error(
         conn,
@@ -1370,6 +1388,12 @@ async fn connection_lookup_failures_surface_the_database_reason(
     .await?;
     expect_udf_error(
         &mut no_access,
+        &lookup("CB_SELF", "unwrap"),
+        &format!("{PANICKED}: {denied} CONNECTION_LOOKUP"),
+    )
+    .await?;
+    expect_udf_error(
+        &mut no_access,
         &import("CB_SELF"),
         &format!("{denied} IMPORT_SPEC_GEN"),
     )
@@ -1380,14 +1404,17 @@ async fn connection_lookup_failures_surface_the_database_reason(
 }
 
 /// The statement fails with `text` directly after the UDF error prefix, and
-/// nothing names connect-back or a hook return code.
+/// nothing names connect-back or a hook return code `text` does not carry.
 async fn expect_udf_error(conn: &mut Connection, sql: &str, text: &str) -> Result<()> {
     let msg = match conn.query(sql).await {
         Ok(_) => bail!("{sql} succeeded; expected {text:?}"),
         Err(e) => e.to_string(),
     };
     let expected = format!("F-UDF-CL-RUST-9001: UDF error: {text}");
-    if !msg.contains(&expected) || msg.contains("Connect-back") || msg.contains("error code") {
+    if !msg.contains(&expected)
+        || msg.contains("Connect-back")
+        || msg.matches("error code").count() != text.matches("error code").count()
+    {
         bail!("{sql} failed with {msg:?}, expected it to carry {expected:?}");
     }
     Ok(())

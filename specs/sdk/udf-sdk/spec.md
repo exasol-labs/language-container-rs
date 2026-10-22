@@ -1,6 +1,6 @@
 # Feature: udf-sdk
 
-Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/`ExaType` model, and the row-based emit surface — that UDF crates depend on without linking the host runtime or exarrow-rs. The connect-back surface is specified separately in `sdk/connect-back`; the ABI vtable and `emit-arrow` feature boundary are specified in `sdk/udf-abi`; the single-call hook contract, spec-generation JSON payload, `rows_in_group`/iteration-axis accessors, the `import`/`export` typed-spec features, and the `test-support` doubles are specified in `sdk/udf-spec-hooks`.
+Defines the author-facing SDK — `UdfContext` and `UdfRun` traits, the `Value`/`ExaType` model, and the row-based emit surface — that UDF crates depend on without linking the host runtime or exarrow-rs. The connect-back surface is specified separately in `sdk/connect-back` and the CONNECTION lookup surface in `sdk/connection`; the ABI vtable and `emit-arrow` feature boundary are specified in `sdk/udf-abi`; the single-call hook contract, spec-generation JSON payload, `rows_in_group`/iteration-axis accessors, the `import`/`export` typed-spec features, and the `test-support` doubles are specified in `sdk/udf-spec-hooks`.
 
 ## Background
 

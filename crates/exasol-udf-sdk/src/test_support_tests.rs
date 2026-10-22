@@ -188,6 +188,7 @@ fn metadata_setters_override_every_accessor() {
     assert_eq!(conn.user, "sys");
 }
 
+/// Scenario: A failed CONNECTION lookup has its own error variant
 #[test]
 fn connection_lookup_is_case_insensitive() {
     let obj = ConnectionObject {

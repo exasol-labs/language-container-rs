@@ -1,33 +1,18 @@
 # Feature: connect-back
 
-Defines the connect-back surface of the author-facing SDK — the `ConnectionObject` credential struct, the `ExaConnection` trait, and the `UdfContext` connect-back methods. The types compile unconditionally, so the `UdfContext` vtable is feature-independent.
+Defines the connect-back surface of the author-facing SDK — the `ExaConnection` trait and the `UdfContext` connect-back methods. The `ConnectionObject` credentials it takes are defined in `sdk/connection`. The types compile unconditionally, so the `UdfContext` vtable is feature-independent.
 
 ## Background
 
-`ExaConnection` is **arrow-free**: returning `Vec<arrow::record_batch::RecordBatch>` across the `.so` boundary is unsafe, because a UDF `.so` and the host each link their own static `arrow` (issue #26). So the entire `connect_back` module (and `ConnectionObject`/`ExaConnection`) compiles **unconditionally**, with no SDK `connect-back` feature. With the connect-back types always present, `UdfContext` declares its `connection`/`connect_back` methods unconditionally, giving a feature-independent trait-object vtable (issue #31). Arrow remains the host's internal transport (exarrow-rs → batches → `Vec<Value>`); UDFs only ever receive `Vec<Value>`.
+`ExaConnection` is **arrow-free**: returning `Vec<arrow::record_batch::RecordBatch>` across the `.so` boundary is unsafe, because a UDF `.so` and the host each link their own static `arrow` (issue #26). So the entire `connect_back` module (and `ExaConnection`) compiles **unconditionally**, with no SDK `connect-back` feature. With the connect-back types always present, `UdfContext` declares its `connection`/`connect_back` methods unconditionally, giving a feature-independent trait-object vtable (issue #31). Arrow remains the host's internal transport (exarrow-rs → batches → `Vec<Value>`); UDFs only ever receive `Vec<Value>`.
 
 ## Scenarios
-
-### Scenario: ConnectionObject is a public SDK type outside connect-back
-
-* *GIVEN* the `exasol-udf-sdk` crate
-* *WHEN* the `connection` module is referenced
-* *THEN* it MUST expose a public `ConnectionObject` struct with public `kind`, `address`, `user`, and `password` fields, available unconditionally (no feature gate)
-* *AND* the crate root and the `connect_back` module MUST re-export it, so existing imports keep compiling
-* *AND* the `ConnectionObject` type MUST NOT reference any transport-layer type (it MUST NOT re-export or alias exarrow-rs internals)
-
-### Scenario: A failed CONNECTION lookup has its own error variant
-
-* *GIVEN* the `exasol-udf-sdk` crate
-* *WHEN* `UdfContext::connection` fails
-* *THEN* it MUST return `UdfError::Connection(String)`, whose display text is the carried text with no prefix and never mentions connect-back
-* *AND* the `test-support` `TestContext` MUST return `UdfError::Connection("connection <name> does not exist")` for a name it was not given, matching the database's text
 
 ### Scenario: ExaConnection trait is arrow-free and always compiled
 
 * *GIVEN* the `exasol-udf-sdk` crate
 * *WHEN* the `connect_back` module is referenced
-* *THEN* the `connect_back` module and the public `ConnectionObject` and `ExaConnection` items MUST compile **unconditionally** (no `#[cfg(feature = "connect-back")]` gate) and the crate MUST NOT define a `connect-back` cargo feature, because the trait no longer references any `arrow` type and so needs no optional dependency
+* *THEN* the `connect_back` module and the public `ExaConnection` item MUST compile **unconditionally** (no `#[cfg(feature = "connect-back")]` gate) and the crate MUST NOT define a `connect-back` cargo feature, because the trait no longer references any `arrow` type and so needs no optional dependency
 * *AND* `ExaConnection` MUST expose `query`, `query_for_each`, `execute`, `execute_batch`, `begin`, `commit`, and `rollback`, all returning `Result<_, UdfError>`, none of which reference any `arrow` or `exarrow-rs` type in their public signature
 * *AND* the trait MUST NOT declare `query_arrow` (or any method returning `Vec<RecordBatch>` / `Arc<dyn Array>` across the `.so` boundary), because that `repr(Rust)` Arrow type is not ABI-stable across two independently linked static `arrow` copies (issue #26)
 * *AND* `query_for_each` MUST be a required method taking the SQL plus a row callback `F: FnMut(Vec<Value>) -> Result<(), UdfError>`, and `query` MUST default to calling `query_for_each` and collecting into `Vec<Vec<Value>>`, so both share one code path and neither depends on a boundary-crossing Arrow type

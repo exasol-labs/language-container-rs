@@ -49,6 +49,11 @@ pub(crate) fn conn_requester<'a>(
         let mut proto = proto_cell.borrow_mut();
         let req = proto.import_connection_request(conn_name);
         match request(transport, &mut proto, req).map_err(|e| failed(e.to_string()))? {
+            // After one refusal the database answers later refused lookups with empty
+            // credentials and no reason; a real CONNECTION always has a kind.
+            HostEvent::ConnInfo(ci) if ci.kind.is_empty() => {
+                Err(failed("refused without a reason".into()))
+            }
             HostEvent::ConnInfo(ci) => Ok(ci),
             HostEvent::ImportRefused(reason) => Err(UdfError::Connection(reason)),
             HostEvent::Close(msg) => Err(failed(

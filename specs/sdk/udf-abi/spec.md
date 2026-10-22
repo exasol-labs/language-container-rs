@@ -54,7 +54,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *GIVEN* the `exasol-udf-sdk` crate built with any combination of cargo features
 * *WHEN* the `UdfContext` trait is compiled
 * *THEN* every method — including `cluster_ip`, `connection`, `connect_back`, and `emit_record_batch_ffi` — MUST be declared **unconditionally** (no `#[cfg(feature = ...)]` on any trait method), each with a default implementation returning `UdfError::Unimplemented`, so the method set and declaration order (hence the `dyn UdfContext` vtable layout) are identical in every build configuration
-* *AND* `connection` and `connect_back` MUST reference `ConnectionObject` / `ExaConnection` from the now-unconditionally-compiled `connect_back` module (see `sdk/connect-back`), so their signatures compile without any feature gate
+* *AND* `connection` and `connect_back` MUST reference `ConnectionObject` / `ExaConnection` from the unconditionally compiled `connection` and `connect_back` modules (see `sdk/connection`, `sdk/connect-back`), so their signatures compile without any feature gate
 * *AND* `emit_record_batch_ffi(&mut self, array: *mut c_void, schema: *mut c_void) -> Result<(), UdfError>` MUST name no `arrow` type, so it can be declared unconditionally even when the `arrow` dependency is absent
 * *AND* a UDF `.so` and the host built with different feature sets MUST resolve every `UdfContext` method to the same vtable slot, so `ctx.emit_batch()` from an `emit-arrow`-only UDF dispatches to the host's `emit_record_batch_ffi` (not `cluster_ip`) and emits all rows (issue #31)
 
