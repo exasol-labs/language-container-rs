@@ -15,6 +15,7 @@ The database answers a lookup it refuses with an `MT_IMPORT` reply whose `except
 * *THEN* the host MUST send an `MT_IMPORT` request with `kind = PB_IMPORT_CONNECTION_INFORMATION` and `script_name = "CREDS_CONN"`
 * *AND* it MUST map the returned `connection_information_rep` (`kind`, `address`, `user`, `password`) into a `ConnectionObject` and return it to the UDF
 * *AND* it MUST NOT open any `exarrow-rs` session, because the lookup is a pure credential retrieval
+
 ### Scenario: A refused CONNECTION lookup surfaces the database's reason
 
 * *GIVEN* a UDF that calls `ctx.connection(name)` from `run` or from a single-call hook
