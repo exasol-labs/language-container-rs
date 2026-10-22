@@ -1,5 +1,5 @@
 use super::{DefaultsCtx, EmitPolicy, NextPolicy, TestContext};
-use crate::connect_back::ConnectionObject;
+use crate::connection::ConnectionObject;
 use crate::context::{InputType, OutputType, UdfContext};
 use crate::error::UdfError;
 use crate::value::{ColumnInfo, ExaType, Value};
@@ -199,7 +199,10 @@ fn connection_lookup_is_case_insensitive() {
     let ctx = TestContext::scalar(vec![]).with_connection("my_conn", obj);
     assert!(ctx.connection("MY_CONN").is_ok());
     assert!(ctx.connection("my_conn").is_ok());
-    assert!(ctx.connection("MISSING").is_err());
+    assert!(matches!(
+        ctx.connection("MISSING"),
+        Err(UdfError::Connection(msg)) if msg == "connection MISSING does not exist"
+    ));
 }
 
 #[test]

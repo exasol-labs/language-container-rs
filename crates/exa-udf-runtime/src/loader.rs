@@ -250,14 +250,25 @@ unsafe fn call_lifecycle_slot(
         return Ok(());
     }
     let text = unsafe { take_c_string(error_out) };
-    let detail = if text.is_empty() {
-        text
-    } else {
-        format!(": {text}")
-    };
-    Err(RuntimeError::Udf(format!(
-        "UDF {slot_name} returned error code {rc}{detail}"
-    )))
+    Err(hook_error(slot_name, rc, text, || {
+        format!("UDF {slot_name} returned error code {rc}")
+    }))
+}
+
+/// A user error (rc 1) with text surfaces verbatim; anything else is a failure
+/// the hook did not explain.
+fn hook_error(
+    name: &str,
+    rc: i32,
+    text: String,
+    fallback: impl FnOnce() -> String,
+) -> RuntimeError {
+    tracing::debug!(hook = name, rc, "UDF hook failed");
+    match (rc, text.is_empty()) {
+        (1, false) => RuntimeError::Udf(text),
+        (_, false) => RuntimeError::Unexplained(text),
+        (_, true) => RuntimeError::Unexplained(fallback()),
+    }
 }
 
 /// Take ownership of a `malloc`ed C string a vtable slot wrote, freeing it with
@@ -299,10 +310,8 @@ unsafe fn call_noarg_hook(
     let rc = unsafe { hook(&mut out) };
     if rc != 0 {
         let msg = unsafe { take_c_string(out) };
-        return Err(RuntimeError::Udf(if msg.is_empty() {
+        return Err(hook_error(name, rc, msg, || {
             format!("single-call hook {name} returned error code {rc}")
-        } else {
-            msg
         }));
     }
     Ok(unsafe { take_c_string(out) })
@@ -328,10 +337,8 @@ unsafe fn call_ctx_arg_hook(
     let rc = unsafe { hook(ctx, c_arg.as_ptr(), &mut out) };
     if rc != 0 {
         let msg = unsafe { take_c_string(out) };
-        return Err(RuntimeError::Udf(if msg.is_empty() {
+        return Err(hook_error(name, rc, msg, || {
             format!("single-call hook {name} returned error code {rc}")
-        } else {
-            msg
         }));
     }
     Ok(unsafe { take_c_string(out) })

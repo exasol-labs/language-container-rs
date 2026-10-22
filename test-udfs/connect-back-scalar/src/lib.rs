@@ -34,3 +34,21 @@ pub fn connect_back_scalar(ctx: &mut dyn UdfContext) -> Result<Option<Decimal>, 
         scale: 0,
     }))
 }
+
+/// Looks up the CONNECTION named by the first argument. On a failed lookup the
+/// second argument picks the reaction: `propagate` returns the lookup error,
+/// `catch` returns its text, anything else becomes the UDF's own error text.
+#[exasol_udf]
+pub fn connection_lookup(ctx: &mut dyn UdfContext) -> Result<Option<String>, UdfError> {
+    let mut args = (0..2).map(|i| match ctx.get(i)? {
+        Value::String(s) => Ok(s.clone()),
+        other => Err(UdfError::Type(format!("expected VARCHAR, got {other:?}"))),
+    });
+    let (name, on_error) = (args.next().unwrap()?, args.next().unwrap()?);
+    match (ctx.connection(&name), on_error.as_str()) {
+        (Ok(c), _) => Ok(Some(c.address)),
+        (Err(e), "propagate") => Err(e),
+        (Err(e), "catch") => Ok(Some(e.to_string())),
+        (Err(_), own) => Err(UdfError::User(own.into())),
+    }
+}

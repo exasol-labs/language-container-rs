@@ -2,6 +2,7 @@
 //! drift from the other's wire policy.
 use crate::error::RuntimeError;
 use exa_zmq_protocol::{Frame, HostAction, HostEvent, Protocol, ZmqTransport};
+use exasol_udf_sdk::error::UdfError;
 
 /// Send one request and return the classified response event.
 ///
@@ -38,24 +39,22 @@ pub(crate) fn close_error(msg: Option<String>) -> Result<(), RuntimeError> {
 ///
 /// Borrows `proto_cell` mutably only for the one exchange, so it never overlaps
 /// the caller's own borrows of the same cell.
-#[cfg(feature = "connect-back")]
 pub(crate) fn conn_requester<'a>(
     transport: &'a ZmqTransport,
     proto_cell: &'a std::cell::RefCell<&'a mut Protocol>,
 ) -> crate::rowset::ConnRequester<'a> {
     Box::new(move |conn_name: &str| {
+        let failed =
+            |reason: String| UdfError::Connection(format!("CONNECTION {conn_name}: {reason}"));
         let mut proto = proto_cell.borrow_mut();
         let req = proto.import_connection_request(conn_name);
-        let event = request(transport, &mut proto, req)
-            .map_err(|e| exasol_udf_sdk::error::UdfError::ConnectBack(e.to_string()))?;
-        match event {
+        match request(transport, &mut proto, req).map_err(|e| failed(e.to_string()))? {
             HostEvent::ConnInfo(ci) => Ok(ci),
-            HostEvent::Close(msg) => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            HostEvent::ImportRefused(reason) => Err(UdfError::Connection(reason)),
+            HostEvent::Close(msg) => Err(failed(
                 msg.unwrap_or_else(|| "connection closed by database".into()),
             )),
-            _ => Err(exasol_udf_sdk::error::UdfError::ConnectBack(
-                "MT_IMPORT reply was not ConnInfo".into(),
-            )),
+            _ => Err(failed("MT_IMPORT reply was not ConnInfo".into())),
         }
     })
 }

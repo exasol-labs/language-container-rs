@@ -82,7 +82,7 @@ user UDF crate (cdylib)
 - UDF `ctx.emit` -> EmitBuffer -> `MT_EMIT` -> DB: emitted rows are checked against the output columns and written into the wire type blocks with the input row number; a flush sends one `MT_EMIT` when the byte estimate reaches 4,000,000 bytes, and a tail flush runs at the end of each group.
 - UDF `emit_batch(RecordBatch)` -> Arrow C Data Interface -> EmitBuffer: the opt-in `emit-arrow` path crosses the `.so` boundary as an exported Arrow array without copying its buffers and lands in the same emit buffer.
 - DB `MT_RUN` -> single_call -> UDF hook -> `MT_RETURN`: in single-call mode each `MT_CALL` invokes one `SC_FN_*` hook (default output columns, virtual-schema adapter, import or export SQL generation) and returns JSON, or `MT_UNDEFINED_CALL` when the hook is absent.
-- UDF `ctx.connection(name)` -> `MT_IMPORT` -> DB: CONNECTION-object credentials come back on demand as `ConnInfo` over the control channel.
+- UDF `ctx.connection(name)` -> `MT_IMPORT` -> DB: CONNECTION-object credentials come back on demand as `ConnInfo` over the control channel, or a refusal as `exception_message`, which surfaces as `UdfError::Connection`. Independent of connect-back.
 - UDF `ctx.connect_back(&conn)` -> connect_back -> exarrow-rs -> Exasol SQL: the host opens a separate native-protocol session at the CONNECTION address; `query_for_each` fetches every Arrow batch, then converts one batch at a time to `Vec<Value>` rows and drops it before converting the next.
 - dispatch end -> cleanup hook -> `MT_FINISHED` -> exit(0): the optional `cleanup` hook runs once after dispatch; any dispatch or hook failure sends one error `MT_CLOSE` and the process exits non-zero.
 

@@ -15,10 +15,13 @@ pub enum RuntimeError {
     },
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
-    #[error("Protocol error: {0}")]
+    #[error(transparent)]
     Protocol(#[from] exa_zmq_protocol::ProtocolError),
     #[error("UDF error: {0}")]
     Udf(String),
+    /// A hook that failed without text of its own: it panicked or wrote none.
+    #[error("UDF error: {0}")]
+    Unexplained(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -30,10 +33,11 @@ impl From<libloading::Error> for RuntimeError {
 }
 
 impl RuntimeError {
-    /// Append the context's recorded error unless the hook text already has it.
+    /// Explain a hook failure that carries no text of its own with the
+    /// context's recorded error; a hook's own text is the author's final word.
     pub(crate) fn with_recorded_detail(self, detail: Option<String>) -> RuntimeError {
         match (self, detail) {
-            (RuntimeError::Udf(text), Some(detail)) if !text.contains(&detail) => {
+            (RuntimeError::Unexplained(text), Some(detail)) => {
                 RuntimeError::Udf(format!("{text}: {detail}"))
             }
             (error, _) => error,

@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use crate::connect_back::ConnectionObject;
+use crate::connection::ConnectionObject;
 use crate::context::{InputType, OutputType, UdfContext};
 use crate::error::UdfError;
 use crate::value::{ColumnInfo, Value};
@@ -414,9 +414,7 @@ impl UdfContext for TestContext {
             .connections
             .get(&name.to_ascii_uppercase())
             .cloned()
-            .ok_or_else(|| {
-                UdfError::Unimplemented(format!("connection {name:?} not set on TestContext"))
-            })
+            .ok_or_else(|| UdfError::Connection(format!("connection {name} does not exist")))
     }
 }
 

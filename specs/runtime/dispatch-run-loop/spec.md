@@ -73,8 +73,14 @@ RETURNS output uses a value-return channel: the UDF function returns its value (
 * *GIVEN* `run_batch` calling the vtable `run` with the context pointer and an `error_out` out-pointer initialized to null
 * *WHEN* the UDF run shim returns a non-zero code and has written a heap-allocated C string to `*error_out`
 * *THEN* dispatch MUST read the C string from the out-pointer when it is non-null and take ownership so the allocation is freed exactly once, using `libc::free` consistent with the `malloc`/`libc::free` C-allocator convention
-* *AND* dispatch MUST incorporate the recovered text into the `RuntimeError::Udf` message it returns, so the DB error-close path surfaces the UDF-supplied error text rather than only the generic error code
-* *AND* dispatch MUST NOT rely on `take_last_error` for this path, leaving the connect-back `last_error` channel unchanged
+* *AND* dispatch MUST surface that text as the whole error message, with no slot name or return code in front of it, and MUST fall back to `UDF run returned error code <rc>` only when the text is empty
+
+### Scenario: A hook's own error text is surfaced unchanged
+
+* *GIVEN* a `run`, cleanup, or context-taking single-call hook that returns a user error (`rc = 1`) with non-empty text, for example after it handled a failed `ctx.connection(name)` and wrote its own message
+* *WHEN* the runtime closes the session with that error
+* *THEN* the close message MUST be `F-UDF-CL-RUST-9001: UDF error: <text>` with nothing appended
+* *AND* an error the context recorded from a failed context call MUST be appended as `: <recorded error>` only when the hook ended without text of its own (a panic or an empty error), so a UDF that unwraps a failed lookup still reports the database's reason
 
 ### Scenario: Connect-back is available identically in scalar and set dispatch
 

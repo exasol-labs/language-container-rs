@@ -45,4 +45,4 @@ The hook receives a `SingleCallContext` through the double-indirected `*mut c_vo
 * *THEN* it MUST construct a `SingleCallContext` and pass a double-indirected `*mut c_void` context pointer to the hook, over the same path `virtual_schema_adapter_call` uses
 * *AND* the hook MUST read `script_schema()`, `node_count()`, and the remaining handshake accessors at their live `MT_META` values, not at the `UdfContext` trait defaults
 * *AND* `ctx.connection(name)` MUST resolve CONNECTION credentials over an on-demand `MT_IMPORT` exchange during the call
-* *AND* an error the context recorded MUST be appended to the hook's own error text in the surfaced `RuntimeError::Udf`
+* *AND* an error the context recorded MUST reach the surfaced error only as `runtime/dispatch-run-loop` "A hook's own error text is surfaced unchanged" allows

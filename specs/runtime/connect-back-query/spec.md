@@ -1,10 +1,10 @@
 # Feature: connect-back-query
 
-Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` returns the node's first non-loopback IPv4 address without a network call; `connection` retrieves named-connection credentials via an on-demand `MT_IMPORT` exchange; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` streams the result set one Arrow batch at a time so peak memory is bounded by one batch; `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
+Implements the host side of the connect-back SELECT/streaming surface inside the runtime: `cluster_ip` returns the node's first non-loopback IPv4 address without a network call; `connect_back` opens a live `exarrow-rs` session over a dedicated `CONNECT_BACK_RT` tokio runtime. `query_for_each` streams the result set one Arrow batch at a time so peak memory is bounded by one batch; `query` collects via the same path for small, bounded results. `SingleCallContext` exposes the same connect-back methods for VS adapter calls.
 
 ## Background
 
-Connect-back opens a connection from inside the UDF sandbox back to Exasol (or any other target) as an ordinary external client. The connect-back surface is three composable `UdfContext` methods: `cluster_ip()` returns the node's first non-loopback IPv4 address with no network call; `connection(name)` retrieves the raw credentials of a named database `CONNECTION` object via an on-demand `MT_IMPORT` (`PB_IMPORT_CONNECTION_INFORMATION`) exchange and returns a `ConnectionObject`; `connect_back(&ConnectionObject)` opens a live `exarrow-rs` session to the target as an ordinary external client over the native binary protocol with server-certificate validation disabled. The MT_IMPORT exchange is safe during the run phase because the outer dispatch loop is blocked awaiting the UDF function return, so the ZMQ socket is idle.
+Connect-back opens a connection from inside the UDF sandbox back to Exasol (or any other target) as an ordinary external client. The connect-back surface is two `UdfContext` methods: `cluster_ip()` returns the node's first non-loopback IPv4 address with no network call; `connect_back(&ConnectionObject)` opens a live `exarrow-rs` session to the target as an ordinary external client over the native binary protocol with server-certificate validation disabled. The `ConnectionObject` typically comes from `ctx.connection(name)` (see `runtime/connection-lookup`).
 
 ## Scenarios
 
@@ -52,15 +52,6 @@ Connect-back opens a connection from inside the UDF sandbox back to Exasol (or a
 * *AND* it MUST NOT perform any network round-trip to obtain the IP, only a local interface enumeration
 * *AND* a node with no non-loopback IPv4 interface MUST return `UdfError::ConnectBack` rather than panicking
 
-### Scenario: connection fetches named-connection credentials via on-demand MT_IMPORT
-
-* *GIVEN* a runtime built with the `connect-back` feature, where the outer dispatch loop is blocked awaiting the UDF function return so the ZMQ socket is idle
-* *WHEN* a UDF calls `ctx.connection("CREDS_CONN")` during `run_batch`
-* *THEN* the host MUST send an `MT_IMPORT` request with `kind = PB_IMPORT_CONNECTION_INFORMATION` and `script_name = "CREDS_CONN"`
-* *AND* it MUST map the returned `connection_information_rep` (`kind`, `address`, `user`, `password`) into a public `ConnectionObject` and return it to the UDF
-* *AND* it MUST NOT open any `exarrow-rs` session as a side effect, because `connection` is a pure credential retrieval
-* *AND* a database error or a non-`ConnInfo` reply MUST be returned as `UdfError::ConnectBack` rather than panicking
-
 ### Scenario: Connect-back opens a connection from a ConnectionObject
 
 * *GIVEN* a `HostContextBridge` built with the `connect-back` feature and a `ConnectionObject` carrying an `address`, `user`, and `password`
@@ -72,16 +63,7 @@ Connect-back opens a connection from inside the UDF sandbox back to Exasol (or a
 ### Scenario: SingleCallContext exposes connect-back methods for VS adapter calls
 
 * *GIVEN* a runtime dispatching `SC_FN_VIRTUAL_SCHEMA_ADAPTER_CALL` with the `connect-back` feature enabled
-* *WHEN* the VS adapter function calls `ctx.cluster_ip()`, `ctx.connection(name)`, or `ctx.connect_back(conn)` on the `&mut dyn UdfContext` it receives
+* *WHEN* the VS adapter function calls `ctx.cluster_ip()` or `ctx.connect_back(conn)` on the `&mut dyn UdfContext` it receives
 * *THEN* `cluster_ip()` MUST return the first non-loopback IPv4 address (same algorithm as `HostContextBridge`)
-* *AND* `connection(name)` MUST perform an on-demand `MT_IMPORT` exchange on the ZMQ socket and return a `ConnectionObject`
 * *AND* `connect_back(conn)` MUST open a new `exarrow-rs` session and return a `Box<dyn ExaConnection>` owned by the UDF
 * *AND* the data methods `get`, `emit`, and `next` MUST return `UdfError::Unimplemented` because single-call mode exchanges one JSON string, not row batches
-
-### Scenario: SingleCallContext connection method performs MT_IMPORT while socket is idle
-
-* *GIVEN* a `SingleCallContext` built with a `ConnRequester` closure that drives the ZMQ socket
-* *WHEN* the VS adapter calls `ctx.connection("MY_CONN")` during the `virtual_schema_adapter_call` hook
-* *THEN* the host MUST send `MT_IMPORT` with `kind = PB_IMPORT_CONNECTION_INFORMATION` and `script_name = "MY_CONN"` over the idle socket
-* *AND* the returned `ConnInfo` MUST be mapped to a `ConnectionObject` and returned to the adapter
-* *AND* the dispatch loop MUST NOT observe this exchange because it is blocked awaiting the hook's return value — the socket is not concurrently accessed

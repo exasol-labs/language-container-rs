@@ -10,4 +10,7 @@ pub enum UdfError {
     Type(String),
     #[error("Connect-back error: {0}")]
     ConnectBack(String),
+    /// A CONNECTION object lookup failed; carries the database's reason verbatim.
+    #[error("{0}")]
+    Connection(String),
 }

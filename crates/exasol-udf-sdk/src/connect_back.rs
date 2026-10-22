@@ -14,22 +14,7 @@ use arrow::datatypes::{DataType, TimeUnit};
 #[cfg(feature = "emit-arrow")]
 use arrow::record_batch::RecordBatch;
 
-/// Credentials for a named Exasol CONNECTION object or any external system.
-///
-/// The field names match the proto `connection_information_rep`, so the same
-/// type also reads the `connection_information` of an IMPORT or EXPORT
-/// specification under either spec-parsing feature.
-#[derive(Debug, Clone)]
-#[cfg_attr(
-    any(feature = "import", feature = "export"),
-    derive(serde::Deserialize)
-)]
-pub struct ConnectionObject {
-    pub kind: String,
-    pub address: String,
-    pub user: String,
-    pub password: String,
-}
+pub use crate::connection::ConnectionObject;
 
 /// A live Exasol connection the UDF can use for queries and DML.
 ///
@@ -277,7 +262,3 @@ fn timestamp_cell(
     dt.map(|dt| dt.naive_utc())
         .ok_or_else(|| UdfError::ConnectBack(format!("timestamp out of range: {raw} {unit:?}")))
 }
-
-#[cfg(test)]
-#[path = "connect_back_tests.rs"]
-mod tests;

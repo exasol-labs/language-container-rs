@@ -250,13 +250,10 @@ fn error_text_surfaced_when_rc_nonzero() {
 fn generic_message_when_error_text_empty() {
     let result = unsafe { call_noarg_hook("my_hook", hook_error_null_out) };
     match result {
-        Err(RuntimeError::Udf(msg)) => {
-            assert!(
-                msg.contains("returned error code"),
-                "expected generic fallback message, got: {msg}"
-            );
+        Err(RuntimeError::Unexplained(msg)) => {
+            assert_eq!(msg, "single-call hook my_hook returned error code 1");
         }
-        other => panic!("expected Udf error, got {other:?}"),
+        other => panic!("expected Unexplained error, got {other:?}"),
     }
 }
 
@@ -284,7 +281,7 @@ unsafe extern "C" fn slot_panic_code(
 }
 
 #[test]
-fn lifecycle_slot_error_names_the_slot_code_and_text() {
+fn lifecycle_slot_error_surfaces_user_text_verbatim() {
     let mut ctx = TestContext::set(vec![]);
     let mut err = |slot_name, slot| {
         unsafe { call_lifecycle_slot(slot_name, slot, &mut ctx) }
@@ -294,7 +291,7 @@ fn lifecycle_slot_error_names_the_slot_code_and_text() {
 
     assert_eq!(
         err("cleanup", slot_error_with_msg),
-        "UDF error: UDF cleanup returned error code 1: cleanup broke"
+        "UDF error: cleanup broke"
     );
     assert_eq!(
         err("run", slot_panic_code),

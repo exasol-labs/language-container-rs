@@ -71,9 +71,8 @@ fn make_bridge<'a>(
         cols,
         Box::new(|_t: &exa_zmq_protocol::EmitTable| Ok(())),
         HandshakeMeta::default(),
-        #[cfg(feature = "connect-back")]
         Box::new(|_name| {
-            Err(exasol_udf_sdk::error::UdfError::ConnectBack(
+            Err(exasol_udf_sdk::error::UdfError::Connection(
                 "no credential fetcher in test".into(),
             ))
         }),

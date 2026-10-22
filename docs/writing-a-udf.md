@@ -201,10 +201,10 @@ The database may start several processes for one statement and give each a share
 
 **What the context offers.** The handshake accessors (`script_name()`, `node_id()`, `session_id()`, and the rest) return their live values. `next()`, `get()`, and `emit()` return `Err`, because no input remains and the database accepts no output after `MT_CLEANUP`.
 
-For connect-back (§12), `ctx.connect_back(&conn)` works in cleanup, but `ctx.connection(name)` is refused with `UdfError::ConnectBack`. A CONNECTION lookup is a request to the database (`MT_IMPORT`), and after `MT_CLEANUP` the database accepts no request. Resolve the `ConnectionObject` during `run()` and keep it, for example in a `static`:
+For connect-back (§12), `ctx.connect_back(&conn)` works in cleanup, but `ctx.connection(name)` is refused with `UdfError::Connection`. A CONNECTION lookup is a request to the database (`MT_IMPORT`), and after `MT_CLEANUP` the database accepts no request. Resolve the `ConnectionObject` during `run()` and keep it, for example in a `static`:
 
 ```rust
-use exasol_udf_sdk::connect_back::ConnectionObject;
+use exasol_udf_sdk::ConnectionObject;
 use std::sync::OnceLock;
 
 static AUDIT_CONN: OnceLock<ConnectionObject> = OnceLock::new();
@@ -653,7 +653,9 @@ EMITS (...) AS
 fn cluster_ip(&self) -> Result<String, UdfError>;
 
 // Fetch the named CONNECTION object's address/user/password via a
-// round-trip to the database node (ZMQ MT_IMPORT).
+// round-trip to the database node (ZMQ MT_IMPORT). A refused lookup returns
+// UdfError::Connection with the database's reason, such as
+// "connection X does not exist"; the UDF may handle it and continue.
 fn connection(&self, name: &str) -> Result<ConnectionObject, UdfError>;
 
 // Open a new, independent Exasol session using those credentials.

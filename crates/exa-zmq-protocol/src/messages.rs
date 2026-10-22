@@ -35,6 +35,8 @@ pub enum HostEvent {
     },
     /// The DB returned connection credentials via MT_IMPORT.
     ConnInfo(crate::meta::ConnInfo),
+    /// The DB refused an MT_IMPORT lookup, with its reason.
+    ImportRefused(String),
 }
 
 /// Action the runtime wants to take, encoded back to a protobuf request.

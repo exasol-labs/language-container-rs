@@ -102,7 +102,6 @@ fn run_group(
             &meta.output_columns,
             emit_flusher(transport, cell_ref),
             crate::rowset::HandshakeMeta::from(meta),
-            #[cfg(feature = "connect-back")]
             crate::wire::conn_requester(transport, cell_ref),
         );
         bridge.configure_group_input(meta.input_iter(), meta.output_iter(), fetch);

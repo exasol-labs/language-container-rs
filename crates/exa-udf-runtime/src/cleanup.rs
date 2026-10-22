@@ -31,7 +31,7 @@ fn fold(outcome: Result<(), RuntimeError>, cleanup: RuntimeError) -> Result<(), 
 
 fn message_of(error: RuntimeError) -> String {
     match error {
-        RuntimeError::Udf(text) => text,
+        RuntimeError::Udf(text) | RuntimeError::Unexplained(text) => text,
         other => other.to_string(),
     }
 }

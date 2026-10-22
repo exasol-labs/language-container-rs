@@ -78,7 +78,7 @@ impl ExaConnection for MockConnection {
 #[test]
 fn connection_fetches_credentials_via_mt_import() {
     let (mut input, mut emit, cols) = empty_bridge_parts();
-    let ctx = HostContextBridge::with_connection(
+    let ctx = HostContextBridge::new(
         &mut input,
         &mut emit,
         &cols,
@@ -109,7 +109,7 @@ fn connection_fetches_credentials_via_mt_import() {
 #[test]
 fn connect_back_opens_from_connection_object() {
     let (mut input, mut emit, cols) = empty_bridge_parts();
-    let mut ctx = HostContextBridge::with_connection(
+    let mut ctx = HostContextBridge::new(
         &mut input,
         &mut emit,
         &cols,
@@ -188,7 +188,7 @@ fn connect_back_dsn_built_only_from_connection_object() {
     // any path that replaces obj.address with cluster_ip would fail the
     // assertion above because we constructed obj with a different value.
     let (mut input, mut emit, cols) = empty_bridge_parts();
-    let mut ctx = HostContextBridge::with_connection(
+    let mut ctx = HostContextBridge::new(
         &mut input,
         &mut emit,
         &cols,

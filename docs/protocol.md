@@ -138,9 +138,15 @@ worked examples of all four SCALAR/SET × RETURNS/EMITS combinations.
 When a UDF calls `ctx.connection("NAME")`, the runtime issues an `MT_IMPORT`
 request (`PB_IMPORT_CONNECTION_INFORMATION`) for that name and the DB returns the
 stored `address` / `user` / `password` as a `ConnectionObject`. This is the only
-place credentials cross the control channel; the UDF then uses them to open a
+place credentials cross the control channel; the UDF may then use them to open a
 **separate** SQL session (connect-back). The exchange happens while the dispatch
-loop is blocked inside `run()`, so the socket is idle and the round-trip is safe.
+loop is blocked inside `run()` or a single-call hook, so the socket is idle and
+the round-trip is safe.
+
+The DB refuses a lookup by setting the reply's `exception_message` (for example
+`connection NAME does not exist`, or `insufficient privileges for using
+connection NAME in script S`) and leaving out the credentials. The runtime
+returns that text as `UdfError::Connection`, and the session continues.
 
 ## Column data encoding
 

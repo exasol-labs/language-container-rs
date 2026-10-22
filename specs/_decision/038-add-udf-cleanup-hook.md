@@ -66,7 +66,7 @@ After `MT_CLEANUP` the engine accepts only `MT_FINISHED` or `MT_CLOSE`, so an `M
 
 ### Decision
 
-The hook receives `CleanupContext`, a `UdfContext` implementation beside `SingleCallContext` in `crates/exa-udf-runtime/src/rowset.rs`. It carries the `MT_META` handshake metadata and the iteration axes, and holds no credential requester. `ctx.connection(name)` returns `UdfError::ConnectBack` immediately and sends no `MT_IMPORT`. The error text states that CONNECTION lookups are unavailable during cleanup and tells the author to resolve the `ConnectionObject` during `run()` and keep it. The handshake accessors, `ctx.cluster_ip()` and `ctx.connect_back(&conn)` behave as in `SingleCallContext`. `next`, `get` and `emit` return errors.
+The hook receives `CleanupContext`, a `UdfContext` implementation beside `SingleCallContext` in `crates/exa-udf-runtime/src/rowset.rs`. It carries the `MT_META` handshake metadata and the iteration axes, and holds no credential requester. `ctx.connection(name)` returns `UdfError::Connection` immediately and sends no `MT_IMPORT`. The error text states that CONNECTION lookups are unavailable during cleanup and tells the author to resolve the `ConnectionObject` during `run()` and keep it. The handshake accessors, `ctx.cluster_ip()` and `ctx.connect_back(&conn)` behave as in `SingleCallContext`. `next`, `get` and `emit` return errors.
 
 ### Options Considered
 
