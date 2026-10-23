@@ -198,16 +198,32 @@ network access to the platform's API — no Docker, no Rust toolchain.
 ### Step 1 — Download the prebuilt release tarball
 
 Every version-bumped merge to `main` publishes a [GitHub Release](https://github.com/exasol-labs/language-container-rs/releases)
-with a single `lc-rust-<version>.tar.gz` asset — CI builds it from the root
-`Dockerfile`'s `artifact` stage and renames it for release (e.g.
-`lc-rust-0.21.0.tar.gz` for `v0.21.0`).
+with two SLC tarballs (see [Release assets](#release-assets)). Download the one that
+matches the CPU architecture of your Exasol host:
 
 ```bash
+# x86_64
 curl -fsSL -o rustslc.tar.gz \
   https://github.com/exasol-labs/language-container-rs/releases/download/v<VERSION>/lc-rust-<VERSION>.tar.gz
+
+# aarch64
+curl -fsSL -o rustslc.tar.gz \
+  https://github.com/exasol-labs/language-container-rs/releases/download/v<VERSION>/lc-rust-<VERSION>-aarch64.tar.gz
 ```
 
-Pick `<VERSION>` from the releases page, or `gh release list --repo exasol-labs/language-container-rs`.
+**Pick the version your UDFs were built with.** `<VERSION>` must equal the
+`exasol-udf-sdk` version that the UDF `.so` was built against, which the UDF's
+`Cargo.toml` pins. The newest release is not always the right one. The SLC checks an
+ABI fingerprint (SDK version plus `rustc` version) when it loads a `.so`, and a
+mismatch fails every call:
+
+```text
+F-UDF-CL-RUST-9001: Fingerprint mismatch: expected 0.32.0:rustc_1.98.1__…, found 0.33.0:rustc_1.98.1__…
+```
+
+`expected` is the installed SLC and `found` is the `.so`. Install the SLC version that
+`found` names, or rebuild the UDF against the installed one. To list the releases, run
+`gh release list --repo exasol-labs/language-container-rs`.
 
 **Naming — this is the one thing that must stay consistent for the rest of the guide:**
 the filename must remain `rustslc.tar.gz`. This name (minus `.tar.gz`) is embedded
@@ -319,13 +335,23 @@ Build the registration string from the BucketFS service/bucket used in step 2
 > `BFS_PATH` in the script), prefix that folder onto `rustslc` in *both* URIs below,
 > e.g. `slc/rustslc` instead of `rustslc`.
 
-```sql
--- current session only
-ALTER SESSION SET SCRIPT_LANGUAGES='<existing value, if any> RUST=localzmq+protobuf:///<bfs-service>/<bucket>/rustslc?lang=rust#buckets/<bfs-service>/<bucket>/rustslc/exaudf/exaudfclient';
+Register the language with `ALTER SYSTEM`. It applies to every session and needs the
+`ALTER SYSTEM` privilege:
 
--- persists across sessions (requires admin)
+```sql
 ALTER SYSTEM SET SCRIPT_LANGUAGES='<existing value, if any> RUST=localzmq+protobuf:///<bfs-service>/<bucket>/rustslc?lang=rust#buckets/<bfs-service>/<bucket>/rustslc/exaudf/exaudfclient';
 ```
+
+> **Use `ALTER SESSION` only for a quick test.** `ALTER SESSION SET SCRIPT_LANGUAGES`
+> changes only your own session. A Rust UDF, including one that a virtual schema adapter
+> runs, uses the language list of the session that calls it. So every other user, and
+> every later session of yours, fails with
+> `SCRIPT_LANGUAGES - no definition found for language: RUST`. Use it only to try an
+> SLC before you register it system-wide:
+>
+> ```sql
+> ALTER SESSION SET SCRIPT_LANGUAGES='<existing value, if any> RUST=localzmq+protobuf:///<bfs-service>/<bucket>/rustslc?lang=rust#buckets/<bfs-service>/<bucket>/rustslc/exaudf/exaudfclient';
+> ```
 
 ## Troubleshooting
 
@@ -346,7 +372,7 @@ Fix: confirm the `#` fragment in the `RUST=...` entry points at the `exaudfclien
 ...#/buckets/bfsdefault/default/rustslc/exaudf/exaudfclient
 ```
 
-Re-run the `ALTER SESSION`/`ALTER SYSTEM SET SCRIPT_LANGUAGES` statement (Step 4 above, or `scripts/install.sh` with or without `--deployment`) with the corrected fragment, then retry the failing UDF call.
+Re-run the `ALTER SYSTEM SET SCRIPT_LANGUAGES` statement (Step 4 above, or `scripts/install.sh` with or without `--deployment`) with the corrected fragment, then retry the failing UDF call.
 
 ## Next step — write your first UDF
 
