@@ -33,9 +33,8 @@ Project specifics:
 ## Build and release
 
 - The repo is a pure Cargo workspace. Shared dependencies live in `[workspace.dependencies]`.
-- `arrow` stays pinned to the version `exarrow-rs` uses, so the `.so` boundary shares one copy.
+- `arrow` stays pinned to the version `exarrow-rs` uses, because the runtime downcasts exarrow-rs result batches with its own `arrow` types. The `.so` boundary does not need the pin: batches cross it through the Arrow C Data Interface.
 - Bump `[workspace.package].version` (SemVer) only for changes downstream users can observe: runtime behavior, SDK, macro, or CLI API, or the container image. Do not bump it for tooling, docs, benchmarks, or test coverage. The version is part of the ABI fingerprint, so every bump forces downstream UDF rebuilds. The pinned `exasol-udf-sdk` entry must track it, and the regenerated `Cargo.lock` is committed in the same PR.
-- UDFs call `UdfContext::emit_record_batch_ffi` directly, so a change to its signature or ownership contract is breaking: bump `EXA_UDF_ABI_VERSION` and name the change in the PR title, which becomes the release-notes entry.
 - Merging a version bump to `main` releases it. After the full CI pipeline is green, the `release` job creates the `vX.Y.Z` tag, the GitHub Release, and the crates.io publish in dependency order: `exasol-udf-sdk`, `exasol-udf-macros`, `cargo-exasol-udf`. Never push a release tag by hand. The job releases only when the tag does not exist yet, so a hand-pushed tag skips the release. Publishing is the only irreversible step, so merge a bump only after review.
 - The SLC builds from the root `Dockerfile` into a shell-less image: no shell, package manager, or coreutils. A UDF that shells out fails. A UDF may link dynamically only against the staged surface (glibc, `libgcc_s`, `libstdc++`, NSS and resolver modules, OpenSSL 3, `libz`, `libbz2`, `libzstd`) and links anything else statically, for example `features = ["vendored"]` on a `-sys` crate. The glibc floor is in `crates/cargo-exasol-udf/slc-glibc-floor.txt` and is checked by `cargo exasol-udf validate`.
 

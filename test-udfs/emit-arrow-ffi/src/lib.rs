@@ -8,11 +8,8 @@ use exasol_udf_macros::exasol_udf;
 use exasol_udf_sdk::context::UdfContext;
 use exasol_udf_sdk::error::UdfError;
 
-/// SET UDF: drains all input rows then emits the same 3-row batch as
-/// `emit-arrow-batch`, but exported with its own arrow and passed to
-/// `emit_record_batch_ffi` directly, with the SDK's `emit-arrow` feature off.
-///
-/// EMITS schema: `id BIGINT, label VARCHAR(1)`
+/// SET UDF emitting the `emit-arrow-batch` rows through `emit_record_batch_ffi`,
+/// with its own arrow and `emit-arrow` off. EMITS `id BIGINT, label VARCHAR(1)`.
 #[exasol_udf]
 pub fn emit_arrow_ffi(ctx: &mut dyn UdfContext) -> Result<(), UdfError> {
     while ctx.next()? {}

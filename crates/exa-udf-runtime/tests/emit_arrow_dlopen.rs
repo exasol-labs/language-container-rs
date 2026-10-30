@@ -1,6 +1,5 @@
-//! Boundary-safety gate (no DB): dlopen the host-built fixture cdylibs and drive
-//! their `run`, which hands a batch across the boundary through the Arrow C Data
-//! Interface into the host's emit buffer.
+//! Boundary-safety gate (no DB): dlopen the fixture cdylibs and drive their `run`,
+//! which emits a batch through the Arrow C Data Interface into the host's buffer.
 // `emit-arrow-test`, not `emit-arrow`: the fixture cdylib is an optional
 // dependency behind that feature. See `Cargo.toml`.
 #![cfg(feature = "emit-arrow-test")]
@@ -35,7 +34,6 @@ fn emit_record_batch_ffi_accepts_older_arrow_major() {
     assert_emits_abc("emit_arrow_ffi", "EMIT_ARROW_FFI");
 }
 
-/// Runs a fixture that emits `(1, "a"), (2, "b"), (3, "c")` and checks the rows.
 fn assert_emits_abc(lib: &str, entry: &str) {
     let p = fixture_cdylib_path(lib);
     let udf = LoadedUdf::open(&p, entry).expect("load .so");

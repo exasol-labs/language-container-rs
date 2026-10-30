@@ -1807,7 +1807,6 @@ async fn emit_arrow_ffi_with_own_arrow(conn: &mut Connection, lib_path: &str) ->
     assert_emits_abc(conn, "emit_arrow_ffi", lib_path).await
 }
 
-/// Registers `script` as a SET UDF and checks it emits (1:a, 2:b, 3:c) in order.
 async fn assert_emits_abc(conn: &mut Connection, script: &str, lib_path: &str) -> Result<()> {
     conn.execute(&format!(
         "CREATE OR REPLACE RUST SET SCRIPT it_rust.{script}(dummy BOOLEAN) \
