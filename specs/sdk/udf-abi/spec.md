@@ -56,7 +56,7 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *THEN* every method — including `cluster_ip`, `connection`, `connect_back`, and `emit_record_batch_ffi` — MUST be declared **unconditionally** (no `#[cfg(feature = ...)]` on any trait method), each with a default implementation returning `UdfError::Unimplemented`, so the method set and declaration order (hence the `dyn UdfContext` vtable layout) are identical in every build configuration
 * *AND* `connection` and `connect_back` MUST reference `ConnectionObject` / `ExaConnection` from the unconditionally compiled `connection` and `connect_back` modules (see `sdk/connection`, `sdk/connect-back`), so their signatures compile without any feature gate
 * *AND* `emit_record_batch_ffi(&mut self, array: *mut c_void, schema: *mut c_void) -> Result<(), UdfError>` MUST name no `arrow` type, so it can be declared unconditionally even when the `arrow` dependency is absent
-* *AND* a UDF `.so` and the host built with different feature sets MUST resolve every `UdfContext` method to the same vtable slot, so `ctx.emit_batch()` from an `emit-arrow`-only UDF dispatches to the host's `emit_record_batch_ffi` (not `cluster_ip`) and emits all rows (issue #31)
+* *AND* a UDF `.so` and the host built with different feature sets MUST resolve every `UdfContext` method to the same vtable slot, so `ctx.emit_batch()` from an `emit-arrow`-only UDF dispatches to the host's `emit_record_batch_ffi` (not `cluster_ip`) and emits all rows
 
 ### Scenario: emit-arrow gates only the arrow dependency and the RecordBatch ext-trait
 
@@ -83,3 +83,12 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* no Rust `arrow` type MUST cross the `.so` boundary, because the UDF and the host link separate `arrow` copies whose `TypeId`s and trait-object vtables differ
 * *AND* the host MUST take ownership of the array, so its release callback runs exactly once
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `11 → 12`, so a `.so` built against ABI 11 fails the loader's version check with `AbiMismatch`
+
+### Scenario: emit_record_batch_ffi accepts a batch exported with the UDF's own arrow version
+
+* *GIVEN* a UDF built without the `emit-arrow` feature that links its own `arrow`, of a major version the SDK does not use
+* *WHEN* it exports a batch as an `FFI_ArrowArray` and an `FFI_ArrowSchema` from a `StructArray` built from the batch, and passes pointers to both to `ctx.emit_record_batch_ffi`
+* *THEN* the host MUST emit the batch's rows as `emit_batch` would, because `emit_record_batch_ffi` is a supported author API for UDFs whose `arrow` version is fixed by another dependency
+* *AND* the host MUST take ownership of the array and only read the schema, releasing the array exactly once whether the call succeeds or fails
+* *AND* the call MUST fail in a RETURNS context, as `emit_batch` does
+* *AND* a change to the method's signature or to this ownership contract MUST bump `EXA_UDF_ABI_VERSION`, because UDFs call it directly

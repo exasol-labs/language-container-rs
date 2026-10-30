@@ -80,8 +80,8 @@ Or create the crate manually. The crate must be a `cdylib`:
 crate-type = ["cdylib"]
 
 [dependencies]
-exasol-udf-sdk    = { version = "0.32" }
-exasol-udf-macros = { version = "0.32" }
+exasol-udf-sdk    = { version = "0.34" }
+exasol-udf-macros = { version = "0.34" }
 ```
 
 ## 2. The `#[exasol_udf]` macro
@@ -558,8 +558,8 @@ SELECT my_schema.set_filter(x) FROM nums;  -- one row per positive input value
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.32", features = ["emit-arrow"] }
-arrow = "59"
+exasol-udf-sdk = { version = "0.34", features = ["emit-arrow"] }
+arrow = "60"
 ```
 
 The `connect-back` feature implies `emit-arrow`, so you do not need to list it separately if you already enable `connect-back`.
@@ -608,6 +608,31 @@ EMITS (id BIGINT, label VARCHAR(1)) AS
 /
 ```
 
+### Using your own arrow version
+
+`emit_batch` takes the SDK's `RecordBatch`, so `emit-arrow` ties your UDF to the SDK's arrow major (arrow 60 for SDK 0.34). If another dependency fixes your arrow version, for example DataFusion, leave `emit-arrow` off and call `emit_record_batch_ffi` directly. It takes the batch through the Arrow C Data Interface, which is stable across arrow versions:
+
+```toml
+[dependencies]
+exasol-udf-sdk = { version = "0.34" }
+arrow = { version = "59", default-features = false, features = ["ffi"] }
+```
+
+```rust
+use arrow::array::{Array, StructArray};
+use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+
+let data = StructArray::from(batch).into_data();
+let (mut array, mut schema) =
+    arrow::ffi::to_ffi(&data).map_err(|e| UdfError::Type(e.to_string()))?;
+ctx.emit_record_batch_ffi(
+    (&mut array as *mut FFI_ArrowArray).cast(),
+    (&mut schema as *mut FFI_ArrowSchema).cast(),
+)?;
+```
+
+The runtime takes ownership of the array and releases it exactly once, so you drop both structs after the call as usual. It behaves like `emit_batch`: the declared `EMITS` schema dictates the column types, and the call fails in a RETURNS UDF. See `test-udfs/emit-arrow-ffi` for a complete fixture.
+
 ## 12. Connect-back
 
 Connect-back lets a UDF open a regular Exasol connection from inside `run()` and execute SQL. The connect-back session is an ordinary independent SQL login — Exasol treats it exactly like a connection from PyExasol, JDBC, or any other external client. It has its own session and its own transaction; it cannot access the invoking query's transaction.
@@ -616,7 +641,7 @@ Connect-back lets a UDF open a regular Exasol connection from inside `run()` and
 
 ```toml
 [dependencies]
-exasol-udf-sdk = { version = "0.32", features = ["connect-back"] }
+exasol-udf-sdk = { version = "0.34", features = ["connect-back"] }
 ```
 
 ### Create a CONNECTION object

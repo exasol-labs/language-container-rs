@@ -1,6 +1,5 @@
-//! Boundary-safety gate (no DB): dlopen the host-built `libemit_arrow_batch.so`
-//! and drive its `run`, which calls `ctx.emit_batch(&batch)` across the boundary
-//! through the Arrow C Data Interface into the host's emit buffer.
+//! Boundary-safety gate (no DB): dlopen the fixture cdylibs and drive their `run`,
+//! which emits a batch through the Arrow C Data Interface into the host's buffer.
 // `emit-arrow-test`, not `emit-arrow`: the fixture cdylib is an optional
 // dependency behind that feature. See `Cargo.toml`.
 #![cfg(feature = "emit-arrow-test")]
@@ -26,8 +25,18 @@ fn col(name: &str, typ: ExaType) -> ColumnInfo {
 
 #[test]
 fn emit_arrow_batch_so_round_trips_via_c_data_interface() {
-    let p = fixture_cdylib_path("emit_arrow_batch");
-    let udf = LoadedUdf::open(&p, "EMIT_ARROW_BATCH").expect("load .so");
+    assert_emits_abc("emit_arrow_batch", "EMIT_ARROW_BATCH");
+}
+
+/// Scenario: emit_record_batch_ffi accepts a batch exported with the UDF's own arrow version
+#[test]
+fn emit_record_batch_ffi_accepts_older_arrow_major() {
+    assert_emits_abc("emit_arrow_ffi", "EMIT_ARROW_FFI");
+}
+
+fn assert_emits_abc(lib: &str, entry: &str) {
+    let p = fixture_cdylib_path(lib);
+    let udf = LoadedUdf::open(&p, entry).expect("load .so");
 
     let input_cols = vec![col("dummy", ExaType::Boolean)];
     let empty = ExascriptTableData {

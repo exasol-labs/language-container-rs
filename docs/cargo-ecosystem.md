@@ -46,7 +46,7 @@ Feature flags:
 | Feature | What it adds |
 |---------|-------------|
 | _(none)_ | Core trait + types; no async, no arrow |
-| `emit-arrow` | `EmitBatch::emit_batch` for every `UdfContext`; pulls in `arrow 59` |
+| `emit-arrow` | `EmitBatch::emit_batch` for every `UdfContext`; pulls in `arrow 60`. A UDF on another arrow version leaves it off and calls `UdfContext::emit_record_batch_ffi` (see [Writing a UDF §11](writing-a-udf.md#using-your-own-arrow-version)) |
 
 ## exa-udf-runtime — internal runtime
 

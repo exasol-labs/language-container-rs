@@ -1,6 +1,8 @@
-# Scope the license/advisory scan to what the SLC ships: `it` and the benchmark crates are `publish = false` and pull heavy test-only tooling.
+# The benchmark crates are `publish = false` and never ship; keep them out of the license/advisory scan.
 [graph]
-exclude = ["it", "udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
+# Same triples as about.toml; other targets pull deps we never build (e.g. wasm32-only webpki-root-certs).
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+exclude = ["udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
 
 [advisories]
 ignore = []
