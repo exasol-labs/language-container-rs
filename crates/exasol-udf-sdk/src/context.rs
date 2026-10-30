@@ -297,10 +297,31 @@ pub trait UdfContext {
         Err(UdfError::Unimplemented("connect-back not available".into()))
     }
 
-    /// Emit a RecordBatch exported through the Arrow C Data Interface; `array`
-    /// and `schema` point at an `FFI_ArrowArray` and an `FFI_ArrowSchema`.
-    /// The host takes ownership of the array and only reads the schema.
-    /// Authors call `emit_batch` (the `EmitBatch` ext-trait), not this directly.
+    /// Emit a `RecordBatch` exported through the Arrow C Data Interface.
+    ///
+    /// `emit_batch` (the `EmitBatch` ext-trait, `emit-arrow` feature) wraps this
+    /// with the SDK's `arrow`. Call it directly when the UDF uses another `arrow`
+    /// version: the C Data Interface is ABI-stable, so any version's export works.
+    ///
+    /// - `array` and `schema` point at an `FFI_ArrowArray` and an `FFI_ArrowSchema`
+    ///   exported from a `StructArray` built from the batch.
+    /// - The host takes ownership of the array and only reads the schema. The
+    ///   array is released exactly once whether the call succeeds or fails, so the
+    ///   caller drops both structs after the call as usual.
+    /// - The call is valid only in an EMITS context; a RETURNS UDF gets an error.
+    ///
+    /// ```ignore
+    /// let data = StructArray::from(batch).into_data();
+    /// let (mut array, mut schema) =
+    ///     arrow::ffi::to_ffi(&data).map_err(|e| UdfError::Type(e.to_string()))?;
+    /// ctx.emit_record_batch_ffi(
+    ///     (&mut array as *mut FFI_ArrowArray).cast(),
+    ///     (&mut schema as *mut FFI_ArrowSchema).cast(),
+    /// )?;
+    /// ```
+    ///
+    /// The signature and the ownership contract are stable: a change to either
+    /// bumps `EXA_UDF_ABI_VERSION`.
     fn emit_record_batch_ffi(
         &mut self,
         _array: *mut core::ffi::c_void,

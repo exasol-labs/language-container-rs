@@ -26,6 +26,7 @@ const CB_CRUNCH_LIB: &str = "libconnect_back_crunch.so";
 const RESOLV_LIB: &str = "libresolv_udf.so";
 const EMIT_BULK_LIB: &str = "libemit_bulk.so";
 const EMIT_ARROW_LIB: &str = "libemit_arrow_batch.so";
+const EMIT_ARROW_FFI_LIB: &str = "libemit_arrow_ffi.so";
 const NUMERIC_TEMPORAL_LIB: &str = "libnumeric_temporal_emit.so";
 const NUMERIC_TEMPORAL_INGEST_LIB: &str = "libnumeric_temporal_ingest.so";
 const CB_STREAM_LIB: &str = "libconnect_back_stream.so";
@@ -113,6 +114,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
         .await?;
     let emit_arrow_path = harness
         .upload_udf(EMIT_ARROW_LIB, read_udf_artifact(EMIT_ARROW_LIB)?)
+        .await?;
+    let emit_arrow_ffi_path = harness
+        .upload_udf(EMIT_ARROW_FFI_LIB, read_udf_artifact(EMIT_ARROW_FFI_LIB)?)
         .await?;
     let numeric_temporal_path = harness
         .upload_udf(
@@ -213,6 +217,9 @@ async fn db_roundtrip_all_scenarios() -> Result<()> {
 
     emit_arrow_batch_roundtrips(&mut conn, &emit_arrow_path).await?;
     eprintln!("[it] scenario emit_arrow_batch ok");
+
+    emit_arrow_ffi_with_own_arrow(&mut conn, &emit_arrow_ffi_path).await?;
+    eprintln!("[it] scenario emit_arrow_ffi ok");
 
     emit_types_arrive_intact(&mut conn, &emit_arrow_path).await?;
     eprintln!("[it] scenario emit_types_arrive_intact ok");
@@ -1792,8 +1799,18 @@ async fn emit_bulk_flushes_multiple_batches(conn: &mut Connection, lib_path: &st
 /// and calls `ctx.emit_batch(&batch)` once. Asserts count == 3 and that the
 /// exact (id, label) pairs (1:a, 2:b, 3:c) arrive in order.
 async fn emit_arrow_batch_roundtrips(conn: &mut Connection, lib_path: &str) -> Result<()> {
+    assert_emits_abc(conn, "emit_arrow_batch", lib_path).await
+}
+
+/// Scenario: emit_record_batch_ffi accepts a batch exported with the UDF's own arrow version
+async fn emit_arrow_ffi_with_own_arrow(conn: &mut Connection, lib_path: &str) -> Result<()> {
+    assert_emits_abc(conn, "emit_arrow_ffi", lib_path).await
+}
+
+/// Registers `script` as a SET UDF and checks it emits (1:a, 2:b, 3:c) in order.
+async fn assert_emits_abc(conn: &mut Connection, script: &str, lib_path: &str) -> Result<()> {
     conn.execute(&format!(
-        "CREATE OR REPLACE RUST SET SCRIPT it_rust.emit_arrow_batch(dummy BOOLEAN) \
+        "CREATE OR REPLACE RUST SET SCRIPT it_rust.{script}(dummy BOOLEAN) \
          EMITS (id BIGINT, label VARCHAR(1)) AS\n\
          %udf_object {lib_path};\n/"
     ))
@@ -1801,23 +1818,25 @@ async fn emit_arrow_batch_roundtrips(conn: &mut Connection, lib_path: &str) -> R
 
     let count = query_single_string(
         conn,
-        "SELECT TO_CHAR(COUNT(*)) FROM (SELECT emit_arrow_batch(TRUE) FROM DUAL)",
+        &format!("SELECT TO_CHAR(COUNT(*)) FROM (SELECT {script}(TRUE) FROM DUAL)"),
     )
     .await?
-    .ok_or_else(|| anyhow!("emit_arrow_batch count query returned NULL"))?;
+    .ok_or_else(|| anyhow!("{script} count query returned NULL"))?;
     if count != "3" {
-        bail!("emit_arrow_batch: expected 3 rows, got {count}");
+        bail!("{script}: expected 3 rows, got {count}");
     }
 
     let aggregated = query_single_string(
         conn,
-        "SELECT GROUP_CONCAT(TO_CHAR(id) || ':' || label ORDER BY id) \
-         FROM (SELECT emit_arrow_batch(TRUE) FROM DUAL)",
+        &format!(
+            "SELECT GROUP_CONCAT(TO_CHAR(id) || ':' || label ORDER BY id) \
+             FROM (SELECT {script}(TRUE) FROM DUAL)"
+        ),
     )
     .await?
-    .ok_or_else(|| anyhow!("emit_arrow_batch aggregation query returned NULL"))?;
+    .ok_or_else(|| anyhow!("{script} aggregation query returned NULL"))?;
     if aggregated != "1:a,2:b,3:c" {
-        bail!("emit_arrow_batch: expected '1:a,2:b,3:c', got {aggregated:?}");
+        bail!("{script}: expected '1:a,2:b,3:c', got {aggregated:?}");
     }
     Ok(())
 }

@@ -83,3 +83,12 @@ The `UdfContext` trait-object vtable is ordered by method declaration. Every `Ud
 * *AND* no Rust `arrow` type MUST cross the `.so` boundary, because the UDF and the host link separate `arrow` copies whose `TypeId`s and trait-object vtables differ
 * *AND* the host MUST take ownership of the array, so its release callback runs exactly once
 * *AND* `EXA_UDF_ABI_VERSION` MUST be bumped `11 → 12`, so a `.so` built against ABI 11 fails the loader's version check with `AbiMismatch`
+
+### Scenario: emit_record_batch_ffi accepts a batch exported with the UDF's own arrow version
+
+* *GIVEN* a UDF built without the `emit-arrow` feature that links its own `arrow`, of a major version the SDK does not use
+* *WHEN* it exports a batch as an `FFI_ArrowArray` and an `FFI_ArrowSchema` from a `StructArray` built from the batch, and passes pointers to both to `ctx.emit_record_batch_ffi`
+* *THEN* the host MUST emit the batch's rows as `emit_batch` would, because `emit_record_batch_ffi` is a supported author API for UDFs whose `arrow` version is fixed by another dependency (issue #137)
+* *AND* the host MUST take ownership of the array and only read the schema, releasing the array exactly once whether the call succeeds or fails
+* *AND* the call MUST fail in a RETURNS context, as `emit_batch` does
+* *AND* a change to the method's signature or to this ownership contract MUST bump `EXA_UDF_ABI_VERSION`, because UDFs call it directly

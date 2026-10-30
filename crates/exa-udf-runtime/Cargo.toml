@@ -29,16 +29,17 @@ itoa = { workspace = true }
 # (dev-dependency features unify into the crate under test), so a featureless
 # `cargo test` would no longer cover the emit-arrow-off configuration.
 emit-arrow-batch = { path = "../../test-udfs/emit-arrow-batch", optional = true }
+emit-arrow-ffi = { path = "../../test-udfs/emit-arrow-ffi", optional = true }
 # Optional, not a dev-dependency: it needs `emit-arrow`, which would unify into every test build.
 bench-udfs = { path = "../../benches/bench-udfs", optional = true }
 
 [features]
 emit-arrow = ["exasol-udf-sdk/emit-arrow", "dep:arrow"]
 connect-back = ["emit-arrow", "dep:exarrow-rs", "dep:rustls", "dep:tokio"]
-# Test-only, and deliberately NOT implied by `connect-back`: the fixture enters
+# Test-only, and deliberately NOT implied by `connect-back`: the fixtures enter
 # neither the production graph nor the default test graph. Runs
 # `tests/emit_arrow_dlopen.rs`, which is otherwise compiled out.
-emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch"]
+emit-arrow-test = ["emit-arrow", "dep:emit-arrow-batch", "dep:emit-arrow-ffi"]
 bench = ["emit-arrow", "dep:bench-udfs"]
 
 [dev-dependencies]
