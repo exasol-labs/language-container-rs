@@ -5,7 +5,12 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 exclude = ["udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
 
 [advisories]
-ignore = []
+ignore = [
+    # astral-tokio-tar is unmaintained since 2026-11-03 and has no safe upgrade. Only the
+    # unpublished `it` crate pulls it in, through testcontainers (0.28.0, the newest release).
+    # Not shipped in the SLC. Remove this entry when testcontainers drops the crate.
+    { id = "RUSTSEC-2026-0440", reason = "Unmaintained, test-only via testcontainers in the unpublished `it` crate; no safe upgrade exists" },
+]
 
 [licenses]
 allow = [

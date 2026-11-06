@@ -124,7 +124,9 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    # Pinned: the exa-mock-db lib tests SIGSEGV under llvm-cov on the
+    # ubuntu-26.04 image that ubuntu-latest now resolves to, and pass on 24.04.
+    runs-on: ubuntu-24.04
     needs: [build]
     steps:
       - uses: actions/checkout@v4
