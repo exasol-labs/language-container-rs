@@ -1,6 +1,8 @@
 <div align="center">
 
-![language-container-rs logo](assets/logo.svg)
+<img src="assets/logo.svg" alt="language-container-rs logo" width="160">
+
+# language-container-rs
 
 ![Rust 1.98.1](https://img.shields.io/badge/rust-1.98.1-orange.svg)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=exasol-labs_language-container-rs&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=exasol-labs_language-container-rs)
