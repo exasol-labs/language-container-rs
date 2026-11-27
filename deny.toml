@@ -5,7 +5,10 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 exclude = ["udf-bench", "bench-udfs", "bench-schema", "exa-mock-db"]
 
 [advisories]
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no fixed version; required by arrow and exarrow-rs" },
+    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained, no fixed version; only testcontainers in the integration-test crate uses it, never shipped" },
+]
 
 [licenses]
 allow = [
